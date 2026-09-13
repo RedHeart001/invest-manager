@@ -39,6 +39,8 @@ def _today_iso() -> str:
 # L3/O10：并发采集上限——看门狗超时后泄漏线程无法强杀（会活到上游恢复），
 # 用信号量限制同时在场的采集线程数，防止上游持续挂起时线程无限累积
 COLLECT_MAX_CONCURRENCY = int(os.environ.get("RESEARCH_MAX_COLLECT_THREADS", "4"))
+# 名额等待上限：信号量耗尽（上游持续挂起占满名额）时不得永久阻塞，超时即降级
+COLLECT_ACQUIRE_TIMEOUT = float(os.environ.get("RESEARCH_COLLECT_ACQUIRE_TIMEOUT", "60"))
 _collect_slots = threading.Semaphore(COLLECT_MAX_CONCURRENCY)
 _collect_live = 0  # 当前存活（含已放弃等待）的采集线程数，仅观测用
 _collect_inflight = 0  # 已派发未释放的名额
@@ -60,7 +62,7 @@ def _run_with_timeout(fn, timeout_s: float):
     返回 (result, None) 或 (None, 超时/错误说明)。超时后原线程仍在后台
     （占用一个信号量名额直到自然结束），但主流程不再等待。
     """
-    global _collect_live
+    global _collect_live, _collect_inflight
 
     box: dict = {"result": None}
 
@@ -75,7 +77,9 @@ def _run_with_timeout(fn, timeout_s: float):
             _collect_inflight = max(0, _collect_inflight - 1)
             _collect_live = max(0, _collect_live - 1)
 
-    _collect_slots.acquire()
+    # 名额等待有上限（修复：此前无限等待，名额被上游挂起的线程占满即永久阻塞）
+    if not _collect_slots.acquire(timeout=COLLECT_ACQUIRE_TIMEOUT):
+        return None, f"采集名额等待超时（>{int(COLLECT_ACQUIRE_TIMEOUT)}s，上游持续挂起），本次采集降级"
     _collect_live += 1
     _collect_inflight += 1
     t = threading.Thread(target=_target, daemon=True, name="research-collect")

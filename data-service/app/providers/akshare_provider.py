@@ -6,6 +6,7 @@
 接口应低频调用。
 """
 
+import logging
 import time
 from datetime import datetime
 
@@ -20,6 +21,8 @@ from .base import (
     register_list,
 )
 from ..utils.limiter import get_limiter
+
+logger = logging.getLogger("akshare")
 
 # 东财行情 CDN 节点：按序降级尝试
 EM_HOSTS = [
@@ -791,32 +794,65 @@ class AkshareProvider(BaseProvider):
         return products
 
     def _list_convertible_bonds(self) -> list[dict]:
-        """可转债列表（MVP 债券范围，见 PLAN.md M3）。"""
+        """可转债列表（MVP 债券范围，见 PLAN.md M3）。
+
+        备源（2026-09-13）：东财限流时改用**新浪 cov_spot 快照**（约 320 只在交易标的）。
+        覆盖度低于东财全量（1052 只，含未上市/待上市），属降级可用——避免限流期间
+        转债列表整体为空、同步任务失败。
+        """
         import akshare as ak
 
+        products: list[dict] = []
+
+        def _build(rows) -> list[dict]:
+            out: list[dict] = []
+            for item in rows:
+                code = item.get("code") or ""
+                name = item.get("name") or ""
+                if not code or not name:
+                    continue
+                full, initials = _pinyin_pair(name)
+                out.append(
+                    {
+                        "type": "bond",
+                        "code": code,
+                        "name": name,
+                        "pinyin": full,
+                        "pinyinInitials": initials,
+                        "exchange": _exchange(code),
+                        "tags": ["可转债"],
+                    }
+                )
+            return out
+
+        # 主源：东财全量
         try:
             df = _em_ak_request(ak.bond_zh_cov, 90.0, "ak.bond_zh_cov")
-        except Exception as e:  # noqa: BLE001
-            raise ProviderError(f"akshare convertible bond list failed: {e}") from e
-
-        products = []
-        for _, r in df.iterrows():
-            code = str(r.get("债券代码", "")).strip()
-            name = str(r.get("债券简称", "")).strip()
-            if not code or not name:
-                continue
-            full, initials = _pinyin_pair(name)
-            products.append(
-                {
-                    "type": "bond",
-                    "code": code,
-                    "name": name,
-                    "pinyin": full,
-                    "pinyinInitials": initials,
-                    "exchange": _exchange(code),
-                    "tags": ["可转债"],
-                }
+            products = _build(
+                {"code": str(r.get("债券代码", "")).strip(), "name": str(r.get("债券简称", "")).strip()}
+                for _, r in df.iterrows()
             )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("bond list primary (em) failed: %s", e)
+
+        if products:
+            return products
+
+        # 备源：新浪转债实时快照（在交易标的）
+        try:
+            df2 = _ak_request(ak.bond_zh_hs_cov_spot, 45.0, "ak.bond_zh_hs_cov_spot")
+        except Exception as e:  # noqa: BLE001
+            raise ProviderError(f"convertible bond list unavailable: {e}") from e
+        products = _build(
+            {
+                "code": str(r.get("code") or "").strip()
+                or str(r.get("symbol") or "").strip()[2:],
+                "name": str(r.get("name", "")).strip(),
+            }
+            for _, r in df2.iterrows()
+        )
+        if not products:
+            raise ProviderError("convertible bond list empty from all sources")
         return products
 
 
