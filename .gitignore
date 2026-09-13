@@ -1,0 +1,27 @@
+# dependencies
+node_modules/
+.venv/
+.venv-spike/
+__pycache__/
+*.pyc
+*.pyo
+
+# build caches
+.next/
+out/
+*.tsbuildinfo
+
+# env & secrets
+.env
+.env.local
+
+# database
+*.db
+*.db-journal
+
+# misc
+.DS_Store
+*.log
+.next-stale
+backups/
+docker-compose.override.yml

@@ -1,0 +1,24 @@
+{
+  "note": "第三方 MCP server 白名单（PLAN M7 ②）。只有本文件声明的 server 会被连接，不做自动安装。transport 支持 stdio 与 http；sse 为旧协议不支持。",
+  "servers": [
+    {
+      "name": "local-util",
+      "transport": "stdio",
+      "command": "node",
+      "args": ["scripts/mcp-local-util.mjs"],
+      "enabled": true,
+      "timeoutMs": 10000,
+      "note": "本地小工具（当前北京时间 + A股交易时段判断），不依赖外网，用于验证 stdio 链路与提供时点标注能力"
+    },
+    {
+      "name": "tavily",
+      "transport": "stdio",
+      "command": "npx",
+      "args": ["-y", "tavily-mcp@latest"],
+      "env": { "TAVILY_API_KEY": "${TAVILY_API_KEY}" },
+      "enabled": false,
+      "timeoutMs": 30000,
+      "note": "第三方 Tavily 搜索 MCP。启用前需：① 安装 Node/npx 并保证 registry 可达；② 在环境下提供 TAVILY_API_KEY；③ 将 enabled 改为 true。连接失败会降级为“该源工具不可用”，不影响对话。"
+    }
+  ]
+}

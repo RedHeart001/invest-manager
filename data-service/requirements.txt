@@ -1,0 +1,17 @@
+fastapi>=0.115,<0.126
+uvicorn[standard]>=0.30
+akshare>=1.16
+pypinyin>=0.53
+apscheduler>=3.10
+# providers / hotspot / research 直接 import（此前靠 akshare 传递依赖，P6 重建 venv 时暴露）
+requests>=2.32,<3
+pandas>=1.3
+# P6（M7 ③）：把统一行情能力暴露为 MCP server
+# 注意：fastmcp 必须锁 <3 —— 4.x 依赖 starlette>=1.0.1（移除 on_startup），
+#       与 FastAPI（要求 starlette<0.51）不兼容，会直接导致 data-service 无法启动。
+fastmcp>=2.0,<3
+starlette>=0.40,<0.51
+# search_products 工具回调 web BFF 用（fastmcp 4.x 才会拉 httpx2，2.x 用 httpx）
+httpx>=0.27,<1
+# M6/P5：美股 provider（openbb_provider.py 的免费档后端）；此前漏写，全新环境会缺
+yfinance>=0.2

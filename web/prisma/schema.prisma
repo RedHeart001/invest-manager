@@ -1,0 +1,126 @@
+// 投资理财助手数据库 Schema（对应 PLAN.md「数据库 Schema 要点」）
+// 注意：SQLite 无 JSON 类型，JSON 字段以 String 存储并在应用层解析
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// 统一产品主表：搜索与详情页的基础
+model Product {
+  id             String   @id @default(cuid())
+  type           String // stock | fund | bond | crypto | hk | us
+  code           String
+  name           String
+  pinyin         String?
+  pinyinInitials String?
+  exchange       String?
+  tags           String? // JSON array
+  sector         String?
+  searchText     String? // 名称+中文二元组+拼音+首字母+代码+标签（FTS5 索引源）
+  lastPrice      Float?  // 行情快照：同步/刷新任务写入（R14 分类浏览涨幅排序用）
+  lastChangePct  Float?  // 行情快照：同上；展示仍以实时富集为准
+  updatedAt      DateTime @updatedAt
+
+  @@unique([type, code])
+  @@index([type])
+  @@index([name])
+}
+
+// 热点摘要（M1）
+model HotspotDigest {
+  id           String   @id @default(cuid())
+  date         DateTime
+  title        String
+  summary      String
+  boardTags    String? // JSON array：板块/概念标签
+  sourceUrls   String? // JSON array
+  relatedCodes String? // JSON array of {type, code}
+  newsSource   String? // P3：新闻源（tavily/cls/eastmoney-news）
+  engine       String? // P3：结构化引擎（llm/keyword/none）
+  degraded     Boolean? // P3：是否降级产出（界面显式标注）
+  note         String? // P3：降级/缺口说明
+  createdAt    DateTime @default(now())
+
+  @@index([date])
+}
+
+// 深度研报（M5 TradingAgents 产出）
+model ResearchReport {
+  id         String   @id @default(cuid())
+  type       String
+  code       String
+  date       DateTime
+  rating     String?
+  summary    String?
+  fullReport String? // JSON
+  status     String   @default("running") // running | done | failed
+  error      String? // P5：失败原因（status=failed 时）
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([code, date])
+}
+
+// 统一 Agent 对话（M4）
+model ChatSession {
+  id        String        @id @default(cuid())
+  title     String?
+  createdAt DateTime      @default(now())
+  messages  ChatMessage[]
+}
+
+model ChatMessage {
+  id        String      @id @default(cuid())
+  sessionId String
+  role      String // user | assistant | tool
+  content   String
+  toolCalls String? // JSON：assistant 的 tool_calls（模型请求的工具调用）
+  toolCallId String? // tool 消息对应的 tool_call_id（function calling 配对）
+  name      String? // tool 消息的工具名
+  session   ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId])
+}
+
+// 自选产品（搜索排序加权）
+model Watchlist {
+  id        String   @id @default(cuid())
+  type      String
+  code      String
+  name      String
+  createdAt DateTime @default(now())
+
+  @@unique([type, code])
+}
+
+// 搜索点击日志（点击率进入排序分）
+model SearchClickLog {
+  id    String   @id @default(cuid())
+  query String
+  type  String
+  code  String
+  ts    DateTime @default(now())
+
+  @@index([query])
+}
+
+// 日 K 增量缓存（BFF 维护，miss 时回源 data-service）
+model KlineDaily {
+  id     String   @id @default(cuid())
+  type   String
+  code   String
+  date   DateTime
+  open   Float
+  high   Float
+  low    Float
+  close  Float
+  volume Float?
+  source String
+
+  @@unique([type, code, date])
+}

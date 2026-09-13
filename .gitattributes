@@ -1,0 +1,16 @@
+# 统一按 LF 检出，避免 Windows 换行进入 Linux 容器导致脚本 exec 失败（P7）
+* text=auto eol=lf
+
+# 容器入口脚本必须是 LF
+*.sh text eol=lf
+
+# 二进制文件不参与换行转换
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.zip binary
+*.db binary
+*.woff binary
+*.woff2 binary

@@ -1,0 +1,35 @@
+# 构建上下文排除清单（红线：secrets 与本地数据绝不能进镜像）
+.env
+.env.local
+.env.*.local
+
+# 依赖与构建产物（镜像内重新安装/构建）
+node_modules
+.next
+.next-stale
+
+# 本地数据库（数据卷持久化，不打进镜像）
+prisma/dev.db
+prisma/dev.db-journal
+prisma/*.db
+prisma/*.db-wal
+prisma/*.db-shm
+
+# 开发/测试产物
+*.tsbuildinfo
+coverage
+vitest.config.ts
+scripts/test-*.mjs
+scripts/_tmp*
+*.log
+
+# 容器化文件自身（entrypoint 需要被 COPY，不能排除）
+Dockerfile
+.dockerignore
+
+# 版本控制与编辑器
+.git
+.gitignore
+.gitattributes
+.vscode
+.idea

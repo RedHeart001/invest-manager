@@ -1,0 +1,46 @@
+# 投资理财助手 data-service（FastAPI + AkShare，无状态）生产镜像
+# 构建：docker compose build data-service
+# 构建参数对策（2026-09-12 骨架验证沉淀）：
+#   - python:3.11-slim，无状态（不写盘、不建库）
+#   - **docker.io 直连在当前网络被拦截（auth 502）→ 默认走国内镜像前缀**，
+#     如需换源：docker build --build-arg PY_IMAGE=<your-mirror>/library/python:3.12-slim
+#   - pip 走阿里源 + --timeout 120 --retries 10（大包默认 15s 超时会断）
+#   - 容器内必须绑 0.0.0.0（宿主侧才能通过 compose 网络访问）
+#   - **Python 版本必须与锁文件一致**：本地开发 venv 为 3.12，故镜像用 3.12
+#     （实测教训：3.11 镜像装 numpy==2.5.3 失败——该版本要求 Python ≥3.12）
+#   - 依赖锁版本（requirements-lock.txt，**在容器内生成**），不含 tradingagents/OpenBB SDK
+
+ARG PY_IMAGE=docker.m.daocloud.io/library/python:3.12-slim
+FROM ${PY_IMAGE}
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    TZ=Asia/Shanghai \
+    PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/ \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# tzdata 供 APScheduler 用 Asia/Shanghai 计算盘前/盘后时刻；ca-certificates 供出站 HTTPS
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends tzdata ca-certificates \
+ && ln -snf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \
+ && echo "Asia/Shanghai" > /etc/timezone \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# 依赖层：使用锁文件（可复现构建）；pip 缓存挂载让重复构建走本地 wheel 缓存
+COPY requirements.txt requirements-lock.txt ./
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --timeout 120 --retries 10 -r requirements-lock.txt
+
+COPY app ./app
+# 备份脚本（P7：sqlite3 在线备份，经 compose exec 调用）
+COPY scripts ./scripts
+
+EXPOSE 8000
+
+HEALTHCHECK --interval=15s --timeout=10s --start-period=40s --retries=5 \
+  CMD python -c "import sys,urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health',timeout=5).status==200 else 1)"
+
+# 0.0.0.0：容器内监听（宿主机不直接发布端口，仅经 compose 网络供 web 调用）
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
