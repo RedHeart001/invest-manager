@@ -51,10 +51,14 @@ check(
 )
 
 r = get("/products", type="crypto")
+# crypto 已有 CoinGecko 列表源（crypto_provider register_list）。可达时返回 200 且有数据，
+# 不可达（R12 代理不可用）时返回 502 并显式降级——两者皆正确，不能写死 502。
+_body = (r.json() or {}) if r.status_code == 200 else {}
 check(
-    "products?type=crypto 数据源不可达时返回 502（降级不崩溃）",
-    r.status_code == 502,
-    f"status={r.status_code} body={r.text[:120]}",
+    "products?type=crypto 可用或显式降级（200+数据 或 502）",
+    (r.status_code == 200 and len(_body.get("products") or []) > 0)
+    or (r.status_code == 502),
+    f"status={r.status_code} n={len(_body.get('products') or [])} body={r.text[:120]}",
 )
 
 r = get("/products", type="option")
@@ -85,12 +89,15 @@ check(
     json.dumps(q, ensure_ascii=False)[:180],
 )
 
-r = get("/quotes", type="bond", codes="123284")
-q = ((r.json() or {}).get("quotes") or {}).get("123284") or {}
+# 转债行情：标的改为活跃代码段候选池（未上市/已退市转债无行情属正常，
+# 2026-09-13 code review：原写死 123284 一旦退市即误报）
+r = get("/quotes", type="bond", codes="123284,123283,123282,111000,113050")
+_qs = (r.json() or {}).get("quotes") or {}
+_hit = next((k for k, v in _qs.items() if v.get("price")), "")
 check(
-    "可转债实时行情可用",
-    bool(q.get("price")),
-    json.dumps(q, ensure_ascii=False)[:180],
+    "可转债实时行情可用（活跃候选任一命中）",
+    bool(_hit),
+    f"quotes={list(_qs.keys())} body={r.text[:150]}",
 )
 
 # ---------- 3. 单只查询（详情页用） ----------

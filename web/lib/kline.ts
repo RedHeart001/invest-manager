@@ -203,9 +203,16 @@ export async function getKlineRange(
     // 整段回源
     try {
       const ds = await fetchDs(type, code, start, end, interval);
-      fetched = await upsertCandles(type, code, ds.candles, ds.source);
-      fetchedSource = ds.source;
-      lastChecked.set(cacheKey, Date.now());
+      if ((ds.candles?.length ?? 0) === 0) {
+        // 2026-09-13 code review：上游"成功但空响应"也必须进失败窗口，
+        // 否则每次请求都整段回源（限流期被持续捶打）；并给出明确降级说明。
+        lastFailed.set(cacheKey, Date.now());
+        notes.push(`上游返回空数据${ds.source ? `（源：${ds.source}）` : ""}，窗口期内暂不重试`);
+      } else {
+        fetched = await upsertCandles(type, code, ds.candles, ds.source);
+        fetchedSource = ds.source;
+        lastChecked.set(cacheKey, Date.now());
+      }
     } catch (e) {
       notes.push(`回源失败：${e instanceof Error ? e.message : "unknown"}`);
       lastFailed.set(cacheKey, Date.now());

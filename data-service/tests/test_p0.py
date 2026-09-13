@@ -49,7 +49,9 @@ for code, expected_name in [("600519", "贵州茅台"), ("000001", "平安银行
             d["low"] is not None and d["low"] <= min(d["open"], d["price"])
             and d["high"] >= max(d["open"], d["price"])
             and abs(d["price"] - d["prevClose"]) / d["prevClose"] < 0.11
-            and d["source"] == "akshare"
+            # 多源链（R15）：主源限流时降级到腾讯/新浪属正确行为，不能把 source 写死为 akshare
+            and d["source"] in {"akshare", "tencent", "sina", "sina-bond"}
+            and (d["source"] == "akshare" or d.get("note"))  # 降级时必须有显式标注
             and d["timestamp"] is not None
         )
     check(f"quote {code}（{expected_name}）数据合理", ok, json.dumps(d, ensure_ascii=False)[:200])

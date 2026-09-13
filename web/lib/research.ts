@@ -87,7 +87,14 @@ export type StartResult =
 // **当前打开的会话**（跨会话串消息）。改为：启动时登记发起会话，完成时
 // ① 把提示落库到该会话（切走再回来也能看到，兑现"同一会话推送"承诺）
 // ② 广播携带 sessionIds，前端按当前会话过滤。
-const researchWatchers = new Map<string, Set<string>>();
+//
+// C17（2026-09-13 第二轮 code review）：注册表必须挂 globalThis——
+// dev HMR 重建模块作用域会重置模块级 Map，导致 start 时登记的 watcher 丢失、
+// ingest 时取不到会话（定向推送静默失效）。
+const WATCHERS_KEY = Symbol.for("invest-manager.research.watchers");
+const researchWatchers: Map<string, Set<string>> = ((
+  globalThis as unknown as Record<symbol, Map<string, Set<string>> | undefined>
+)[WATCHERS_KEY] ??= new Map());
 
 function watchResearch(type: string, code: string, sessionId?: string): void {
   if (!sessionId) return;
@@ -174,11 +181,18 @@ export type IngestPayload = {
 export async function ingestResearch(payload: IngestPayload): Promise<ReportRow> {
   const dateIso = payload.date && /^\d{4}-\d{2}-\d{2}$/.test(payload.date) ? payload.date : todayIso();
   const report = payload.report;
+  // JSON 截断保护（2026-09-13 code review）：盲目 slice 会把 JSON 切成非法文本，
+  // parse 失败后 UI 只能回落到"无研报"。改为超限时丢弃 fullReport（保留 summary/rating）。
+  let fullReportJson: string | null = null;
+  if (report) {
+    const json = JSON.stringify(report);
+    fullReportJson = json.length <= 200_000 ? json : null;
+  }
   const data = {
     status: report?.ok ? "done" : "failed",
     rating: report?.ok ? (report.rating ?? "中性") : null,
     summary: report?.ok ? (report.summary ?? "").slice(0, 500) : null,
-    fullReport: report ? JSON.stringify(report).slice(0, 200_000) : null,
+    fullReport: fullReportJson,
     error: report?.ok ? null : (payload.error ?? report?.error ?? "研究失败").slice(0, 300),
   };
   const row = await prisma.researchReport.upsert({
@@ -214,6 +228,25 @@ export async function ingestResearch(payload: IngestPayload): Promise<ReportRow>
       code: payload.code,
       rating: data.rating,
       summary: data.summary,
+      sessionIds,
+    });
+  } else {
+    // 失败路径同样消费 watcher（2026-09-13 code review）：此前只在 done 时清理，
+    // 失败/长期未完成的任务会让 Map 无界增长，且发起会话收不到任何反馈。
+    const sessionIds = takeWatchers(payload.type, payload.code);
+    const failText = `⚠️ 深度研究未能完成（${payload.code}）：${data.error ?? "未知原因"}\n\n可稍后在详情页「深度分析」区重试。`;
+    for (const sid of sessionIds) {
+      try {
+        await appendMessage(sid, "assistant", failText);
+      } catch (e) {
+        console.error("[research] 失败推送落库失败:", e instanceof Error ? e.message : e);
+      }
+    }
+    broadcast("research", {
+      type: payload.type,
+      code: payload.code,
+      failed: true,
+      error: data.error,
       sessionIds,
     });
   }

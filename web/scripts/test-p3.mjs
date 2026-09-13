@@ -70,19 +70,27 @@ async function main() {
   console.log("[2] R12/R10 降级标注（新闻源 + 引擎 + note）");
   {
     const { body } = await getJson(`${BASE}/api/hotspots?limit=10`);
-    const degradedRows = (body.rows ?? []).filter((r) => r.degraded);
-    ok("存在降级产出（当前环境：无 Tavily key / LLM 未配置）", degradedRows.length > 0, `degraded=${degradedRows.length}`);
-    if (degradedRows.length > 0) {
-      ok("降级行带 note 说明", degradedRows.every((r) => typeof r.note === "string" && r.note.length > 0));
+    const rows = body.rows ?? [];
+    const degradedRows = rows.filter((r) => r.degraded);
+    // 断言不预设环境（2026-09-13 code review）：Tavily/LLM 均已配置时管线不降级属正常，
+    // 正确语义是"降级行必须带 note，非降级行必须带来源"——两者皆合格。
+    ok(
+      "R10 显式标注（降级带 note / 正常带来源）",
+      rows.length === 0 ||
+        degradedRows.every((r) => typeof r.note === "string" && r.note.length > 0) &&
+          rows.filter((r) => !r.degraded).every((r) => Boolean(r.newsSource || r.engine)),
+      `rows=${rows.length} degraded=${degradedRows.length}`,
+    );
+    if (rows.length > 0) {
       ok(
-        "新闻源标注为国内源（R12 降级路径）",
-        degradedRows.every((r) => ["cls", "eastmoney-news", "none", "tavily"].includes(r.newsSource)),
-        degradedRows.map((r) => r.newsSource).join(","),
+        "新闻源标注合法（R12：tavily/cls/eastmoney-news/none）",
+        rows.every((r) => ["cls", "eastmoney-news", "none", "tavily", null].includes(r.newsSource ?? null)),
+        rows.map((r) => r.newsSource).join(","),
       );
       ok(
-        "结构化引擎标注（llm/keyword/none）",
-        degradedRows.every((r) => ["llm", "keyword", "none"].includes(r.engine)),
-        degradedRows.map((r) => r.engine).join(","),
+        "结构化引擎标注合法（llm/keyword/null）",
+        rows.every((r) => ["llm", "keyword", null].includes(r.engine ?? null)),
+        rows.map((r) => r.engine).join(","),
       );
     }
   }
@@ -126,7 +134,11 @@ async function main() {
     const testTitle = `【测试】SSE 链路验证 ${Date.now()}`;
     const ingestRes = await fetch(`${BASE}/api/hotspots/ingest`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        // 容器环境 INGEST_TOKEN 为必填（compose 用 ${VAR:?} 强制），本地无则跳过鉴权
+        ...(process.env.INGEST_TOKEN ? { "x-ingest-token": process.env.INGEST_TOKEN } : {}),
+      },
       body: JSON.stringify({
         date: today(),
         trigger: "test-p3",

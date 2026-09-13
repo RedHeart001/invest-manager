@@ -14,6 +14,7 @@ import logging
 
 import requests
 
+from ..utils.num import to_float
 from .base import (
     BaseProvider,
     ProviderError,
@@ -49,12 +50,19 @@ class OpenBBProvider(BaseProvider):
         t = yf.Ticker(code)
         try:
             fi = t.fast_info
-            price = float(fi["last_price"])
-            prev = float(fi["previous_close"])
-            open_ = float(fi["open"]) if fi.get("open") is not None else None
-            day_high = float(fi["day_high"]) if fi.get("day_high") is not None else None
-            day_low = float(fi["day_low"]) if fi.get("day_low") is not None else None
+            # 2026-09-13 code review：yfinance 对退市/无行情标的常返回 nan，
+            # 直接 float() 会产出非法 JSON（Starlette allow_nan=False → 500）。
+            # 统一走 to_float，非有限值一律 None（C4：缺价一律 null）。
+            price = to_float(fi["last_price"])
+            prev = to_float(fi["previous_close"])
+            open_ = to_float(fi.get("open"))
+            day_high = to_float(fi.get("day_high"))
+            day_low = to_float(fi.get("day_low"))
             currency = str(fi.get("currency") or "USD")
+            if price is None:
+                raise ProviderError(f"yfinance returned no price for {code}（可能已退市/无行情）")
+        except ProviderError:
+            raise
         except Exception as e:  # noqa: BLE001 网络/代码无效
             raise ProviderError(f"yfinance quote failed: {e}") from e
         change = price - prev if prev else None
@@ -63,10 +71,10 @@ class OpenBBProvider(BaseProvider):
             "code": code,
             "name": code,  # yfinance fast_info 无名称；详情页用 Product 表名称
             "price": round(price, 4),
-            "prevClose": round(prev, 4) if prev else None,
-            "open": round(open_, 4) if open_ else None,
-            "high": round(day_high, 4) if day_high else None,
-            "low": round(day_low, 4) if day_low else None,
+            "prevClose": round(prev, 4) if prev is not None else None,
+            "open": round(open_, 4) if open_ is not None else None,
+            "high": round(day_high, 4) if day_high is not None else None,
+            "low": round(day_low, 4) if day_low is not None else None,
             "change": round(change, 4) if change is not None else None,
             "changePct": round(change / prev * 100, 2) if change is not None and prev else None,
             "currency": currency,
@@ -115,14 +123,23 @@ class OpenBBProvider(BaseProvider):
         for idx, row in df.iterrows():
             d = str(idx)[:10]
             try:
+                o, h, low_, c = (
+                    to_float(row["Open"]),
+                    to_float(row["High"]),
+                    to_float(row["Low"]),
+                    to_float(row["Close"]),
+                )
+                if None in (o, h, low_, c):
+                    continue  # 非有限值（nan）行丢弃，避免非法 JSON
+                vol = to_float(row["Volume"])
                 candles.append(
                     {
                         "date": d,
-                        "open": round(float(row["Open"]), 4),
-                        "high": round(float(row["High"]), 4),
-                        "low": round(float(row["Low"]), 4),
-                        "close": round(float(row["Close"]), 4),
-                        "volume": int(row["Volume"]) if row["Volume"] == row["Volume"] else None,
+                        "open": round(o, 4),
+                        "high": round(h, 4),
+                        "low": round(low_, 4),
+                        "close": round(c, 4),
+                        "volume": int(vol) if vol is not None else None,
                     }
                 )
             except (KeyError, TypeError, ValueError):
@@ -166,7 +183,9 @@ class OpenBBProvider(BaseProvider):
             )
         if not out:
             raise ProviderError("yfinance news empty")
-        return {"items": out, "source": "yfinance-news", "degraded": False, "note": None}
+        # C5 契约统一（2026-09-13 code review）：provider.get_news 一律返回 list[dict]，
+        # 调用方（research/adapter）自取 provider.source 作为来源标注。
+        return out
 
 
 # 注册为主源（us 类型：A股 provider 不支持 us，主备链自动落到这里）

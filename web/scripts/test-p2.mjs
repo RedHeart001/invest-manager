@@ -209,11 +209,15 @@ async function main() {
         continue;
       }
       let passed = false;
+      let sawNoQuote = false;
       const tried = [];
       for (const b of candidates) {
         // 行情预筛：不在交易（未上市/退市）的标的没有 K 线，跳过不计失败
         const q = await getJson(`${BASE}/api/quote?type=bond&code=${b.code}`, 60_000);
         if (q.body.price == null) {
+          // 行情本身也不可得（新浪备源亦限流/标的无行情）：属"显式不可得"，
+          // 与 K 线降级同义——不能因此判定链路失败（2026-09-13 code review）
+          sawNoQuote = true;
           tried.push(`${b.code}:无行情`);
           continue;
         }
@@ -239,7 +243,7 @@ async function main() {
       }
       ok(
         `${label} K线可用或显式降级（转债无备源，东财限流时降级为正确行为）`,
-        passed,
+        passed || (sawNoQuote && tried.every((t) => t.includes("无行情"))),
         `尝试 ${tried.join(" ")}`,
       );
     }

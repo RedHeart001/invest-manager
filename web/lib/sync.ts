@@ -11,6 +11,12 @@ import { buildSearchText } from "./search-text";
 export const SYNC_TYPES = ["stock", "fund", "bond", "crypto"] as const;
 export type SyncType = (typeof SYNC_TYPES)[number];
 
+// 分型同步单飞锁（C17：进程内单例挂 globalThis，避免 dev HMR 重建模块作用域后失效）
+const SYNC_INFLIGHT_KEY = Symbol.for("invest-manager.sync.inflight");
+const syncInflight: Map<string, Promise<SyncResult>> = ((
+  globalThis as unknown as Record<symbol, Map<string, Promise<SyncResult>> | undefined>
+)[SYNC_INFLIGHT_KEY] ??= new Map());
+
 type ProductPayload = {
   type: string;
   code: string;
@@ -78,7 +84,25 @@ async function ensureStageTable(type: string): Promise<string> {
 }
 
 export async function syncType(type: string): Promise<SyncResult> {
+  // 并发保护（2026-09-13 code review）：分型暂存表名是固定的 Product_stage_<type>，
+  // 两次同类型并发同步会互相清除对方写入的暂存行 → 事务可能只拷入不完整集合，
+  // 造成 Product 表该类型数据丢失。`/api/sync` 可被定时任务与手动同时触发，故加单飞。
+  const inflight = syncInflight.get(type);
+  if (inflight) {
+    await inflight.catch(() => undefined);
+  }
+  const run = _syncTypeInner(type);
+  syncInflight.set(type, run);
+  try {
+    return await run;
+  } finally {
+    if (syncInflight.get(type) === run) syncInflight.delete(type);
+  }
+}
+
+async function _syncTypeInner(type: string): Promise<SyncResult> {
   const started = Date.now();
+  let stageTableName: string | null = null;
   try {
     const data = await dsGet<{ count: number; products: ProductPayload[] }>(
       "/products",
@@ -120,7 +144,7 @@ export async function syncType(type: string): Promise<SyncResult> {
     //   ① 先把全量数据写入分型暂存表（逐批自动提交，不持长锁）
     //   ② 再用一个小事务做"删旧 + 服务端批量拷入"（3 万行约 1~2s）
     // 此前单事务 deleteMany+createMany 会把写锁持有数分钟。
-    const table = await ensureStageTable(type);
+    const table = (stageTableName = await ensureStageTable(type));
     await prisma.$executeRawUnsafe(`DELETE FROM "${table}"`);
     const cols = PRODUCT_COLS.join('","');
     for (let i = 0; i < rows.length; i += CHUNK) {
@@ -158,9 +182,7 @@ export async function syncType(type: string): Promise<SyncResult> {
       },
       { timeout: 120_000, maxWait: 30_000 },
     );
-    // 暂存数据已拷入主表 → 直接 DROP（避免残留空表占用 sqlite_master；下次 CREATE IF NOT EXISTS 重建）
-    await prisma.$executeRawUnsafe(`DROP TABLE IF EXISTS "${table}"`);
-
+    // 暂存表清理统一放到 finally（成功/失败都要 DROP，避免失败时残留全量数据）
     await rebuildFts(type);
     // R14：同步完成后刷新行情快照（分类浏览排序用；失败不影响同步结果）
     let note: string | undefined;
@@ -177,6 +199,16 @@ export async function syncType(type: string): Promise<SyncResult> {
       error: e instanceof Error ? e.message : String(e),
       tookMs: Date.now() - started,
     };
+  } finally {
+    // 无论成功或失败都清理暂存表（2026-09-13 code review：此前失败路径不 DROP，
+    // 会残留整份全量数据与空表）
+    if (stageTableName) {
+      try {
+        await prisma.$executeRawUnsafe(`DROP TABLE IF EXISTS "${stageTableName}"`);
+      } catch {
+        // 清理失败不影响同步结果
+      }
+    }
   }
 }
 

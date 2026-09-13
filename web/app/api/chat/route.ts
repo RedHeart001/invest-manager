@@ -115,7 +115,7 @@ export async function POST(req: NextRequest) {
         ];
 
         // M1：按字符预算裁剪历史（防长会话撑爆 LLM 上下文）
-        const trimmedMessages = trimContext(messages);
+        // 注意：裁剪在**每轮工具循环内**执行（见下），此处不再预先计算一次性快照
 
         let assistantText = "";
         let lastToolCalls: LlmToolCall[] | undefined;
@@ -142,12 +142,16 @@ export async function POST(req: NextRequest) {
         };
 
         for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
-          console.log(`[chat] round ${round} start`);
+          if (process.env.LLM_DEBUG === "1") console.log(`[chat] round ${round} start`);
           let roundText = "";
           const toolCallsThisRound: LlmToolCall[] = [];
 
+          // 修复（2026-09-13 code review）：必须在**每轮**重新裁剪——
+          // 此前只在循环外算一次，超预算时 trimContext 返回新数组，
+          // 之后 push 进 messages 的工具结果不会出现在发给 LLM 的数组里
+          // → 模型看不到工具输出，多轮 function calling 静默失效。
           for await (const chunk of chatStream({
-            messages: trimmedMessages,
+            messages: trimContext(messages),
             tools,
             signal: req.signal,
           })) {
@@ -161,10 +165,12 @@ export async function POST(req: NextRequest) {
 
           if (toolCallsThisRound.length === 0) {
             assistantText += roundText;
-            console.log(`[chat] round ${round} finished (no tool calls), textLen=${roundText.length}`);
+            if (process.env.LLM_DEBUG === "1")
+              console.log(`[chat] round ${round} finished (no tool calls), textLen=${roundText.length}`);
             break;
           }
-          console.log(`[chat] round ${round} requested ${toolCallsThisRound.length} tool(s)`);
+          if (process.env.LLM_DEBUG === "1")
+            console.log(`[chat] round ${round} requested ${toolCallsThisRound.length} tool(s)`);
 
           // 模型请求工具：记录 assistant 消息 → 逐个执行 → 追加 tool 消息 → 继续下一轮
           assistantText += roundText;

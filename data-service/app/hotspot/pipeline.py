@@ -21,9 +21,23 @@ import requests
 
 from ..config import load_env, search_api_key
 from ..utils.limiter import get_limiter
+from ..utils.timeout import run_with_timeout
 from . import llm_client
 
 load_env()  # 读取 data-service/.env 与 ../web/.env（TAVILY_API_KEY 别名已统一）
+
+def _ak_guarded(fn, seconds: float = 45.0, name: str = "akshare"):
+    """akshare 调用统一看门狗（C7，2026-09-13 code review 补）。
+
+    akshare 内部 requests 无 timeout：上游节点挂死会让调用永久阻塞。在 hotspot
+    pipeline 中的后果是 run_pipeline 不返回 → scheduler 的 _state["running"] 永久
+    True → 后续定时/手动/启动补跑全部被拒（热点功能静默失效）。
+    """
+    value, err = run_with_timeout(fn, seconds, name)
+    if err is not None:
+        raise RuntimeError(f"{name} failed: {err}") from err
+    return value
+
 
 log = logging.getLogger("hotspot")
 
@@ -105,7 +119,7 @@ def _cls_telegraph(limit: int) -> list[dict]:
     """财联社电报（国内源，非东财域名族）。"""
     import akshare as ak
 
-    df = ak.stock_info_global_cls()
+    df = _ak_guarded(ak.stock_info_global_cls, 45.0, "ak.stock_info_global_cls")
     if df is None or len(df) == 0:
         raise RuntimeError("cls empty")
     out = []
@@ -134,7 +148,7 @@ def _em_global_news(limit: int) -> list[dict]:
     if not _EM.acquire(timeout=15):
         raise RuntimeError("eastmoney cooling down")
     try:
-        df = ak.stock_info_global_em()
+        df = _ak_guarded(ak.stock_info_global_em, 45.0, "ak.stock_info_global_em")
         _EM.on_success()
     except Exception:
         _EM.on_failure()
@@ -173,7 +187,7 @@ def fetch_news(limit: int = NEWS_LIMIT) -> dict:
 
     for name, fn in (("cls", _cls_telegraph), ("eastmoney-news", _em_global_news)):
         try:
-            items = fn(limit)
+            items = _ak_guarded(lambda: fn(limit), 45.0, "news-source")
             return {
                 "items": items,
                 "source": name,
@@ -226,7 +240,7 @@ def _board_names() -> list[tuple[str, str]]:
                 (ak.stock_board_concept_name_em, "em-concept"),
                 (ak.stock_board_industry_name_em, "em-industry"),
             ):
-                df = fn()
+                df = _ak_guarded(fn, 45.0, "board-name-list")
                 series = _pick_col(df, "板块名称", "name")
                 boards.extend(
                     (str(x).strip(), tag) for x in series.dropna().tolist() if str(x).strip()
@@ -242,7 +256,7 @@ def _board_names() -> list[tuple[str, str]]:
 
     if not boards:
         try:
-            df = ak.stock_board_concept_name_ths()
+            df = _ak_guarded(ak.stock_board_concept_name_ths, 45.0, "ak.stock_board_concept_name_ths")
             series = _pick_col(df, "概念名称", "name")
             boards.extend(
                 (str(x).strip(), "ths-concept")
@@ -368,7 +382,7 @@ def _sina_sector_map() -> dict[str, tuple[str, float | None]]:
     mapping: dict[str, tuple[str, float | None]] = {}
     for indicator in ("行业", "概念"):
         try:
-            df = ak.stock_sector_spot(indicator=indicator)
+            df = _ak_guarded(lambda: ak.stock_sector_spot(indicator=indicator), 45.0, "ak.stock_sector_spot")
             label_series = _pick_col(df, "label")
             name_series = _pick_col(df, "板块", "名称")
             pct_series = _pick_col(df, "涨跌幅")
@@ -409,7 +423,7 @@ def _sina_board_products(board: str, limit: int) -> dict:
     if label is None:
         return {"stocks": [], "source": "none", "note": f"新浪板块名称未匹配「{board}」"}
     try:
-        df = ak.stock_sector_detail(sector=label[0])
+        df = _ak_guarded(lambda: ak.stock_sector_detail(sector=label[0]), 45.0, "ak.stock_sector_detail")
         code_series = _pick_col(df, "code", "代码")
         name_series = _pick_col(df, "name", "名称")
         stocks = [
@@ -456,7 +470,7 @@ def map_board_products(board: str, limit: int = BOARD_STOCKS_PER_TOPIC) -> dict:
             (ak.stock_board_industry_cons_em, "em-industry"),
         ):
             try:
-                df = fn(symbol=board)
+                df = _ak_guarded(lambda: fn(symbol=board), 45.0, "board-constituents")
                 if df is None or len(df) == 0:
                     continue
                 code_series = _pick_col(df, "代码", "code")

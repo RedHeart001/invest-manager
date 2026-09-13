@@ -7,6 +7,7 @@
 
 import time
 
+from ..utils.timeout import run_with_timeout
 from .base import BaseProvider, ProviderError, ProviderNotSupported, register_chain
 
 CACHE_TTL = 6 * 3600  # 全量序列 6 小时，日线数据一天一变
@@ -38,10 +39,13 @@ class SinaProvider(BaseProvider):
             return cached[1]
         import akshare as ak
 
-        try:
-            df = ak.fund_etf_hist_sina(symbol=symbol)
-        except Exception as e:  # noqa: BLE001
-            raise ProviderError(f"sina etf kline failed: {e}") from e
+        # C7：akshare 内部无 timeout，必须经看门狗（2026-09-13 code review 补漏：
+        # 本 provider 此前直调，上游挂死会永久占住 FastAPI 线程池 worker）
+        df, err = run_with_timeout(
+            lambda: ak.fund_etf_hist_sina(symbol=symbol), 40.0, "ak.fund_etf_hist_sina"
+        )
+        if err is not None:
+            raise ProviderError(f"sina etf kline failed: {err}") from err
         if df is None or len(df) == 0:
             raise ProviderError(f"sina etf kline empty: {symbol}")
 

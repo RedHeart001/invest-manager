@@ -21,6 +21,37 @@
 
 ## 进度日志
 
+### 2026-09-13 — 第二轮全项目 code review（四路并行）：12 项真实缺陷全部修复 ✅
+
+**审查方式**：四路 Explore 代理并行（web/app、web/lib、data-service、脚本+容器化+测试）+ 逐条人工验证。**回归验证**：tsc 0 错 / vitest 65/65 / test-p1 20/20 / test-p2 38/38 / test-p3 28/28 / test-p4 19/19 / test-p5 21/21 / test-p6 21/21 / ds 离线 45/45（test-p3 曾在 O 系列后报 27/28，系 SSE 模块重置所致，已修）。
+
+**P0（1 项，实测确认后修复）**
+
+- **研报启动接口死锁**：`research/tasks.py` 的 `start_research` 在**非重入锁**（`threading.Lock`）持有期内调用 `_evict_expired()`，后者再次获取同一把锁 → **同线程自锁**。实测：`POST /research/start` 20 秒超时无响应（HTTP=000）、`_lock` 被永久持有 → **研报功能完全不可用且轮询端点全部阻塞**；因 test-p5 复用当日已完成研报而未在回归中暴露。修复：改 `threading.RLock()` + 重启后实测 0.46s 返回 ✅
+
+**P1（8 项）**
+
+1. **聊天上下文裁剪后工具结果丢失**：`trimContext` 在工具循环外一次性计算，超预算返回新数组后，循环内 push 的工具消息不在发给 LLM 的数组 → 多轮 function calling 静默失效 → 改为**每轮重新裁剪**（C18）
+2. **裁剪边界丢用户提问**：最后一条消息（本轮提问）自身超预算时 `kept=[]` → 模型空答 → 改为硬截断保留（C18）
+3. **test-db 无 where 全库删聊天消息**：`chatMessage.deleteMany({})` 会清空开发库全部真实会话（不可逆）→ 删除该行（级联已验证）（C23）
+4. **`researchWatchers` C17 违反 + 失败不清理**：模块级 Map 未挂 globalThis（HMR 重置 → 定向推送失效）；且仅 done 分支清理 → 失败/未完成任务 Map 无界增长 → 双修：挂 globalThis + failed 分支推送失败说明并清理（C19）
+5. **sync 并发共享暂存表 → 数据丢失**：`/api/sync` 无并发保护，两次同类型同步互相清空对方暂存行 → 事务拷入不完整集合 → 加按类型 in-flight 单飞（C20）
+6. **backup_db restore 无校验无回滚**：非法备份会把线上库"恢复"成空文件 → 加 integrity_check + 表结构校验 + WAL/SHM 清理 + 失败自动回滚（C22）
+7. **C7 看门狗漏包（两处）**：`sina_provider` 的 `fund_etf_hist_sina` 直调；`hotspot/pipeline.py` **8 处** akshare 直调（cls/行业概念名单/ths 概念/sector spot/detail/cons）→ 挂死会使 `_state["running"]` 永久 True、**热点功能静默失效** → 统一 `_ak_guarded` 包装
+8. **openbb 数值 NaN/Inf 进入 JSON → 500**：`fast_info` 与 K 线行裸 `float()` → 统一走 `to_float`；`to_float` 本身补 `math.isfinite`（原只滤 NaN 不滤 Inf）
+
+**P2（5 项，择要修复）**
+
+1. K 线"成功但空响应"不计失败窗口 → 每次请求重复整段回源 → 已计入窗口并显式标注
+2. `openbb.get_news` 返回 dict 违反 C5 契约 → 统一 list[dict]（adapter 已双兼容）
+3. `research/ingest` 缺 `type` 校验 → Prisma 500（堆栈泄漏）→ 400 校验
+4. `research.ts` fullReport 盲目 slice 200K 会产出非法 JSON → 超限丢弃 fullReport（保留 summary/rating）
+5. ChatUI 缺 `warn` 事件分支（服务端持久化失败告警被丢弃）+ 超时未 `reader.cancel()` → 均修复
+
+**已排除的误报/低价值项（不修）**：tools/status 探测缓存与路径过滤（C14 已达标）、C1/C2/C4/C11/C12/C13 复查均正确、`chain.py` 把 NotSupported 收敛为 Error（502 语义可接受）、gateway statusCache 不分键（30s TTL 可接受）、测试会话清理仅在正常路径（异常残留可接受）。
+
+**文档**：PLAN 新增 **C18–C22** + C23（批量清理限定范围/断言不写死数据源）+ 第二轮审查说明。
+
 ### 2026-09-13 — git 初始化 + 转债链路修复（P2 遗留闭环）+ 采集线程 P0 bug ✅
 
 **一、git 初始化**

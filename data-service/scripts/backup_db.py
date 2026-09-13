@@ -4,7 +4,7 @@
 设计要点（PLAN P7 三轮补强）：
 - 使用 **Python stdlib sqlite3 在线备份 API**（`Connection.backup`）：
   对 WAL 模式数据库是**一致性快照**，无需停止 web 服务（避免 `cp` 造成撕裂拷贝）。
-- 在 **data-service 容器内**执行；dev 数据卷以**只读**方式挂载（`/data:ro`），
+- 在 **data-service 容器内**执行；dev 数据卷以 **rw** 方式挂载（P7 实测结论：恢复需写入），
   备份输出目录用宿主机 bind mount（`/backup`）。
 
 用法（容器内）：
@@ -61,22 +61,64 @@ def restore(backup_file: str, target: str) -> bool:
     if not os.path.exists(backup_file):
         print(f"[restore] 备份文件不存在：{backup_file}", file=sys.stderr)
         return False
+
+    # 2026-09-13 code review 加固：恢复是破坏性操作，必须**先验证再覆盖**，
+    # 且失败时自动回滚——此前若备份文件非法（空文件/非 SQLite），
+    # sqlite3.connect 会静默创建空库，导致线上库被"恢复"成空文件。
+    try:
+        src_check = _connect_ro(backup_file)
+        try:
+            integrity = src_check.execute("PRAGMA integrity_check").fetchone()
+            if not integrity or integrity[0] != "ok":
+                print(f"[restore] 备份文件未通过完整性校验：{integrity}", file=sys.stderr)
+                return False
+            tables = src_check.execute(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table'"
+            ).fetchone()
+            if not tables or tables[0] == 0:
+                print("[restore] 备份文件不含任何表，拒绝恢复", file=sys.stderr)
+                return False
+        finally:
+            src_check.close()
+    except sqlite3.Error as e:
+        print(f"[restore] 备份文件不是有效 SQLite 库：{e}", file=sys.stderr)
+        return False
+
+    pre = ""
     if os.path.exists(target):
         ts = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
         pre = f"{target}.pre-restore-{ts}"
         os.replace(target, pre)
         print(f"[restore] 原库已改名保留：{pre}")
-    # 用 backup API 反向写回（同样保证一致性）
-    src = sqlite3.connect(backup_file)
+    # WAL/SHM 必须一并清理：残留的旧 WAL 会被应用到新库（数据错乱）
+    for suffix in ("-wal", "-shm"):
+        sidecar = target + suffix
+        if os.path.exists(sidecar):
+            os.replace(sidecar, f"{sidecar}.pre-restore-{dt.datetime.now().strftime('%Y%m%d-%H%M%S')}")
+
     try:
-        dst = sqlite3.connect(target)
+        # 用 backup API 反向写回（同样保证一致性）
+        src = sqlite3.connect(backup_file)
         try:
-            with dst:
-                src.backup(dst)
+            dst = sqlite3.connect(target)
+            try:
+                with dst:
+                    src.backup(dst)
+            finally:
+                dst.close()
         finally:
-            dst.close()
-    finally:
-        src.close()
+            src.close()
+    except Exception as e:  # noqa: BLE001
+        # 失败自动回滚（2026-09-13 加固）
+        print(f"[restore] 恢复失败：{e}；正在回滚", file=sys.stderr)
+        if pre and os.path.exists(pre):
+            try:
+                os.replace(pre, target)
+                print("[restore] 已回滚到原库")
+            except OSError as re_err:
+                print(f"[restore] 回滚失败：{re_err}（原库备份在 {pre}）", file=sys.stderr)
+        return False
+
     print(f"[restore] 已恢复到：{target}")
     return True
 

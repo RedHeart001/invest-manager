@@ -23,7 +23,11 @@ TZ = ZoneInfo("Asia/Shanghai")
 MAX_RUNNING = 2
 
 _tasks: dict[str, dict] = {}
-_lock = threading.Lock()
+# 必须为可重入锁（RLock）：start_research 在持锁状态下调用 _evict_expired()，
+# 后者需要再次获取同一把锁——用 threading.Lock 会**同线程自锁死锁**
+# （2026-09-13 code review 实测：POST /research/start 永久挂起、锁被永久持有，
+# 连带 /tasks 轮询与状态查询全部阻塞）
+_lock = threading.RLock()
 _daily_done: dict[str, str] = {}  # "type:code" → 最近成功日期
 
 

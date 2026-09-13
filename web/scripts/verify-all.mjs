@@ -2,7 +2,7 @@
 import { spawnSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 
-const suites = ["test-db.mjs", "test-p1.mjs", "test-p3.mjs", "test-p4.mjs", "test-p6.mjs", "test-p5.mjs"];
+const suites = ["test-db.mjs", "test-p1.mjs", "test-p2.mjs", "test-p3.mjs", "test-p4.mjs", "test-p6.mjs", "test-p5.mjs"];
 const lines = [];
 for (const s of suites) {
   const started = Date.now();
@@ -10,7 +10,7 @@ for (const s of suites) {
     cwd: process.cwd(),
     encoding: "utf8",
     timeout: 20 * 60 * 1000,
-    env: { ...process.env, TEST_BASE: "http://localhost:3000" },
+    env: { ...process.env, TEST_BASE: "http://localhost:3000", WEB_URL: "http://localhost:3000" },
   });
   const out = `${r.stdout ?? ""}\n${r.stderr ?? ""}`;
   const tail = out

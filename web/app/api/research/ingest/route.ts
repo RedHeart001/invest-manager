@@ -19,6 +19,16 @@ export async function POST(req: NextRequest) {
   if (!payload.code) {
     return NextResponse.json({ error: "code is required" }, { status: 400 });
   }
+  // 2026-09-13 code review：type 缺失会让 upsert.create 触发 Prisma 500（堆栈泄漏）
+  if (!payload.type) {
+    return NextResponse.json({ error: "type is required" }, { status: 400 });
+  }
+  if (payload.type !== "stock" && payload.type !== "us") {
+    return NextResponse.json(
+      { error: `unsupported research type: ${payload.type}` },
+      { status: 400 },
+    );
+  }
   try {
     const row = await ingestResearch(payload);
     return NextResponse.json({ ok: true, status: row.status, rating: row.rating });

@@ -84,7 +84,9 @@ try {
   await p.chatSession.delete({ where: { id: s.id } });
   const remaining = await p.chatMessage.count({ where: { sessionId: s.id } });
   check("删除会话级联删除其消息", remaining === 0, `remaining=${remaining}`);
-  await p.chatMessage.deleteMany({});
+  // 注意：不得使用无 where 的 chatMessage.deleteMany({})——那会清空开发库中
+  // **全部真实会话消息**（2026-09-13 code review 发现的不可逆数据丢失风险）。
+  // 级联删除已由上面的断言验证，无需额外清理。
 } finally {
   await p.$disconnect();
 }

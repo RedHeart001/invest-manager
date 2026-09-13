@@ -1,7 +1,7 @@
 # 投资理财助手 data-service（FastAPI + AkShare，无状态）生产镜像
 # 构建：docker compose build data-service
 # 构建参数对策（2026-09-12 骨架验证沉淀）：
-#   - python:3.11-slim，无状态（不写盘、不建库）
+#   - python:3.12-slim（与 requirements-lock.txt 生成环境一致），无状态（不写盘、不建库）
 #   - **docker.io 直连在当前网络被拦截（auth 502）→ 默认走国内镜像前缀**，
 #     如需换源：docker build --build-arg PY_IMAGE=<your-mirror>/library/python:3.12-slim
 #   - pip 走阿里源 + --timeout 120 --retries 10（大包默认 15s 超时会断）

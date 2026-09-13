@@ -273,6 +273,12 @@ export default function ChatUI() {
               ...prev,
               mkMsg("assistant", `ℹ️ ${String(data.text ?? "")}`),
             ]);
+          } else if (event === "warn") {
+            // B3：服务端持久化失败等告警必须对用户可感知（此前该事件被丢弃）
+            setItems((prev) => [
+              ...prev,
+              mkMsg("assistant", `⚠️ ${String(data.message ?? "该条消息可能未保存")}`),
+            ]);
           } else if (event === "error") {
             setStatusText(null);
             setError(String(data.message ?? "发生错误"));
@@ -319,6 +325,12 @@ export default function ChatUI() {
             buffer = buffer.slice(dataEnd + 1);
             handleEvent(ev, dataRaw);
           }
+        }
+        // 超时退出循环时释放流连接（2026-09-13 code review：否则连接滞留至服务端超时）
+        try {
+          reader.cancel();
+        } catch {
+          // 已关闭
         }
       } catch (e) {
         setError(e instanceof Error ? e.message : "发送失败");
