@@ -19,15 +19,13 @@ export async function POST(req: NextRequest) {
   if (!payload.code) {
     return NextResponse.json({ error: "code is required" }, { status: 400 });
   }
-  // 2026-09-13 code review：type 缺失会让 upsert.create 触发 Prisma 500（堆栈泄漏）
+  // type 缺失会让 upsert.create 触发 Prisma 500（堆栈泄漏）→ 仅判非空。
+  // 注意（2026-09-14 code review 回归修复）：**不得**限制 type 枚举——
+  // ResearchPanel 对所有类型（stock/fund/bond/crypto/hk/us）渲染，
+  // data-service /research/start 接受任意 type，白名单会把 fund/bond/crypto/hk
+  // 的完成回调全部 400 拒绝 → ResearchReport 永久 running、前端无限轮询、研报静默丢失。
   if (!payload.type) {
     return NextResponse.json({ error: "type is required" }, { status: 400 });
-  }
-  if (payload.type !== "stock" && payload.type !== "us") {
-    return NextResponse.json(
-      { error: `unsupported research type: ${payload.type}` },
-      { status: 400 },
-    );
   }
   try {
     const row = await ingestResearch(payload);

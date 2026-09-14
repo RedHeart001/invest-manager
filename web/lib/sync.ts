@@ -87,10 +87,13 @@ export async function syncType(type: string): Promise<SyncResult> {
   // 并发保护（2026-09-13 code review）：分型暂存表名是固定的 Product_stage_<type>，
   // 两次同类型并发同步会互相清除对方写入的暂存行 → 事务可能只拷入不完整集合，
   // 造成 Product 表该类型数据丢失。`/api/sync` 可被定时任务与手动同时触发，故加单飞。
+  //
+  // 修复（2026-09-14 code review）：此前实现是"等待前一次完成后再各自重跑一次"——
+  // 只是串行化，并发 N 次仍会跑 N 次完整同步（各 180s 取数 + 全量写库 + FTS 重建）。
+  // 正确的单飞是**返回同一个 in-flight Promise**，让并发调用共享同一次结果。
+  // （_syncTypeInner 内部已 try/catch 永不 reject，直接返回该 Promise 语义正确。）
   const inflight = syncInflight.get(type);
-  if (inflight) {
-    await inflight.catch(() => undefined);
-  }
+  if (inflight) return inflight;
   const run = _syncTypeInner(type);
   syncInflight.set(type, run);
   try {

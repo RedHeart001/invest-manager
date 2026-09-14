@@ -156,8 +156,11 @@ class OpenBBProvider(BaseProvider):
 
     # ---------- 新闻（美股原生 vendor：无 Alpha Vantage key 时用 yfinance news） ----------
 
-    def get_news(self, code: str, limit: int = 8) -> dict:
-        """美股新闻（yfinance news；Alpha Vantage key 配置后可增强，P5 未配置走免费档）。"""
+    def get_news(self, code: str, limit: int = 8) -> list[dict]:
+        """美股新闻（yfinance news；Alpha Vantage key 配置后可增强，P5 未配置走免费档）。
+
+        C5 契约（2026-09-13 code review）：统一返回 list[dict]，调用方自取 provider.source。
+        """
         yf = self._yf()
         try:
             items = yf.Ticker(code).news or []

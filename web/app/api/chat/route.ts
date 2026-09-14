@@ -4,6 +4,7 @@ import { LlmNotConfiguredError, type LlmMessage, type LlmToolCall, chatStream } 
 import { buildSystemPrompt, executeAgentTool, getAgentTools } from "@/lib/gateway";
 import { appendMessage, createSession, getMessages } from "@/lib/chat";
 import { startResearch } from "@/lib/research";
+import { extractResearchTarget } from "@/lib/research-target";
 import { trimContext } from "@/lib/context-budget";
 import { prisma } from "@/lib/prisma";
 
@@ -65,11 +66,10 @@ export async function POST(req: NextRequest) {
 
         // 意图升档（PLAN M4/M5：关键词规则命中 → 真实触发 L2 深度研究）
         if (INTENT_RE.test(message)) {
-          // 提取标的：6 位 A股代码优先，其次 3~5 位大写字母美股代码
-          const codeMatch = message.match(/\b(\d{6})\b/) ?? message.match(/\b([A-Z]{3,5})\b/);
-          if (codeMatch) {
-            const code = codeMatch[1];
-            const type = /^\d{6}$/.test(code) ? "stock" : "us";
+          // 提取标的（见 lib/research-target.ts：6 位 A股优先，美股排除常规缩写）
+          const target = extractResearchTarget(message);
+          if (target) {
+            const { code, type } = target;
             try {
               const result = await startResearch(type, code, undefined, sid);
               if (result.status === "done") {

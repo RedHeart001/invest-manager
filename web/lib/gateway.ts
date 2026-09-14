@@ -67,8 +67,14 @@ export function buildSystemPrompt(message: string): { prompt: string; activeSkil
 
 /** /api/tools/status 数据源（connect=true 时探测 MCP 连接，如实反映可用性/降级） */
 /** 状态面板缓存（代码审查修复）：探测式 connect 可能 spawn MCP 子进程，
- *  高频轮询既慢又有副作用 → 30 秒内复用同一结果 */
-let statusCache: { at: number; data: Awaited<ReturnType<typeof buildStatus>> } | null = null;
+ *  高频轮询既慢又有副作用 → 30 秒内复用同一结果。
+ *  C17（2026-09-14 code review 修复）：跨请求单例挂 globalThis——dev HMR 会重建
+ *  模块作用域，模块级变量随之清空 → 缓存失效、下次轮询重复探测。 */
+type StatusData = Awaited<ReturnType<typeof buildStatus>>;
+const STATUS_CACHE_KEY = Symbol.for("invest-manager.gateway.statusCache");
+const statusCacheBox: { current: { at: number; data: StatusData } | null } = ((
+  globalThis as unknown as Record<symbol, { current: { at: number; data: StatusData } | null } | undefined>
+)[STATUS_CACHE_KEY] ??= { current: null });
 const STATUS_TTL_MS = 30_000;
 
 async function buildStatus(opts: { connect?: boolean }) {
@@ -94,10 +100,11 @@ async function buildStatus(opts: { connect?: boolean }) {
 
 export async function gatewayStatus(opts: { connect?: boolean } = {}) {
   const now = Date.now();
-  if (statusCache && now - statusCache.at < STATUS_TTL_MS) {
-    return statusCache.data;
+  const cached = statusCacheBox.current;
+  if (cached && now - cached.at < STATUS_TTL_MS) {
+    return cached.data;
   }
   const data = await buildStatus(opts);
-  statusCache = { at: now, data };
+  statusCacheBox.current = { at: now, data };
   return data;
 }

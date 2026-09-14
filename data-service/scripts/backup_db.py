@@ -84,17 +84,23 @@ def restore(backup_file: str, target: str) -> bool:
         print(f"[restore] 备份文件不是有效 SQLite 库：{e}", file=sys.stderr)
         return False
 
-    pre = ""
+    # 挪走的文件清单：[(现名, 原名)]，回滚时按序全部还原。
+    # 修复（2026-09-14 code review）：此前回滚只还原主库，被挪走的 -wal/-shm
+    # 留在 .pre-restore 名下不还原 → WAL 模式下未检查点事务丢失。
+    moved: list[tuple[str, str]] = []
+    ts = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
     if os.path.exists(target):
-        ts = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
         pre = f"{target}.pre-restore-{ts}"
         os.replace(target, pre)
+        moved.append((pre, target))
         print(f"[restore] 原库已改名保留：{pre}")
     # WAL/SHM 必须一并清理：残留的旧 WAL 会被应用到新库（数据错乱）
     for suffix in ("-wal", "-shm"):
         sidecar = target + suffix
         if os.path.exists(sidecar):
-            os.replace(sidecar, f"{sidecar}.pre-restore-{dt.datetime.now().strftime('%Y%m%d-%H%M%S')}")
+            sidecar_pre = f"{sidecar}.pre-restore-{ts}"
+            os.replace(sidecar, sidecar_pre)
+            moved.append((sidecar_pre, sidecar))
 
     try:
         # 用 backup API 反向写回（同样保证一致性）
@@ -109,14 +115,32 @@ def restore(backup_file: str, target: str) -> bool:
         finally:
             src.close()
     except Exception as e:  # noqa: BLE001
-        # 失败自动回滚（2026-09-13 加固）
+        # 失败自动回滚（2026-09-13 加固；2026-09-14 补齐 sidecar 还原）
         print(f"[restore] 恢复失败：{e}；正在回滚", file=sys.stderr)
-        if pre and os.path.exists(pre):
+        # 先清掉可能已写出一半的新库，再把挪走的文件按序还原
+        try:
+            if os.path.exists(target):
+                os.remove(target)
+        except OSError:
+            pass
+        rollback_errors: list[str] = []
+        for cur, orig in moved:
+            if not os.path.exists(cur):
+                continue
             try:
-                os.replace(pre, target)
-                print("[restore] 已回滚到原库")
+                os.replace(cur, orig)
             except OSError as re_err:
-                print(f"[restore] 回滚失败：{re_err}（原库备份在 {pre}）", file=sys.stderr)
+                rollback_errors.append(f"{orig}: {re_err}")
+        if not moved:
+            print("[restore] 无可回滚的原库（目标原先不存在）", file=sys.stderr)
+        elif rollback_errors:
+            print(
+                f"[restore] 回滚不完整：{('; '.join(rollback_errors))}"
+                f"（保留文件在 {target}.pre-restore-{ts}*）",
+                file=sys.stderr,
+            )
+        else:
+            print("[restore] 已回滚到原库（含 WAL/SHM）")
         return False
 
     print(f"[restore] 已恢复到：{target}")

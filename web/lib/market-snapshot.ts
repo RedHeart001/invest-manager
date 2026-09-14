@@ -45,7 +45,15 @@ async function updateChunk(
 
 // M2/O3：单飞——每日 sync 与手动 refresh 并发触发时共享同一次刷新，
 // 避免 SQLite 单写锁下两个长事务互相等待
-const inflight = new Map<string, Promise<SnapshotResult>>();
+//
+// C17（2026-09-14 code review 修复）：跨请求共享的进程内单例必须挂 globalThis——
+// Next dev 的 HMR 会重建模块作用域，模块级 Map 随之清空，而旧模块里仍在跑的刷新
+// 不受影响 → 新请求会另起一次同类型刷新（写锁争用 + 重复外部取数），
+// 正是本单飞要防的场景。
+const INFLIGHT_KEY = Symbol.for("invest-manager.market.snapshot.inflight");
+const inflight: Map<string, Promise<SnapshotResult>> = ((
+  globalThis as unknown as Record<symbol, Map<string, Promise<SnapshotResult>> | undefined>
+)[INFLIGHT_KEY] ??= new Map());
 
 export function refreshSnapshot(type: string): Promise<SnapshotResult> {
   const hit = inflight.get(type);
