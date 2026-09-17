@@ -40,7 +40,7 @@ def configured() -> bool:
     return _cfg() is not None
 
 
-def chat_json(system: str, user: str) -> dict | list | None:
+def chat_json(system: str, user: str, timeout: int | float | None = None) -> dict | list | None:
     """请求 JSON 输出；失败返回 None（不抛异常，调用方降级）。"""
     cfg = _cfg()
     if not cfg:
@@ -65,7 +65,7 @@ def chat_json(system: str, user: str) -> dict | list | None:
             f"{base}/chat/completions",
             json=payload,
             headers=headers,
-            timeout=TIMEOUT,
+            timeout=timeout if timeout is not None else TIMEOUT,
         )
         r.raise_for_status()
         content = (((r.json() or {}).get("choices") or [{}])[0].get("message") or {}).get(

@@ -38,6 +38,11 @@ export type LlmChunk =
   | { type: "delta"; content: string }
   | { type: "tool_calls"; toolCalls: LlmToolCall[] };
 
+// CR4（2026-09-15 review）：LLM 流超时防护——首字节连接与读流空闲双看门狗，
+// 防止上游"连接建立但停止吐字"时请求永久挂起占住连接（对话停在转圈）。
+const CONNECT_TIMEOUT_MS = 60_000;
+const IDLE_TIMEOUT_MS = 60_000;
+
 export function llmConfig(): { base: string; key: string; model: string } | null {
   const key = process.env.LLM_API_KEY;
   const model = process.env.LLM_MODEL;
@@ -83,6 +88,11 @@ export async function* chatStream(opts: {
   }
 
   const t0 = Date.now();
+  // CR4（2026-09-15 review）：首字节连接也设超时——上游"连接建立但一直不吐头"
+  // 时原 fetch 只受 opts.signal（用户断开）约束，请求会永久挂起占连接。
+  const connectSignals = [opts.signal, AbortSignal.timeout(CONNECT_TIMEOUT_MS)].filter(
+    (s): s is AbortSignal => Boolean(s),
+  );
   const res = await fetch(`${cfg.base}/chat/completions`, {
     method: "POST",
     headers: {
@@ -93,7 +103,7 @@ export async function* chatStream(opts: {
     // Next.js patched fetch 会缓冲 SSE 流（等待完整响应以判定缓存），
     // 必须 no-store 才能让流式 chunk 直通（P4 实测修复挂起问题）
     cache: "no-store",
-    signal: opts.signal,
+    signal: connectSignals.length > 0 ? AbortSignal.any(connectSignals) : undefined,
   });
   // B3：默认静默；需要排查时设 LLM_DEBUG=1 再输出（此前每次请求无条件打印）
   if (process.env.LLM_DEBUG) {
@@ -147,7 +157,8 @@ export async function* chatStream(opts: {
         const i = tc.index ?? 0;
         const acc = toolAcc.get(i) ?? { id: "", name: "", arguments: "" };
         if (tc.id) acc.id = tc.id;
-        if (tc.function?.name) acc.name += tc.function.name;
+        // CR4：name 仅首片赋值（部分兼容端点重复发全名 → 累加损坏工具名）
+        if (tc.function?.name && !acc.name) acc.name = tc.function.name;
         if (tc.function?.arguments) acc.arguments += tc.function.arguments;
         toolAcc.set(i, acc);
       }
@@ -163,14 +174,47 @@ export async function* chatStream(opts: {
     return line;
   };
 
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    let raw: string | null;
-    while ((raw = takeLine()) !== null) {
-      const chunk = handleLine(raw);
-      if (chunk) yield chunk;
+  // CR4：读流空闲看门狗——每个 chunk 必须在 IDLE_TIMEOUT_MS 内到达，否则中止。
+  let idleTimer: NodeJS.Timeout | null = null;
+  const withIdle = <T>(p: Promise<T>): Promise<T> =>
+    new Promise<T>((resolve, reject) => {
+      idleTimer = setTimeout(
+        () => reject(new Error(`LLM 流空闲超时（>${IDLE_TIMEOUT_MS}ms 无数据）`)),
+        IDLE_TIMEOUT_MS,
+      );
+      p.then(
+        (v) => {
+          if (idleTimer) {
+            clearTimeout(idleTimer);
+            idleTimer = null;
+          }
+          resolve(v);
+        },
+        (e) => {
+          if (idleTimer) {
+            clearTimeout(idleTimer);
+            idleTimer = null;
+          }
+          reject(e);
+        },
+      );
+    });
+
+  try {
+    while (true) {
+      const { value, done } = await withIdle(reader.read());
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let raw: string | null;
+      while ((raw = takeLine()) !== null) {
+        const chunk = handleLine(raw);
+        if (chunk) yield chunk;
+      }
+    }
+  } finally {
+    if (idleTimer) {
+      clearTimeout(idleTimer);
+      idleTimer = null;
     }
   }
 

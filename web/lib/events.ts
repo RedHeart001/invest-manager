@@ -34,9 +34,16 @@ type NewsResp = {
 };
 
 const CACHE_TTL_MS = 10 * 60 * 1000;
-// M3/O2：缓存加容量上限（原 Map 无界增长）
-type CacheEntry = { ts: number; result: EventsResult };
-const cache = new Lru<string, CacheEntry>(300);
+// CR4（C17 漏网 + P3）：跨请求共享缓存挂 globalThis（防 HMR 重置）；
+// 降级结果用短 TTL，避免源恢复后事件区仍"粘" 10 分钟。
+const DEGRADED_TTL_MS = 60 * 1000;
+type CacheEntry = { ts: number; result: EventsResult; degraded: boolean };
+const EVENTS_CACHE_KEY = Symbol.for("invest-manager.events.cache");
+const cacheBox: { current: Lru<string, CacheEntry> } = ((globalThis as unknown as Record<
+  symbol,
+  { current: Lru<string, CacheEntry> } | undefined
+>)[EVENTS_CACHE_KEY] ??= { current: new Lru<string, CacheEntry>(300) });
+const cache = cacheBox.current;
 
 /** 纯函数：新闻条目 → 按日期分组（可单测） */
 export function groupByDate(items: EventItem[]): Record<string, EventItem[]> {
@@ -68,7 +75,10 @@ export function pickEventDates(
 export async function fetchEvents(type: string, code: string): Promise<EventsResult> {
   const key = `${type}:${code}`;
   const hit = cache.get(key);
-  if (hit && Date.now() - hit.ts < CACHE_TTL_MS) return hit.result;
+  if (hit) {
+    const ttl = hit.degraded ? DEGRADED_TTL_MS : CACHE_TTL_MS;
+    if (Date.now() - hit.ts < ttl) return hit.result;
+  }
 
   let result: EventsResult;
   if (type !== "stock") {
@@ -93,6 +103,6 @@ export async function fetchEvents(type: string, code: string): Promise<EventsRes
       };
     }
   }
-  cache.set(key, { ts: Date.now(), result });
+  cache.set(key, { ts: Date.now(), result, degraded: result.degraded });
   return result;
 }

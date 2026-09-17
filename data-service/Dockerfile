@@ -37,10 +37,21 @@ COPY app ./app
 # 备份脚本（P7：sqlite3 在线备份，经 compose exec 调用）
 COPY scripts ./scripts
 
+# CR4（2026-09-15 review）：长驻网络服务进程不以 root 运行。
+# 设计要点（不破坏既有实测链路）：
+# - 容器默认用户保持 root → `compose exec` 备份/恢复行为不变（C22 已实测）；
+# - 仅把 uvicorn 用 setpriv 降到 uid 1000 运行——与 web 容器 node 用户（uid 1000）
+#   同号，共享卷 prisma-data 的 dev.db 归属不受影响（若用其它 uid 会导致 web 写库失败）；
+# - data-service 无状态（不写盘），uid 1000 只需读 /app，无额外 chown；
+# - setpriv 属 util-linux（Debian Essential，slim 镜像自带）；万一缺失则回退 root 直跑，
+#   并打印告警——保证镜像在任何基线下可启动，不因加固而引入启动风险。
+RUN useradd -r -u 1000 -m app 2>/dev/null || true
+
 EXPOSE 8000
 
 HEALTHCHECK --interval=15s --timeout=10s --start-period=40s --retries=5 \
   CMD python -c "import sys,urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health',timeout=5).status==200 else 1)"
 
-# 0.0.0.0：容器内监听（宿主机不直接发布端口，仅经 compose 网络供 web 调用）
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# 0.0.0.0：容器内监听（宿主机不直接发布端口，仅经 compose 网络供 web 调用）。
+# 服务进程降权到 uid 1000（见上）；setpriv 缺失时回退 root 直跑并告警。
+CMD ["sh", "-c", "if command -v setpriv >/dev/null 2>&1; then exec setpriv --reuid 1000 --regid 1000 --clear-groups uvicorn app.main:app --host 0.0.0.0 --port 8000; else echo '[warn] setpriv 缺失，回退 root 运行' >&2; exec uvicorn app.main:app --host 0.0.0.0 --port 8000; fi"]

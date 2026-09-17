@@ -10,8 +10,9 @@
 ARG NODE_IMAGE=docker.m.daocloud.io/library/node:22-bookworm-slim
 FROM ${NODE_IMAGE} AS base
 # 注意：base 阶段**不能**设 NODE_ENV=production —— 否则 npm ci 会跳过
-# devDependencies，而 @tailwindcss/postcss（构建必需）与 prisma CLI（运行时
-# migrate deploy 必需）都在 devDependencies 里。NODE_ENV 只在 runner 阶段设置。
+# devDependencies，而 @tailwindcss/postcss（构建必需）等构建期依赖会缺失。
+# NODE_ENV 只在 runner 阶段设置。
+# 运行时需要的 prisma CLI 已移入 dependencies（见 prod-deps 阶段的裁剪）。
 ENV TZ=Asia/Shanghai \
     NEXT_TELEMETRY_DISABLED=1
 # Prisma 引擎依赖 openssl；ca-certificates 供出站 HTTPS
@@ -32,15 +33,25 @@ FROM deps AS build
 COPY . .
 RUN npx prisma generate && npm run build && rm -rf .next/cache
 
+# ---------- 生产依赖层（L2：独立 stage 裁剪 devDependencies）----------
+# 关键：裁剪必须发生在**独立 stage**，最终镜像只 COPY 裁剪后的结果。
+# 若在 runner 内"先 COPY 全部 node_modules 再 npm prune"，被删文件仍留在更早的
+# 层里，镜像体积不会下降（2026-09-14 实测教训：体积仍 1.62GB 且 prisma 被误删）。
+FROM build AS prod-deps
+RUN npm prune --omit=dev \
+ # 本镜像是 Debian(glibc)，musl/wasm 变体的原生二进制永远不会被加载
+ # （@next SWC 与 sharp/libvips 各带一份 musl + wasm，共约 165MB 纯冗余）
+ && rm -rf node_modules/@next/swc-linux-x64-musl \
+           node_modules/@img/sharp-libvips-linuxmusl-x64 \
+           node_modules/@img/sharp-wasm32
+
 # ---------- 运行层 ----------
 FROM base AS runner
 ENV NODE_ENV=production \
     PORT=3000 \
     HOSTNAME=0.0.0.0
-# 复制构建产物后裁掉 devDependencies（L2：prisma 已移入 dependencies，
-# migrate deploy 所需的 prisma CLI 保留，体积 1.62GB → 约 0.9GB）
-COPY --from=build /app/node_modules ./node_modules
-RUN npm prune --omit=dev
+# 只复制裁剪后的生产依赖（prisma 已在 dependencies → migrate deploy 可用）
+COPY --from=prod-deps /app/node_modules ./node_modules
 COPY --from=build /app/.next ./.next
 COPY --from=build /app/package.json ./package.json
 COPY --from=build /app/next.config.ts ./next.config.ts

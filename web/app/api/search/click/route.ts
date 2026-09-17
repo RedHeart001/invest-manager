@@ -17,6 +17,9 @@ export async function POST(req: NextRequest) {
       { status: 400 },
     );
   }
-  await prisma.searchClickLog.create({ data: { query, type, code } });
+  // CR5-P3（2026-09-17 review）：入参长度上限，避免无界写入
+  await prisma.searchClickLog.create({
+    data: { query: String(query).slice(0, 200), type: String(type).slice(0, 20), code: String(code).slice(0, 30) },
+  });
   return NextResponse.json({ ok: true });
 }

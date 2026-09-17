@@ -26,6 +26,10 @@
 | R13 | **多源数据对比验证**：关键行情指标（收盘价、净值等）在数据源允许时做双源交叉验证，差异超阈值时显式标注来源与偏差，不做静默取舍；各数据源可用性验证推迟到对应阶段落地时进行 | 规划期补充 | provider 层 + 测试断言 |
 | R14 | **分类浏览**：搜索页选中类型标签即浏览该类全部产品（无需关键词），支持按涨幅/名称/代码排序与分页；全局排序基于行情快照列（同步/刷新任务写入），列表展示仍为实时富集 | P2 | `/api/search` 浏览分支 + `lib/browse.ts` + `lib/market-snapshot.ts` |
 | R15 | **多源自动降级 + 请求频率控制**：同类数据源主备链（主源失败/熔断 → 自动切备源，响应标注来源与降级状态）；按"源族"令牌桶限速（东财多域名共享额度，因封禁为 IP 级）+ 连续失败熔断冷却；**目标是用户侧永不空白**，无可用备源时显式缺口说明 | P2 收尾（2026-09-12 批准） | provider 主备链 + `app/utils/limiter.py` + 腾讯/新浪备源 provider |
+| R16 | **异常/失败终态必须如实呈现**：服务端失败必须以失败形态呈现，**不得回落为"成功/中性"等假象**（如研报失败不得渲染成"已完成·中性评级"）；降级与数据缺口一律显式标注，不粉饰 | CR5 审查（2026-09-17） | 各前端消费点（`ChatUI` 研报推送、`ResearchPanel` 等） |
+| R17 | **长时运行态必须可退出**：异步任务/轮询在到达上限或判定陈旧（执行方疑似重启）时，必须给出**可操作出口**（重新发起/重试入口），不允许用户停留在无出口的等待态 | CR5 审查（2026-09-17） | `ResearchPanel` 轮询 + `lib/research-stale.ts` |
+
+> R16/R17 是 R5（加载反馈）的收尾对应项：R5 管"等待开始时必须有反馈"，R16/R17 管"等待结束时必须如实、且有出口"。三条共同构成完整的加载/等待体验约定。
 
 ### 已确认的关键决策
 
@@ -322,7 +326,10 @@
      - **数据卷必须 rw 挂载进 data-service**（备份用只读 URI 读取，恢复需写入）——恢复前必须 `docker compose stop web`
      - **全新数据卷只有表结构、无业务数据**：首次部署需 `POST /api/sync` 同步产品主数据（冒烟脚本会区分"未初始化"与"检索故障"）
      - **启动顺序**：`data-service depends_on web: service_healthy`（其启动补跑与落库回调需要 web 就绪）；web 不反向依赖（避免依赖环）
-     - **已知体积**：web 1.62GB（含 devDependencies）。**已实施瘦身（O8/L2，2026-09-13）**：`prisma` 移入 dependencies 后在 runner 阶段 `npm prune --omit=dev`，预期 ~0.9GB；**镜像重建验证因 Docker Desktop 守护进程未运行而待做**（代码已就绪，重启 Docker 后 `docker compose build web` + `scripts/smoke.mjs` 即可闭环）
+     - **镜像体积（O8/L2 于 2026-09-14 实测闭环）**：`docker images` 口径 **1.62GB → 1.25GB（-23%）**；容器内实际文件系统占用 **1.29GB → 0.89GB**；精确 `.Size`（压缩后）279MB。**重要认知：devDependencies 不是体积大头**——裁剪后 `node_modules` 仍 833MB，主体是运行时依赖（`@next` SWC 273MB、`next` 156MB、`@prisma` 112MB、`prisma` CLI 67MB、`echarts` 62MB、`@img/sharp` 46MB）；因此"预期 ~0.9GB"的原估算口径有误（0.89GB 是容器内占用而非 `docker images` 口径）
+     - **C24 依赖归属变更必须同步锁文件**：把包在 `dependencies` / `devDependencies` 之间移动后，**必须重跑 `npm install --package-lock-only`**——`npm ci` 与 `npm prune` 以锁文件为准，仅改 `package.json` 会导致 `--omit=dev` 把运行时必需的包（本次是 `prisma` CLI）裁掉，容器启动时 `migrate deploy` 直接失败
+     - **C25 裁剪必须在独立 stage 完成**：`npm prune` / `rm -rf` **不能在 runner 内"先 COPY 全量再删除"**——被删文件仍留在更早的层里，镜像体积不会下降（实测：仍 1.62GB）。正确做法：`FROM build AS prod-deps` 内裁剪 → runner 只 `COPY --from=prod-deps` 裁剪结果
+     - **可选进一步瘦身（未做，评估记录）**：① 把 `prisma migrate deploy` 拆成独立 one-shot 服务，web 镜像可再省 67MB；② 项目未使用 `next/image`，`@img/sharp` 46MB 理论上可去（需验证 `next start` 不强制加载）；③ musl/wasm 平台变体已在本轮裁剪（省 165MB）
 
 ## 配置项（.env）
 
@@ -414,6 +421,16 @@ RESEARCH_MAX_COLLECT_THREADS=4       # 研报采集并发线程上限（utils/ti
 > **第二轮审查（2026-09-13 17:00，四路并行）**：修复 C1–C17 与 O 系列后的**全量复检**，
 > 共确认 12 项真实缺陷（其中 1 项 P0 死锁），全部已修复（见 Progress.md 当日日志），
 > 并新增约束 C18–C21 与既有约束的修订。
+>
+> **第四轮审查（2026-09-15/16，CR4，三路并行）**：共 P1×5 + P2×12 + P3×25 项，
+> **全部已处理并验证**（详细清单与逐条证据/方案见仓库根 `code-review.md`；
+> 进度见 Progress.md 09-15/09-16 日志）；本轮可复用规则固化为 **C26–C33**（见下）。
+> **唯一未闭环项**：C31（Dockerfile 进程降权）的镜像构建/运行验证——按主人指示暂不推进 Docker。
+>
+> **第五轮审查（2026-09-17，CR5，单路串行）**：共 P1×2 + P2×1 + 需求交付缺口×3 + P3×6，
+> **A+B 批 8 项已实施并验证**（反向验证 + 全量回归，见 Progress.md 09-17 日志与 `code-review.md` CR5 节）；
+> 可复用规则固化为 **C34**（见下）。**暂不处理**：CR5-P4（写接口鉴权，上云前必补）与
+> CR5-D1/D2/D3（R13 交叉验证 / webhook 推送 / LLM 兜底召回）——PLAN 需求条目保持原样，边界见 `code-review.md`。
 
 ### 已修复并固化的约束（C 系列，不得回退）
 
@@ -442,6 +459,39 @@ RESEARCH_MAX_COLLECT_THREADS=4       # 研报采集并发线程上限（utils/ti
 - **C22 恢复类操作的先验校验与回滚（2026-09-13 第二轮审查）**：`backup_db.py restore` 必须 ① 恢复前对备份做 `integrity_check` + 表结构校验（非法备份拒绝执行，防止把线上库"恢复"成空文件）② 清理目标库的 `-wal/-shm` 残留（旧 WAL 会被误应用）③ 失败自动回滚原库
 - **C23 测试脚本不得污染开发库（2026-09-13 第二轮审查）**：测试内的 `deleteMany({})` 等批量清理**必须限定范围**（如按测试会话/标题前缀），禁止无 where 的全库删除；验收断言不得写死单一数据源 `source` 值（多源链下降级属正确行为）
 
+### 第四轮审查固化约束（C26–C33，2026-09-15/16；修复清单见 `code-review.md`）
+
+> 第四轮全项目 code review（CR4）共处理 P1×5 + P2×12 + P3×25 项，全部落地并验证（详见 Progress.md 09-15/09-16 日志与 `code-review.md`）。其中可复用的强制规则固化为下列约束，后续修改不得回退。
+
+- **C26 跨类型共享实体必须带 type 作用域（2026-09-15 CR4-1）**：A股与基金/转债代码段大量重叠（如 `000001` = 平安银行 stock 与 华夏成长混合 fund 并存于 Product 表）。凡以 `code` 参与唯一键或查询的实体（`ResearchReport` 等）**必须把 `type` 纳入唯一键与 where 条件**——`ResearchReport` 唯一键已由 `(code,date)` 升级为 `(type,code,date)`；新增同类实体时须检查本约束
+- **C27 进程内缓存/单例一律挂 `globalThis`（2026-09-15 CR4-2，C17 补漏）**：C17 的适用范围明确包含**缓存**——`kline.lastChecked/lastFailed`、`events` 缓存亦须挂 `Symbol.for` globalThis（dev HMR 重置会使 `lastFailed` 限流窗口失效，叠加回源放大）。C17+C27 合并口径：**任何跨请求共享的进程内单例（连接表、注册表、缓存、锁、watcher）都必须挂 globalThis**，无例外
+- **C28 K 线缓存窗口抑制必须双向对称（2026-09-15 CR4-3）**：`kline.ts` 的**头部缺口补齐分支与尾部增量分支**都必须同时判断 `lastFailed`（失败窗口）与 `lastChecked`（复查窗口），且头部缺口"成功但空响应"同样要写入 `lastFailed`——否则上市不足区间的标的每次加载都会整段回源头部缺口，持续捶打上游（R15 限流防线）
+- **C29 限速器以"逻辑请求"为单位计次（2026-09-15 CR4-4）**：多 host/多轮重试的**同一逻辑请求**必须包在**单个** `_em_request` 闭包内，只 `acquire()` 一次、只回报一次成功/失败——按 host 逐次计次会在 `failure_threshold=2` 下被两次抖动触发全源族熔断（第 3 个 host 永远轮不到）；状态码校验与 JSON 解析仍必须在闭包内完成（C6）
+- **C30 数值转换禁止裸 `float()`（2026-09-15 CR4-5，C21 补漏）**：C21 的"全部 provider 数值字段禁止裸 `float()`"重申适用于 **sina_provider 的 K 线行 / crypto_provider 的 quote+kline / pipeline 板块涨跌幅**等此前漏网处；裸 `float()` 拦不住 NaN（`float(nan)` 不抛异常）会污染缓存与落库文本
+- **C31 长驻进程不以 root 运行，但保持 exec 语义（2026-09-15 CR4-6）**：data-service 容器默认用户保持 root（`compose exec` 备份/恢复需写 `/backup`、`/data`），仅 **uvicorn 经 `setpriv` 降权到 uid 1000**（与 web 容器 node 用户同号，共享卷 `prisma-data` 归属不受影响）；`setpriv` 缺失时回退 root 直跑并告警。**⚠️ 此约束的镜像构建/运行验证尚未执行**（主人指示暂不推进 Docker），启用前必须先验证容器内进程 uid、两容器 healthy 与 `compose exec` 备份正常
+- **C32 前端在途请求与定时器必须可取消（2026-09-15 CR4-7）**：① 加载型 fetch（图表区间/对比、搜索）必须用 `AbortController` + 请求序号守卫，**过期响应不得写入状态**，收尾 `setPending(false)` 仅限当前请求；② 轮询 `setInterval` 必须有清理路径与**次数上限**，且 effect 内 `await` 之后设置定时器前须检查 `cancelled` 标志（防卸载竞赛泄漏）；③ 轮询循环（如热点触发）须挂卸载标志
+- **C33 对外接口输入必须白名单校验（2026-09-15 CR4-8）**：路由层禁止信任 TS 类型（运行时无约束）——`sessions PUT` 的 `role`、`research/start` 的 `type`/`code`、`search` 的 `q` 长度一律显式校验（type 白名单、code `[\w.-]{1,20}`、q ≤100 字符）；`code`/`type` 会拼入研报推送的 markdown 链接，收紧字符集可抑制外链注入面
+
+### 第五轮审查固化约束（C34，2026-09-17；修复清单见 `code-review.md` CR5 节）
+
+> 第五轮全项目 code review（CR5）共确认 P1×2 + P2×1 + 需求缺口×3 + P3×6，其中 **A+B 批 8 项（P1×2 + P2×1 + P3×5）已实施并验证**；需求缺口×3 与 P3 的写接口鉴权项**暂不处理**（边界见 `code-review.md`）。本轮可复用规则固化如下。
+
+- **C34 缓存窗口/计数必须与成功路径对称记账（2026-09-17 CR5-1）**：任何"失败负缓存 / 限流计数 / 熔断计数 / 复查窗口"的写入点，**必须与成功路径成对存在**——只写成功、不写失败的守卫会因此恒假而**静默失效**（代码看起来有防护，实际是死代码）。本次两例：① CR5-1 CoinGecko `_markets_fail_ts` 仅在 `__init__` 与成功路径置 0、失败路径从不写入 → 守卫 `now - fail_ts < COOLDOWN` 恒真失效，不可达时每请求空烧 ~41s；② C28 的 kline `lastFailed`/`lastChecked` 头部缺口分支漏写（CR4-4）。**验收要求**：此类修复必须附**反向验证**（临时回退修复，确认对应断言会失败），防止"声称已修实则失效"再次发生
+
+**CR5 修复的需求映射（CR5 未新增需求编号，其修复回填到既有需求）**
+
+| CR5 项 | 对应需求 | 说明 |
+|---|---|---|
+| CR5-1 CoinGecko 负缓存 | **R15**（多源降级/频率控制） | 失败冷却失效 → 海外源不可达时持续空烧，属 R15 防线漏网 |
+| CR5-2 失败渲染成"已完成" | **R16**（新增，2026-09-17） | 失败终态必须如实呈现，不得回落假象 |
+| CR5-3 陈旧 running 死路 | **R17**（新增，2026-09-17） | 长时运行态必须有可退出出口 |
+| CR5-P5 热点触发漏刷新 | **R5**（加载反馈）/ **R16** | 等待态收尾必须如实收敛 |
+| CR5-P1 缓存挂 globalThis | **C17/C27** | 约束一致性（非新需求） |
+| CR5-P2 错误码透传 / CR5-P3 入参上限 / CR5-P6 依赖数组 | **R10**（降级语义）/ **C33**（输入校验） | 既有约束覆盖 |
+| CR5-D1 R13 交叉验证 | **R13** | 暂不处理，需求条目保持原样 |
+| CR5-D2 webhook / CR5-D3 LLM 兜底 | **M1 webhook 通道** / **M2 兜底召回** | 暂不处理，需求条目保持原样 |
+| CR5-P4 写接口鉴权 | **（新增预置项）** | 上云/`WEB_PORT` 对外前必须补；当前单机无暴露面 |
+
 ### 可优化点（O 系列，待决策，按建议优先级排序）
 
 | 编号 | 优化点 | 理由 / 现状 | 建议做法 |
@@ -453,7 +503,7 @@ RESEARCH_MAX_COLLECT_THREADS=4       # 研报采集并发线程上限（utils/ti
 | O5 | 搜索召回无稳定排序 | LIKE 候选 `take:300` 无 orderBy，短查询召回偏斜；limit 未 clamp | 候选加稳定排序 + `limit` 裁剪到 1~50 |
 | O6 | 公共逻辑重复 | 北京时间、行情富集、`_num`、`_chain(_call)`、代码前缀映射各有 2~4 份实现 | 抽公共 util 单一实现 |
 | O7 | 前端体验 | ChatUI 消息列表 `key={i}` 无虚拟化；热点站内跳转用 `<a>` 非 `next/link` | 稳定 key + 虚拟列表；改 `Link` |
-| O8 | web 镜像 1.62GB | 含 devDependencies（prisma CLI 需随镜像分发 migrate） | `prisma` 移入 dependencies 后 runner 阶段 `npm prune --omit=dev` |
+| O8 | web 镜像 1.62GB | 含 devDependencies；**2026-09-14 已闭环**：1.62GB → 1.25GB（-23%），容器内占用 0.89GB | 独立 `prod-deps` stage 裁剪（C24/C25）+ 去 musl/wasm 变体 |
 | O9 | `/hotspots/run` 同步阻塞 | 手动触发在请求内同步执行整条 pipeline（分钟级），占线程池 worker | 复用 scheduler 单飞，立即返回任务状态 |
 | O10 | 研报采集线程治理 | 看门狗超时后泄漏线程无法强杀（每次采集最多 6~8 个） | 限制并发采集数并监控 |
 | O11 | 技能/打分微开销 | selectSkills 每请求重复扫描目录×2；score 每候选重复 JSON.parse(tags) | 合并复用、预解析缓存 |
@@ -481,7 +531,7 @@ RESEARCH_MAX_COLLECT_THREADS=4       # 研报采集并发线程上限（utils/ti
 #### L 批（较大，单独评估后实施）
 
 - **L1（O4 sync 事务粒度）**：全量替换改为"先写临时表 → 事务内原子换名"（`CREATE TABLE ... AS` 复制 schema → 批量写入 → `DROP/RENAME`），把写锁窗口从分钟级降到秒级；保留空载荷保护（C1）。范围：`web/lib/sync.ts`。**风险**：换名期间的查询可见性（SQLite 对 RENAME 的原子性）需先在测试库验证。**验证**：test-db.mjs + test-p1 全绿 + 并发读测试。
-- **L2（O8 web 镜像瘦身）**：`prisma` 从 devDependencies 移入 dependencies → runner 阶段 `npm prune --omit=dev`；预期 1.62GB → ~0.9GB。范围：`web/package.json`、`web/Dockerfile`。**验证**：`docker compose build` 通过后冒烟 8/8 全绿（含 `prisma migrate deploy` 可用）。
+- **L2（O8 web 镜像瘦身）✅ 2026-09-14 完成**：`prisma` 移入 dependencies + 锁文件同步（C24）+ 独立 `prod-deps` stage 裁剪（C25）+ 去 musl/wasm 平台变体。**实测**：1.62GB → **1.25GB**（`docker images` 口径，-23%），容器内 0.89GB；两容器 healthy、冒烟 **8/8**。**过程中发现并修复 2 个真缺陷**：① 仅改 package.json 未同步 `package-lock.json` → `prisma` CLI 被 `--omit=dev` 误裁 → `migrate deploy` 必失败（C24 固化）；② 在 runner 内先 COPY 再 prune → 体积不降（层语义，C25 固化）。
 - **L3（O10 采集线程治理）**：研报采集并发数上限（信号量，默认 4）+ 泄漏线程计数进 `/research/status` 可观测。范围：`data-service/app/research/adapter.py`、`data-service/app/research/tasks.py`。**验证**：test-p5 全绿 + status 输出含线程数。
 
 #### 执行结果（2026-09-13）

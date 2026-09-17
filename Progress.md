@@ -17,9 +17,107 @@
 
 状态标记：⬜ 未开始 ｜ 🟡 进行中 ｜ ✅ 完成 ｜ ⚠️ 完成但有遗留问题
 
-> **当前阶段（2026-09-13 16:45 更新）**：P0–P7 全部完成 + 代码审查 C1–C16 + O 系列优化 12 项 + **P2 转债遗留闭环（验收 38/38）**；项目已纳入 git 版本控制（基线 b22671f）。**唯一未闭环项**：L2 web 镜像瘦身后的镜像重建验证（阻塞于 Docker Desktop 未运行）。开发态验证全绿：tsc 0 错 / vitest 65/65 / data-service 离线 45/45 / 集成套件 test-db 16、test-p1 20、test-p2 38、test-p3 28、test-p4 19、test-p6 21 全绿。
+> **当前阶段（2026-09-17 更新）**：P0–P7 全部完成 + 四轮 code review（C1–C25 + O 系列 12 项）+ 第四轮（CR4：P1×5+P2×12+P3×25）+ **第五轮（CR5：P1×2+P2×1+需求缺口×3+P3×6，其中 A+B 批 8 项已修复验证）**，需求功能不变。**未闭环项**：① CR4 #6「Dockerfile 进程降权」的镜像构建/运行验证（按主人指示暂不推进 Docker）；② CR5 暂不处理项：CR5-P4 写接口鉴权（上云前必补）、CR5-D1/D2/D3（R13 交叉验证 / webhook 推送 / LLM 兜底召回）。开发态与双服务集成验证：tsc 0 错 / vitest **79/79** / data-service 离线 23+7+15（本轮 test_p2_m8 升至 29/29）/ test-db 16/16 / 集成套件 test-p1 20、test-p2 37（1 项东财限流波动）、test-p3 27、test-p4 19、test-p5 21、test-p6 21。
 
 ## 进度日志
+
+### 2026-09-17 — 第五轮全项目 code review（CR5）：8 项修复（含 1 项"修复静默失效"）✅（需求不变）
+
+**前置**：主人要求全面 code review → 产出 `code-review.md` 第五轮（单路串行通读 + 逐条人工验证），共 **P1×2 + P2×1 + 需求交付缺口×3 + P3×6**；主人按"少改动、尽量复用"原则批复 **A+B 批 8 项**，CR5-P4 与 CR5-D1/D2/D3 **暂不处理**。
+
+**P1（2 项，全部修复）**
+
+1. **CR5-1 CoinGecko 失败负缓存是死代码（推翻 CR4 结论）**：`_markets_fail_ts` 仅在 `__init__` 与**成功**路径置 0，失败路径**从不写入** → 守卫 `now - fail_ts < CG_FAIL_COOLDOWN` 在 Unix 时间下恒假 → 第四轮声称的"失败冷却"**实际从未生效**，CoinGecko 不可达时每个 crypto 请求仍完整重试约 41s 占住线程池 worker。修复：`_fetch_markets` 内 `try/except` 失败写 `_markets_fail_ts`（与成功路径对称），冷却提示补剩余秒数。
+2. **CR5-2 研报失败广播被渲染成"已完成（中性）"假成功卡片**：后端失败分支广播 `{failed:true, error}`（无 rating/summary），而 ChatUI 监听器**不判别该字段** → 一律走成功分支，`rating` 缺失回落"中性"、`summary` 为空 → 发起会话实时看到"已完成·中性"的假消息。修复：监听器新增 `if (data.failed)` 分支渲染失败文案。
+
+**P2（1 项，已修复）**
+
+- **CR5-3 陈旧 running 是 UI 死路（CR4-6 只修了一半）**：后端已具备"running 超 10 分钟可重提"能力，但前端 `running` 分支**无任何出口**——data-service 内存任务表重启即丢任务 → 详情页永久"执行中"，轮询到顶仅报错、无按钮（用户被卡死）。修复：新增零依赖模块 `web/lib/research-stale.ts`（`STALE_RUNNING_MS` + `isStaleRunning()`），陈旧 running 落入既有"起始态"分支（复用已有触发按钮），并停止空转轮询。
+
+**P3（5 项，已修复）**：CR5-P5 热点触发在"任务早于首个轮询完成"时不再漏刷新（`await refresh()` 移出 `if (sawRunning)`，且不谎报复用旧 lastResult）；CR5-P1 `score.ts` `tagCache`、`skills.ts` `cache` 挂 globalThis（C17/C27 口径），skills 缓存顺带换 `Lru(200)`（O2 遗留）；CR5-P2 `/api/quote` 错误码按 `res.status` 透传（不再把 400/501 压成 502）；CR5-P3 `/api/chat` 与 `/api/search/click` 入参加长度上限；CR5-P6 `ResearchPanel.trigger` 依赖数组移除未使用的 `fetchOnce`。
+
+**实现中的偏离（已记录）**：CR5-3 原方案设想 `ResearchPanel` 从 `@/lib/research` 导入常量，实现时发现该组件是 `"use client"` 而 `@/lib/research` **牵连 prisma**（服务端专属，打入客户端包会构建失败）→ 改抽零依赖模块 `research-stale.ts`，`research.ts` 从它重导出保持单一来源。
+
+**新增回归测试（含反向验证）**
+
+- `data-service/tests/test_p2_m8.py` → `test_crypto_failure_negative_cache()` 6 项断言。**做过反向验证**：临时回退修复 → 断言精确失败（`n:2` 证明又发起外部请求）→ 恢复后通过；确保不是"永远为真"的假断言（防止重蹈 CR5-1 那种"声称已修实则失效"）。
+- `web/lib/research-stale.test.ts` 6 项（超阈值 / 未超阈值 / 阈值边界严格大于 / 非 running / 缺 updatedAt / 非法日期）。
+
+**过程中发现并修复的自伤**：CR5-3 抽模块时漏删 `ResearchPanel` 内原有的本地 `isStaleRunning` 定义（遮蔽导入 + 引用已不再导入的常量）→ `tsc` 报错，已修。**教训：验证点必须晚于最后一次改动**。
+
+**验证结果（全绿）**
+
+| 套件 | 结果 |
+|---|---|
+| `tsc --noEmit` | ✅ 0 错 |
+| `vitest` | ✅ **79/79**（11 文件，本轮 +6） |
+| data-service 离线 | ✅ test_p2_m8 **29/29**（+6）、test_p6_mcp 7/7、test_p6_fund_report 15/15 |
+| 集成 test-p5 | ✅ **21/21** |
+| 集成 test-p2 | ⚠️ **37/38** —— 唯一失败「分钟线 502」为**东财 IP 级限流瞬时波动**（单发探测该接口返回 200 + 28013 字节真实数据；本轮未触碰 kline/分钟线路径），与既有记录一致；按 R9 纪律未再重试 |
+
+**文档**：PLAN 新增 **C34**（缓存窗口/计数必须与成功路径对称记账 + 此类修复必须附反向验证）+ 第五轮审查说明 + **需求表新增 R16/R17**；`code-review.md` 第五轮条目与实施记录回填。
+
+**本次审查对需求口径的补充（PLAN 需求表已新增）**
+
+- **R16 异常/失败终态必须如实呈现**：服务端失败必须以失败形态呈现，**不得回落为"成功/中性"等假象**（对应 CR5-2）。降级与数据缺口一律显式标注，不粉饰。
+- **R17 长时运行态必须可退出**：异步任务/轮询在到达上限或判定陈旧时必须给出**可操作出口**（重新发起入口），不允许停留在无出口等待态（对应 CR5-3）。
+- R16/R17 与既有 **R5（加载反馈）** 构成完整约定：R5 管"等待开始有反馈"，R16/R17 管"等待结束如实且有出口"。
+- **未新增需求编号**：CR5-1 回填 **R15**（降级/限流防线）；CR5-P2/P3/P6 由 **R10/C33** 覆盖；CR5-D1（R13）、CR5-D2（M1 webhook）、CR5-D3（M2 兜底）三项**暂不处理**，PLAN 需求条目**保持原样**；CR5-P4 写接口鉴权作为**上云前置项**（当前单机无暴露面）。
+
+**编号口径变更（2026-09-17）**：第五轮审查编号原写作 `R5-x`，与 PLAN 既有**需求编号 R5**（加载反馈）冲突 → 经主人确认，**第四、五轮审查编号全局改为 `CR4-x` / `CR5-x`**（Code Review 前缀），需求编号 R5–R17 保持原样不变。已同步修正代码注释、`code-review.md`、PLAN、Progress 与本文件（含 `.gitignore`、`data-service/Dockerfile` 注释）；**已应用的 Prisma 迁移文件 `migration.sql` 内的 `R4` 注释有意保留**（Prisma 校验迁移 checksum，改已应用迁移会致 `migrate deploy` 报错）。
+
+**暂不处理（边界已明确）**：CR5-P4 写接口鉴权（当前 compose 仅发布 web 端口，**上云/`WEB_PORT` 对外前必须补**）；CR5-D1 R13 provider 层双源交叉验证（通用比对与 R15 限流冲突）；CR5-D2 webhook 推送；CR5-D3 LLM 兜底召回。后三项的 PLAN 需求条目（R13、M1 webhook、M2 兜底）**保持原样**，待需要时再实现或显式裁剪。
+
+**收尾状态**：8 项改动已落地并验证；**改动尚未 git 提交**。
+
+### 2026-09-15 → 09-16 — 第四轮全项目 code review（CR4）：P1×5 + P2×12 + P3×25 全量修复与验证 ✅（需求不变）
+
+**前置**：按主人要求先产出 `code-review.md`（三路并行审查 + 逐条人工验证，共 P1 5 / P2 12 / P3 25 项），主人批准后实施修复——**仅改代码、不改变需求功能**。全部发现与修复方案见 `code-review.md`；本轮固化的强制约束见 PLAN 节「CR4 固化约束（C26–C33）」。
+
+**P1（5 项，全部修复）**
+1. **CR4-1 研报唯一键缺 type → 跨类型串研报（已实测确认）**：`@@unique([code,date])` → `@@unique([type,code,date])`（迁移 `20260915_research_unique_type_code_date`；`research.ts` 各 where 加 type 作用域）。实测 `000001` 平安银行(stock)/华夏成长混合(fund) 可并存。
+2. **CR4-2 sina_provider 裸 float() → NaN 进 6h 缓存 → /kline 500（C21 漏网）** → 统一 `to_float`，任一字段为 None 跳过该行。
+3. **CR4-3 MCP stdio 进程生命周期两缺陷**：① 崩溃后状态面板假 connected 且永不重连 → `ensureConnected` 用 `alive` 判断 + 清死引用重连；② 握手失败泄漏子进程 → `connect()` try/catch + `stop()`。
+4. **CR4-4 K 线头部缺口"成功但空响应"不设窗口（C11 漏网路径）** → 头部分支对称加 `recentlyChecked` + 空响应写 `lastFailed`。
+5. **CR4-5 东财限速按 host 计次 → 单逻辑请求即触发全源族熔断** → `_em_get`/K 线多 host 循环包进单个 `_em_request` 闭包（只计次一次）。
+
+**P2（12 项，全部修复）**：① 工具循环跑满后追加无 tools 收尾调用 + warn（不再静默丢最后一轮结果）；② 最终 assistant 消息只落库一次（原重复落库两遍）；③ CoinGecko 失败负缓存（冷却 5 分钟，不再每请求阻塞 41s 占线程池）；④ LLM 流空闲看门狗 + 首字节连接超时；⑤ tool_calls name 仅在为空时赋值（防兼容端点重复全名损坏）；⑥ 研报 running 陈旧恢复（超 10 分钟按 failed）+ 前端轮询上限 60 次；⑦ ProductCharts 区间/对比加载加 AbortController + 序号守卫；⑧ ResearchPanel 轮询 interval 卸载竞态泄漏（cancelled 标志）；⑨ `/api/quote` 裸 fetch 补 15s 超时；⑩ APScheduler 加 `misfire_grace_time=1800 + coalesce`；⑪ `request_run`/`adapter._run_with_timeout` 的 `Thread.start()` 失败回滚状态/名额；⑫ 数值/健壮性打包（pipeline 板块涨跌幅 isfinite、crypto K 线/quote `to_float`、东财 K 线行长度校验）。
+
+**P3（25 项，全部处理）**：#1 openbb 代理注入（**核实 yfinance 1.7.0 `Ticker` 原生支持 `session`** → `_overseas_session()` trust_env=False + 显式 proxies 注入 quote/kline/news）；#2 events/kline 缓存挂 globalThis（C17 漏网）；#3 trimContext 计入 system 体积 + 硬截断覆盖 tool_calls 参数；#4 events 降级结果短 TTL；#5 mcp runtimeFor enable/disable 对称（可 re-enable + 禁用停子进程）；#6 Dockerfile 进程降权（见下）；#7 tasks.py 调试日志降为 info；#8 backup_db 只读打开备份源 + 校验失败删损坏产物；#9 详情页 `key={type:code}`；#10 HotspotFeed 轮询卸载取消；#11 ECharts resize 监听；#12 sessions PUT role 白名单；#13 /api/search q 长度上限 100；#14 research start type/code 白名单；#15 done 但 fullReport 缺失时渲染 summary（不再回起始态）；#16 rejected 分支登记 watcher（C8 承诺闭环）；#17 search-client 防抖清理 abort 在途请求；#18 sourceUrls 按 topic 相关性挑选（`_topic_urls()` 字二元组打分，无命中回退首 3）；#19 engine timeout 接入 chat_json；#20 tavily Session 显式关闭；#21 pipeline finishedAt 用北京时间 TZ；#22 search-cache 换 LRU(50)；#23 skills 缓存清理已删目录；#24 sync 暂存表 DROP+CREATE；#25 verify-suites.txt 入 .gitignore。
+
+**#6 Dockerfile 降权的设计（代码完成，未验证）**：容器默认用户保持 root（`compose exec` 备份/恢复行为不变）；仅 uvicorn 经 `setpriv` 降到 **uid 1000**（与 web 容器 node 用户同号，共享卷 prisma-data 归属不受影响）；`setpriv` 缺失时回退 root 直跑并告警。**按主人指示暂不推进 Docker**，故此项未经构建验证。
+
+**验证（全绿）**
+- 静态与离线：tsc **0 错** / vitest **73/73**（10 文件）/ data-service 离线 test_p2_m8 **23/23** + test_p6_mcp **7/7** + test_p6_fund_report **15/15** / 改动 Python 文件语法校验通过；迁移已 `prisma migrate deploy` + `prisma generate` 应用。
+- 双服务集成实测：test-p1 **20/20**、test-p2 **38/38**、test-p3 **27/27**、test-p4 **19/19**、test-p5 **21/21**、test-p6 **21/21**、test-db **16/16**。
+- 过程记录：test-p5 首跑报 1 失败（"当日已完成标的直接复用"）——经查为**当天尚未生成 600519 研报**的时序（10:23 才落库），非回归，研报生成后复跑 21/21；test-p2 前次唯一失败「分钟线 502」为东财 IP 级限流（`eastmoney cooling down`），本轮已恢复 → 38/38。验证后双服务已停止、临时日志已清理；另清理了早先 CR4-1 验证遗留的 1 行 `000001 fund` 空研报行（未污染开发库）。
+
+**收尾状态**：42 项非 Docker 改动全部落地并经代码逐条 grep 核验；**改动尚未 git 提交**（工作树 39 修改 + 3 新增）。
+
+### 2026-09-14 — L2 镜像瘦身验证闭环（发现并修复 2 个真缺陷）✅
+
+**背景**：L2 代码于 09-13 完成但验证被 Docker Desktop 未运行阻塞；本次 Docker 起来（v29.7.2）后执行 `docker compose build web && docker compose up -d && node scripts/smoke.mjs`。
+
+**过程中的两个真实缺陷（均已修复 + 固化约束）**
+
+1. **[高] `prisma` CLI 被误裁 → 容器必然启动失败**：把 `prisma` 从 devDependencies 移入 dependencies 时**只改了 `package.json`、未同步 `package-lock.json`**；`npm ci`/`npm prune` 以锁文件为准 → `--omit=dev` 把 prisma 当开发依赖删掉，入口脚本的 `prisma migrate deploy` 会直接失败（实测镜像内 `node_modules/prisma` = MISSING）。修复：`npm install --package-lock-only` 同步锁文件（比对确认**无任何版本漂移**；仅新增 6 条 `@tailwindcss/oxide-wasm32-wasi` 下的嵌套可选条目，本平台不安装）。→ **固化 C24**
+2. **[中] 裁剪位置错误 → 体积零下降**：Dockerfile 原在 runner 内"先 `COPY --from=build /app/node_modules` 再 `npm prune`"，被删文件仍留在更早的层里 → 实测体积仍 1.62GB（层语义）。修复：改为独立 `FROM build AS prod-deps` 内裁剪，runner 只 `COPY --from=prod-deps`。→ **固化 C25**
+
+**额外优化**：本镜像是 Debian/glibc，`@next/swc-linux-x64-musl`(137MB) 与 `sharp` 的 musl/wasm 变体(28MB) 纯冗余 → 裁剪，再省 **165MB**。
+
+**实测结果**
+
+| 指标 | 前 | 后 |
+|---|---|---|
+| `docker images` 体积 | 1.62GB | **1.25GB（-23%）** |
+| 容器内实际占用（`du -sx /`） | ~1.29GB | **0.89GB** |
+| 精确 `.Size`（压缩） | — | 279MB |
+
+**关键认知（纠正原估算口径）**：**devDependencies 不是体积大头**——裁剪后 `node_modules` 仍 833MB，主体为运行时依赖（`@next` SWC 273MB / `next` 156MB / `@prisma` 112MB / `prisma` CLI 67MB / `echarts` 62MB / `@img/sharp` 46MB）。故 PLAN 原"预期 ~0.9GB"的口径有误（0.89GB 实为容器内占用，非 `docker images` 口径）。
+
+**验收**：`docker compose build web` 通过；两容器 **healthy**（web 健康即证明 `prisma migrate deploy` 在裁剪后镜像中正常工作）；冒烟 **8/8 全绿**。镜像内关键依赖核对：`prisma` / `@prisma/client` / `next` / `@next/swc-linux-x64-gnu` 均在位，`vitest` 与 musl SWC 已裁掉。
+
+**遗留（评估记录，未做）**：① `prisma migrate deploy` 拆独立 one-shot 服务可再省 67MB；② 项目未用 `next/image`，`@img/sharp` 46MB 理论可去（需验证 `next start` 不强制加载）。
 
 ### 2026-09-13 — 第二轮全项目 code review（四路并行）：12 项真实缺陷全部修复 ✅
 
@@ -751,11 +849,11 @@
 - **关键认知**：**未上市/已退市转债不在实时行情列表内**（113710/123285），其 K 线本不可得；P2 原失败根因是测试动态选中此类标的，非代码缺陷
 - P2 验收：36/38 → **38/38** ✅
 
-### 🟡 L2 web 镜像瘦身验证（代码完成，等待 Docker Desktop）
+### ✅ L2 web 镜像瘦身（2026-09-14 闭环）
 
-- **状态**：`prisma` 已移入 dependencies、Dockerfile runner 阶段已加 `npm prune --omit=dev`（代码核对确认）；**镜像重建未验证**——Docker Desktop 守护进程未运行（`npipe` 不存在），Bash 侧无法拉起 GUI 应用
-- **闭环动作**（主人启动 Docker Desktop 后）：`docker compose build web` → `docker compose up -d` → `node scripts/smoke.mjs`（8 项断言）→ 记录 web 镜像实际体积（预期 ~0.9GB，原 1.62GB）
-- 2026-09-13 15:50 状态确认时再次核实：仍阻塞
+- **结果**：1.62GB → **1.25GB**（`docker images` 口径，-23%）；容器内占用 0.89GB；两容器 healthy + 冒烟 8/8
+- **闭环过程中修复 2 个真缺陷**（锁文件未同步致 prisma 被误裁；裁剪位置错误致体积不降）→ 固化 **C24 / C25**
+- 详见 2026-09-14 日志。**原"预期 ~0.9GB"口径有误已更正**（devDeps 非体积大头）
 
 ### ✅ FTS 孤儿行累积（2026-09-13 状态确认发现并修复，已固化 C15）
 

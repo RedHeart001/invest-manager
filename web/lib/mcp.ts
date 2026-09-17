@@ -142,12 +142,19 @@ class StdioClient {
       this.failAll(new Error(`进程退出（code=${code}）`));
     });
 
-    await this.request("initialize", {
-      protocolVersion: "2024-11-05",
-      capabilities: {},
-      clientInfo: { name: "invest-manager", version: "0.6.0" },
-    });
-    this.notify("notifications/initialized", {});
+    // CR4（2026-09-15 review）：握手失败会泄漏已 spawn 的子进程（每次冷却重试再
+    // spawn 一个，长期累积孤儿进程）。initialize 失败时 kill 子进程再抛。
+    try {
+      await this.request("initialize", {
+        protocolVersion: "2024-11-05",
+        capabilities: {},
+        clientInfo: { name: "invest-manager", version: "0.6.0" },
+      });
+      this.notify("notifications/initialized", {});
+    } catch (e) {
+      this.stop();
+      throw e;
+    }
   }
 
   private onData(chunk: string): void {
@@ -337,9 +344,26 @@ function runtimeFor(cfg: ServerCfg): ServerRuntime {
   const hit = runtimes.get(cfg.name);
   if (hit) {
     hit.cfg = cfg;
-    if (cfg.enabled === false && hit.state !== "disabled") {
-      hit.state = "disabled";
-      hit.reason = "配置中 enabled=false";
+    if (cfg.enabled === false) {
+      // CR4（P3）：禁用时不仅改状态，还要停掉已运行的子进程（此前继续空跑）
+      if (hit.state !== "disabled") {
+        hit.state = "disabled";
+        hit.reason = "配置中 enabled=false";
+      }
+      if (hit.client) {
+        try {
+          hit.client.stop();
+        } catch {
+          /* 忽略停止失败 */
+        }
+        hit.client = null;
+        hit.tools = [];
+      }
+    } else if (hit.state === "disabled") {
+      // CR4（P3）：配置改回 enabled=true 时解除 disabled（此前永久停在 disabled，
+      // 需重启 web 才生效）——回到 idle，由 ensureConnected 按需重连。
+      hit.state = "idle";
+      hit.reason = undefined;
     }
     return hit;
   }
@@ -357,7 +381,21 @@ function runtimeFor(cfg: ServerCfg): ServerRuntime {
 }
 
 async function ensureConnected(rt: ServerRuntime): Promise<AnyClient | null> {
-  if (rt.client) return rt.client;
+  // CR4（2026-09-15 review）：之前首行只判 `if (rt.client)`，不检查活性——
+  // StdioClient 子进程意外退出后 rt.client 仍指向死连接、状态仍显示 connected，
+  // 所有 mcp_* 工具永久"连接已关闭"。活着的判断：HttpClient 恒视为 alive；
+  // StdioClient 看 alive getter（!closed && proc 存在）。
+  if (rt.client) {
+    if (rt.client instanceof HttpClient || rt.client["alive"]) return rt.client;
+    // 进程已死：清理死引用，走下方重连流程
+    try {
+      rt.client.stop();
+    } catch {
+      /* 已死进程 stop 可失败，忽略 */
+    }
+    rt.client = null;
+    rt.tools = [];
+  }
   // 并发请求共享同一连接过程，避免并发 spawn 多个 stdio 子进程
   if (rt.connecting) return rt.connecting;
   if (rt.state === "disabled") return null;

@@ -66,6 +66,13 @@ export default function ProductCharts({
   const [chartReady, setChartReady] = useState(false);
   const chartRef = useRef<HTMLDivElement>(null);
   const chartInstRef = useRef<unknown>(null);
+  const instOnResizeRef = useRef<(() => void) | null>(null);
+  // CR4（P2-7）：区间/对比加载竞态防护——快速切档时旧响应不得覆盖新状态。
+  const abortRef = useRef<AbortController | null>(null);
+  const seqRef = useRef(0);
+
+  // CR4：卸载时中止在途请求
+  useEffect(() => () => abortRef.current?.abort(), []);
 
   const load = useCallback(
     async (params: {
@@ -75,6 +82,13 @@ export default function ProductCharts({
       compareCode?: string;
       rangeKey?: string;
     }) => {
+      // 新请求 aborts 旧请求；序号守卫丢弃过期响应
+      abortRef.current?.abort();
+      const controller = new AbortController();
+      abortRef.current = controller;
+      const mySeq = ++seqRef.current;
+      const isStale = () => mySeq !== seqRef.current;
+
       setPending(true);
       setError(null);
       try {
@@ -83,8 +97,9 @@ export default function ProductCharts({
           q.set("start", params.start);
           q.set("end", params.end);
         }
-        const res = await fetch(`/api/kline?${q.toString()}`);
+        const res = await fetch(`/api/kline?${q.toString()}`, { signal: controller.signal });
         const data = (await res.json()) as KlineResult & { error?: string };
+        if (isStale()) return;
         if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
         setKline(data);
         // 代码审查修复：调用方显式传入预设 key（此前按 start 日期反推，
@@ -106,8 +121,9 @@ export default function ProductCharts({
             start: params.start,
             end: params.end,
           });
-          const cres = await fetch(`/api/kline?${cq.toString()}`);
+          const cres = await fetch(`/api/kline?${cq.toString()}`, { signal: controller.signal });
           const cdata = (await cres.json()) as KlineResult & { error?: string };
+          if (isStale()) return;
           if (cres.ok && cdata.candles?.length) {
             setCompare({ code: params.compareCode, candles: cdata.candles });
           } else {
@@ -118,9 +134,10 @@ export default function ProductCharts({
           setCompare(null);
         }
       } catch (e) {
+        if (controller.signal.aborted || isStale()) return; // abort 不算错误
         setError(e instanceof Error ? e.message : "加载失败");
       } finally {
-        setPending(false);
+        if (!isStale()) setPending(false);
       }
     },
     [type, code],
@@ -321,6 +338,7 @@ export default function ProductCharts({
       type ChartLike = {
         setOption: (o: unknown, opts?: { notMerge?: boolean }) => void;
         clear: () => void;
+        resize?: () => void;
       };
       const inst =
         (echarts.getInstanceByDom(el) as ChartLike | undefined) ??
@@ -332,9 +350,17 @@ export default function ProductCharts({
       } else {
         inst.clear();
       }
+      // CR4（P3）：窗口/侧栏尺寸变化后画布重排（此前无 resize 监听，会留白/溢出）
+      const onResize = () => inst.resize?.();
+      window.addEventListener("resize", onResize);
+      instOnResizeRef.current = onResize;
     });
     return () => {
       cancelled = true;
+      if (instOnResizeRef.current) {
+        window.removeEventListener("resize", instOnResizeRef.current);
+        instOnResizeRef.current = null;
+      }
       // 代码审查修复：卸载时释放 ECharts 实例（此前只置 cancelled，
       // 离开详情页/重复渲染会泄漏实例与画布）
       const inst = chartInstRef.current as { dispose?: () => void } | null;

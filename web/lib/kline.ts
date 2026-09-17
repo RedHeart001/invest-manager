@@ -46,8 +46,19 @@ const MAX_RANGE_DAYS = 366 * 5; // 防御上限：5 年
 // 增量复查窗口（R15：避免非交易日/频繁访问导致的无效回源）
 const RECHECK_MS = 30 * 60 * 1000;
 // M3/O2：缓存加容量上限（防长期运行内存无界增长）
-const lastChecked = new Lru<string, number>(500);
-const lastFailed = new Lru<string, number>(500); // 失败负缓存（整段回源失败的窗口抑制）
+// CR4（C17 漏网）：跨请求共享缓存必须挂 globalThis——dev HMR 重建模块作用域
+// 会重置模块级变量，lastFailed 的失败窗口（R15 限流保护）随之失效。
+type LruRef = { current: Lru<string, number> };
+const LAST_CHECKED_KEY = Symbol.for("invest-manager.kline.lastChecked");
+const LAST_FAILED_KEY = Symbol.for("invest-manager.kline.lastFailed");
+const lastCheckedBox: LruRef = ((globalThis as unknown as Record<symbol, LruRef | undefined>)[
+  LAST_CHECKED_KEY
+] ??= { current: new Lru<string, number>(500) });
+const lastFailedBox: LruRef = ((globalThis as unknown as Record<symbol, LruRef | undefined>)[
+  LAST_FAILED_KEY
+] ??= { current: new Lru<string, number>(500) });
+const lastChecked = lastCheckedBox.current;
+const lastFailed = lastFailedBox.current; // 失败负缓存（整段回源失败的窗口抑制）
 
 function dayStart(iso: string): Date {
   return new Date(`${iso}T00:00:00.000Z`);
@@ -225,14 +236,26 @@ export async function getKlineRange(
     const maxCached = cached[cached.length - 1].date.toISOString().slice(0, 10);
     // 头部缺口（首次只缓存过 3M，后来请求 1Y）
     if (minCached > start) {
-      if (withinFailWindow) {
-        notes.push("历史区间回源近期失败（限流/故障），窗口期内跳过补齐");
+      // CR4（2026-09-15 review）：头部分支此前只查 lastFailed、不读 lastChecked，
+      // 且"成功但空响应"既不写 lastChecked 也不写 lastFailed → 上市不足 1 年的
+      // 标的选 1Y 区间时 minCached（上市日）恒 > start，每次页面加载都整段回源
+      // 头部缺口，反复捶打东财（R15/C11 防线漏洞）。与尾部增量对称处理。
+      const recentlyChecked =
+        Date.now() - (lastChecked.get(cacheKey) ?? 0) < RECHECK_MS;
+      if (withinFailWindow || recentlyChecked) {
+        notes.push("历史区间回源近期失败/已复查（限流/故障），窗口期内跳过补齐");
       } else {
         try {
           const ds = await fetchDs(type, code, start, isoAddDays(minCached, -1), interval);
-          fetched += await upsertCandles(type, code, ds.candles, ds.source);
-          fetchedSource = ds.source;
-          lastChecked.set(cacheKey, Date.now());
+          if ((ds.candles?.length ?? 0) === 0) {
+            // 与整段回源分支同口径：空响应进失败窗口（C11）
+            lastFailed.set(cacheKey, Date.now());
+            notes.push("历史区间上游返回空数据，窗口期内暂不重试");
+          } else {
+            fetched += await upsertCandles(type, code, ds.candles, ds.source);
+            fetchedSource = ds.source;
+            lastChecked.set(cacheKey, Date.now());
+          }
         } catch (e) {
           notes.push(`历史区间回源失败：${e instanceof Error ? e.message : "unknown"}`);
           lastFailed.set(cacheKey, Date.now());

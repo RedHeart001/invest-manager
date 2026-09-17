@@ -54,7 +54,15 @@ def backup(source: str, outdir: str) -> str:
     size = os.path.getsize(dest)
     ok = bool(integrity) and integrity[0] == "ok"
     print(f"[backup] 输出：{dest}（{size} bytes，integrity_check={integrity[0] if integrity else 'n/a'}）")
-    return dest if ok else ""
+    if not ok:
+        # CR4（2026-09-15 review）：校验失败时清理损坏产物，避免 --list 时残留不可区分
+        try:
+            os.remove(dest)
+            print("[backup] 完整性校验失败，已删除损坏产物", file=sys.stderr)
+        except OSError:
+            pass
+        return ""
+    return dest
 
 
 def restore(backup_file: str, target: str) -> bool:
@@ -103,8 +111,10 @@ def restore(backup_file: str, target: str) -> bool:
             moved.append((sidecar_pre, sidecar))
 
     try:
-        # 用 backup API 反向写回（同样保证一致性）
-        src = sqlite3.connect(backup_file)
+        # 用 backup API 反向写回（同样保证一致性）。
+        # CR4（2026-09-15 review）：改只读打开备份源——此前用读写模式，
+        # 会在 /backup 旁生成 -wal/-shm，备份目录只读挂载时直接恢复失败。
+        src = _connect_ro(backup_file)
         try:
             dst = sqlite3.connect(target)
             try:

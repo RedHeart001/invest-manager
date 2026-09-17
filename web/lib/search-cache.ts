@@ -2,10 +2,12 @@
 // 优先内存（同一次会话内最快），并落 sessionStorage 以跨整页刷新保留。
 
 import type { SearchResult } from "./search";
+import { Lru } from "./lru";
 
 type CacheEntry = { results: SearchResult[]; ts: number };
 
-const memory = new Map<string, CacheEntry>();
+// CR4（P3）：内存缓存加容量上限（原 Map 无界，长期浏览累积）
+const memory = new Lru<string, CacheEntry>(50);
 const PREFIX = "im:search:";
 const FRESH_MS = 60_000; // 视为"新鲜"的时长：新鲜则不发请求，过期则后台刷新
 

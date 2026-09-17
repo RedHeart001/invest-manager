@@ -61,6 +61,11 @@ export default function HotspotFeed({
   const [error, setError] = useState<string | null>(null);
   const [flash, setFlash] = useState<string | null>(null);
   const esRef = useRef<EventSource | null>(null);
+  // CR4（P3）：触发轮询期间的卸载取消标志
+  const pollAliveRef = useRef(true);
+  useEffect(() => () => {
+    pollAliveRef.current = false;
+  }, []);
 
   const refresh = useCallback(async () => {
     setPending(true);
@@ -143,6 +148,8 @@ export default function HotspotFeed({
       const startedAt = Date.now();
       let sawRunning = false;
       for (;;) {
+        // CR4（P3）：卸载后停止轮询（此前循环在组件卸载后仍每 3s 请求直到上限）
+        if (!pollAliveRef.current) break;
         if (Date.now() - startedAt > 240_000) {
           setFlash("抓取超时（仍在后台执行，可稍后刷新查看）");
           break;
@@ -158,6 +165,8 @@ export default function HotspotFeed({
           sawRunning = true;
           continue;
         }
+        // CR5-P5（2026-09-17 review）：只在观测到 running 后才给"完成"文案——
+        // sawRunning 为 false 时 lastResult 可能是**上一次**运行的残留，用它会误报。
         if (sawRunning) {
           const lr = sb.lastResult ?? {};
           if (lr.error) {
@@ -167,8 +176,13 @@ export default function HotspotFeed({
               `抓取完成：${lr.topics ?? 0} 条热点 · 来源 ${lr.newsSource ?? "-"}${lr.note ? ` · ${String(lr.note).slice(0, 80)}` : ""}`,
             );
           }
-          await refresh();
+        } else {
+          // 未观测到 running（任务极快或已被其他触发完成）：不谎报完成态，只提示已刷新
+          setFlash("已刷新热点列表");
         }
+        // 但无论是否观测到 running 都要拉一次：任务可能在首个 3s 轮询前就已完成
+        // （sawRunning 恒 false），此前会直接 break 导致界面停留在"已提交"。
+        await refresh();
         break;
       }
     } catch (e) {

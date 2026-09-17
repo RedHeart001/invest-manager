@@ -295,6 +295,7 @@ export default async function ProductPage({
       {/* ③④ 主图区 + 变化解读区 */}
       {kline ? (
         <ProductCharts
+          key={`${type}:${code}`}
           type={type}
           code={code}
           initialKline={effectiveKline}
@@ -411,7 +412,7 @@ export default async function ProductPage({
       </section>
 
       {/* ⑥ 深度分析入口（P5 / M5：多角色研报，与聊天 L2 工具同一链路） */}
-      <ResearchPanel type={type} code={code} name={product.name} />
+      <ResearchPanel key={`${type}:${code}`} type={type} code={code} name={product.name} />
 
       <p className="mt-8 text-xs text-zinc-400">
         行情数据来自免费源，可能有延迟；阶段划分与事件标注仅代表时间上的相关性，可能相关而非因果；

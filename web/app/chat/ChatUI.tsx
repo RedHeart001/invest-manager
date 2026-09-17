@@ -123,6 +123,8 @@ export default function ChatUI() {
         const data = JSON.parse((ev as MessageEvent).data) as {
           type: string;
           code: string;
+          failed?: boolean;
+          error?: string;
           rating?: string;
           summary?: string;
           sessionIds?: string[];
@@ -130,6 +132,19 @@ export default function ChatUI() {
         // 只认领自己会话的推送（代码审查修复：跨会话串消息）
         const sid = sessionIdRef.current;
         if (!sid || !data.sessionIds?.includes(sid)) return;
+        // CR5-2（2026-09-17 review）：失败分支此前不判别，一律走下方成功渲染 →
+        // rating 缺失回落"中性"、summary 为空，把"研究失败"显示成"已完成·中性"。
+        // 服务端失败广播带 failed=true（lib/research.ts 的 else 分支）。
+        if (data.failed) {
+          setItems((prev) => [
+            ...prev,
+            mkMsg(
+              "assistant",
+              `⚠️ 深度研究未能完成（**${data.code}**）：${data.error ?? "未知原因"}\n\n可稍后在详情页「深度分析」区重试。`,
+            ),
+          ]);
+          return;
+        }
         setItems((prev) => [
           ...prev,
           mkMsg(

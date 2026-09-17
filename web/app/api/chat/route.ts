@@ -23,7 +23,9 @@ export async function POST(req: NextRequest) {
   } catch {
     return NextResponse.json({ error: "invalid JSON body" }, { status: 400 });
   }
-  const message = String(body.message ?? "").trim();
+  // CR5-P3（2026-09-17 review）：入参长度上限——message 直接入库并送 LLM，
+  // 无界会让超长输入撑爆上下文与库。
+  const message = String(body.message ?? "").trim().slice(0, 4000);
   if (!message) {
     return NextResponse.json({ error: "message is required" }, { status: 400 });
   }
@@ -117,8 +119,8 @@ export async function POST(req: NextRequest) {
         // M1：按字符预算裁剪历史（防长会话撑爆 LLM 上下文）
         // 注意：裁剪在**每轮工具循环内**执行（见下），此处不再预先计算一次性快照
 
-        let assistantText = "";
         let lastToolCalls: LlmToolCall[] | undefined;
+        let finishedByNatural = false; // CR4（P2-1）：自然结束（某轮无工具调用）与否
 
         // 持久化容错：单条消息写库失败不阻塞对话主流程（R10），但记录诊断
         const safeAppend = async (
@@ -164,7 +166,11 @@ export async function POST(req: NextRequest) {
           }
 
           if (toolCallsThisRound.length === 0) {
-            assistantText += roundText;
+            // CR4（P2-2）：最终答案只在此处落库一次——此前循环结束又 write
+            // 历轮累加的 assistantText，导致中间轮文本在 DB 存两遍。此处
+            // 无工具调用，整段 roundText 即最终回答。
+            await safeAppend("assistant", roundText);
+            finishedByNatural = true;
             if (process.env.LLM_DEBUG === "1")
               console.log(`[chat] round ${round} finished (no tool calls), textLen=${roundText.length}`);
             break;
@@ -173,7 +179,6 @@ export async function POST(req: NextRequest) {
             console.log(`[chat] round ${round} requested ${toolCallsThisRound.length} tool(s)`);
 
           // 模型请求工具：记录 assistant 消息 → 逐个执行 → 追加 tool 消息 → 继续下一轮
-          assistantText += roundText;
           lastToolCalls = toolCallsThisRound;
           messages.push({
             role: "assistant",
@@ -210,7 +215,28 @@ export async function POST(req: NextRequest) {
           }
         }
 
-        await safeAppend("assistant", assistantText);
+        // CR4（P2-1）：工具循环跑满 MAX_TOOL_ROUNDS 仍以工具调用结束时，最后一轮
+        // 工具结果从未发给 LLM 总结 → 用户看到工具都跑了却没有最终回答。追加一次
+        // 不带 tools 的收尾调用，强制模型基于已有结果作答。
+        if (!finishedByNatural && lastToolCalls && lastToolCalls.length > 0) {
+          if (process.env.LLM_DEBUG === "1")
+            console.log("[chat] tool rounds exhausted, running final summary call");
+          let tail = "";
+          for await (const chunk of chatStream({
+            messages: trimContext(messages),
+            signal: req.signal,
+          })) {
+            if (chunk.type === "delta") {
+              tail += chunk.content;
+              send("delta", { content: chunk.content });
+            }
+          }
+          if (tail.trim()) {
+            await safeAppend("assistant", tail);
+          } else {
+            send("warn", { message: "已达工具调用上限且未生成最终回答，部分结果可能不完整" });
+          }
+        }
         send("done", { sessionId: sid });
       } catch (e) {
         console.error("[chat] route error:", e instanceof Error ? `${e.name}: ${e.message}` : e);

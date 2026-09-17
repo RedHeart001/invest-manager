@@ -52,7 +52,7 @@ def _ask(budget: _Budget, system: str, user: str, timeout: int = 120):
     if not budget.allow():
         return None
     budget.calls += 1
-    return llm_client.chat_json(system, user)
+    return llm_client.chat_json(system, user, timeout=timeout)
 
 
 def _compact_market(market: dict) -> str:

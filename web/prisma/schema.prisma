@@ -63,7 +63,7 @@ model ResearchReport {
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
 
-  @@unique([code, date])
+  @@unique([type, code, date])
 }
 
 // 统一 Agent 对话（M4）

@@ -6,11 +6,17 @@ Vantage key 增强），字段映射到与 AkShare 相同的内部 schema。
 
 R12：yfinance 为海外源——优先尝试环境代理（本地代理优先），不可达时抛
 ProviderError 由上层降级并标注来源。
+
+代理实现（CR4 / 2026-09-15 review 修复）：经 `_overseas_session()`（trust_env=False +
+显式 proxies）注入 `yf.Ticker(code, session=...)`——main.py 默认 NO_PROXY=*，
+否则 yfinance 的默认会话会绕过一切环境代理，dev 下美股恒降级（与 crypto_provider
+对齐）。yfinance ≥1.7 的 Ticker 构造器原生支持 session 参数。
 """
 
 from __future__ import annotations
 
 import logging
+import os
 
 import requests
 
@@ -27,6 +33,38 @@ log = logging.getLogger("openbb")
 REQ_TIMEOUT = 25
 
 
+def _proxies() -> dict | None:
+    """R12：显式环境代理优先（与 crypto_provider 同策略）。
+
+    注意：main.py 默认 NO_PROXY=*（保护国内源直连），requests 的 select_proxy
+    会因此绕过一切 env 代理——所以海外请求必须走 trust_env=False 的独立 Session
+    并显式设置 proxies（CR4 / 2026-09-15 review 修复：此前 docstring 宣称代理优先
+    但代码从未传递，dev 下美股恒降级）。
+    """
+    px = (
+        os.environ.get("HTTPS_PROXY")
+        or os.environ.get("https_proxy")
+        or os.environ.get("HTTP_PROXY")
+        or os.environ.get("http_proxy")
+    )
+    return {"http": px, "https": px} if px else None
+
+
+_session: requests.Session | None = None
+
+
+def _overseas_session() -> requests.Session:
+    """trust_env=False 的独立会话：绕开全局 NO_PROXY=*，显式代理可用。"""
+    global _session
+    if _session is None:
+        _session = requests.Session()
+        _session.trust_env = False
+        px = _proxies()
+        if px:
+            _session.proxies = px
+    return _session
+
+
 class OpenBBProvider(BaseProvider):
     """美股 provider（yfinance 后端）。source 标注 yfinance。"""
 
@@ -41,13 +79,16 @@ class OpenBBProvider(BaseProvider):
         except Exception as e:  # noqa: BLE001
             raise ProviderError(f"yfinance not installed: {e}") from e
 
+    def _ticker(self, code: str):
+        """CR4：构造带显式代理会话的 Ticker（见模块 docstring）。"""
+        return self._yf().Ticker(code, session=_overseas_session())
+
     # ---------- 实时行情 ----------
 
     def get_quote(self, type_: str, code: str) -> dict:
         if type_ != "us":
             raise ProviderNotSupported(f"openbb provider serves US market only, got {type_}")
-        yf = self._yf()
-        t = yf.Ticker(code)
+        t = self._ticker(code)
         try:
             fi = t.fast_info
             # 2026-09-13 code review：yfinance 对退市/无行情标的常返回 nan，
@@ -102,8 +143,7 @@ class OpenBBProvider(BaseProvider):
     ) -> dict:
         if type_ != "us" or interval != "1d":
             raise ProviderNotSupported("openbb provider serves US daily kline only")
-        yf = self._yf()
-        t = yf.Ticker(code)
+        t = self._ticker(code)
 
         def iso(ymd: str | None, default: str) -> str:
             if ymd and len(ymd) == 8:
@@ -161,9 +201,8 @@ class OpenBBProvider(BaseProvider):
 
         C5 契约（2026-09-13 code review）：统一返回 list[dict]，调用方自取 provider.source。
         """
-        yf = self._yf()
         try:
-            items = yf.Ticker(code).news or []
+            items = self._ticker(code).news or []
         except Exception as e:  # noqa: BLE001
             raise ProviderError(f"yfinance news failed: {e}") from e
         out = []

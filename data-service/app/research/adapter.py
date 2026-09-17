@@ -83,7 +83,13 @@ def _run_with_timeout(fn, timeout_s: float):
     _collect_live += 1
     _collect_inflight += 1
     t = threading.Thread(target=_target, daemon=True, name="research-collect")
-    t.start()
+    try:
+        t.start()
+    except Exception as e:  # noqa: BLE001 CR4：start 失败须回滚名额与计数（否则 4 次即耗尽）
+        _collect_inflight = max(0, _collect_inflight - 1)
+        _collect_live = max(0, _collect_live - 1)
+        _collect_slots.release()
+        return None, f"采集线程启动失败：{type(e).__name__}"
     t.join(timeout=timeout_s)
     if t.is_alive():
         return None, f"执行超时（>{int(timeout_s)}s，上游可能挂起）"

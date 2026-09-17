@@ -16,7 +16,13 @@ export type ScoreOptions = {
 };
 
 // B1：同一 tags 字符串不重复 JSON.parse（搜索打分对数百候选逐个调用）
-const tagCache = new Map<string, string[]>();
+// CR5-P1（2026-09-17 review）：跨请求共享缓存必须挂 globalThis（C17/C27 口径）——
+// dev HMR 重建模块作用域会清空模块级 Map，导致缓存反复失效。
+const TAG_CACHE_KEY = Symbol.for("invest-manager.score.tagCache");
+const tagCache: Map<string, string[]> = ((globalThis as unknown as Record<
+  symbol,
+  Map<string, string[]> | undefined
+>)[TAG_CACHE_KEY] ??= new Map<string, string[]>());
 
 export function parseTags(tags?: string | null): string[] {
   if (!tags) return [];

@@ -75,7 +75,12 @@ def request_run(trigger: str = "manual") -> dict:
         if _state["running"]:
             return {"accepted": False, "note": "hotspot pipeline already running"}
         _state["running"] = True
-    threading.Thread(target=_execute, args=(trigger,), name="hotspot-manual", daemon=True).start()
+    try:
+        threading.Thread(target=_execute, args=(trigger,), name="hotspot-manual", daemon=True).start()
+    except Exception:  # noqa: BLE001 CR4：线程启动失败要回滚 running，否则永久卡 True
+        with _lock:
+            _state["running"] = False
+        raise
     return {"accepted": True, "note": "已提交后台执行，进度见 /hotspots/status"}
 
 
@@ -121,12 +126,19 @@ def start_scheduler() -> None:
         CronTrigger(day_of_week="mon-fri", hour=PRE_MARKET_HOUR, minute=PRE_MARKET_MINUTE),
         id="hotspot-pre-market",
         replace_existing=True,
+        # CR4（2026-09-15 review）：宿主机睡眠时默认 misfire_grace_time=1s 会让
+        # 唤醒后的当日任务被判 misfire 直接跳过（且启动补跑不覆盖"睡眠唤醒"）。
+        # 30 分钟宽限 + coalesce 合并积压；单飞锁已能兜住补跑与定时的并发。
+        misfire_grace_time=1800,
+        coalesce=True,
     )
     _scheduler.add_job(
         lambda: run_now("post-market"),
         CronTrigger(day_of_week="mon-fri", hour=POST_MARKET_HOUR, minute=POST_MARKET_MINUTE),
         id="hotspot-post-market",
         replace_existing=True,
+        misfire_grace_time=1800,
+        coalesce=True,
     )
     _scheduler.start()
     threading.Thread(target=_catch_up_if_needed, daemon=True).start()

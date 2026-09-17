@@ -169,29 +169,32 @@ def _em_get(path: str, params: dict) -> dict:
     实测东财 CDN 节点对连接存在间歇性丢弃（单次成功率非 100%），
     因此 host 降级 + 轮次重试双保险。
 
-    注意（代码审查修复）：**状态码校验与 JSON 解析必须在传给 `_em_request`
-    的闭包内完成**——否则 5xx / 非 JSON 响应也会被登记为成功（on_success），
-    清零连续失败计数并解除冷却，熔断形同虚设、持续打东财。
+    注意（CR4 / 2026-09-15 review 重构）：多 host 循环必须包在**单个**
+    `_em_request` 闭包内，以"逻辑请求"为单位只 acquire/回报一次——
+    此前每次 host 尝试独立计次，`failure_threshold=2` 下前两个 host 抖动
+    即触发全源族熔断 180s+（第 3 个 host 几乎永远轮不到）。同时
+    **状态码校验与 JSON 解析必须在闭包内完成**，5xx/非 JSON 不得清零
+    熔断计数（C6）。
     """
-    last_err = None
-    for _round in range(2):
-        for host in EM_HOSTS:
-            try:
 
-                def _fetch(h: str = host) -> dict:
+    def _multi_host_fetch() -> dict:
+        last_err = None
+        for _round in range(2):
+            for host in EM_HOSTS:
+                try:
                     r = requests.get(
-                        f"{h}{path}",
+                        f"{host}{path}",
                         params=params,
                         timeout=REQUEST_TIMEOUT,
                         headers={"User-Agent": "Mozilla/5.0"},
                     )
-                    r.raise_for_status()  # 校验放在限速器成功回报之前
+                    r.raise_for_status()  # 校验放在限速器成功回报之前（C6）
                     return r.json()
+                except Exception as e:  # noqa: BLE001 网络/接口抖动，换 host 重试
+                    last_err = e
+        raise ProviderError(f"eastmoney request failed on all hosts: {last_err}")
 
-                return _em_request(_fetch)
-            except Exception as e:  # noqa: BLE001 网络/接口抖动，换 host 重试
-                last_err = e
-    raise ProviderError(f"eastmoney request failed on all hosts: {last_err}")
+    return _em_request(_multi_host_fetch)
 
 
 class AkshareProvider(BaseProvider):
@@ -389,39 +392,44 @@ class AkshareProvider(BaseProvider):
             "end": end_p,
         }
         klines = None
-        last_err = None
-        for _round in range(2):
-            for host in EM_HIST_HOSTS:
-                try:
 
-                    def _fetch_kline(h: str = host) -> list:
+        # CR4：多 host 循环包在单个 `_em_request` 闭包内（单逻辑请求只计次一次），
+        # 空数组视为"成功但无数据"（交给调用方/上位缓存判断），非 5xx。
+        def _fetch_kline_all() -> list:
+            last_err = None
+            for _round in range(2):
+                for host in EM_HIST_HOSTS:
+                    try:
                         r = requests.get(
-                            f"{h}/api/qt/stock/kline/get",
+                            f"{host}/api/qt/stock/kline/get",
                             params=params,
                             timeout=REQUEST_TIMEOUT,
                             headers={"User-Agent": "Mozilla/5.0"},
                         )
-                        # 状态校验与解析必须在限速器闭包内（否则失败被记为成功）
+                        # 状态校验与解析必须在限速器闭包内（否则失败被记为成功，C6）
                         r.raise_for_status()
                         data = (r.json() or {}).get("data") or {}
-                        return data.get("klines") or []
-
-                    klines = _em_request(_fetch_kline)
-                    if klines:
-                        break
-                    last_err = f"{host} returned empty klines"
-                except Exception as e:  # noqa: BLE001 网络/接口抖动，换 host 重试
-                    last_err = e
-            if klines:
-                break
-            time.sleep(1)
-        if not klines:
+                        kl = data.get("klines") or []
+                        if kl:
+                            return kl
+                        last_err = f"{host} returned empty klines"
+                    except Exception as e:  # noqa: BLE001 网络/接口抖动，换 host 重试
+                        last_err = e
+                time.sleep(1)
             raise ProviderError(f"eastmoney kline failed on all hosts: {last_err}")
+
+        klines = _em_request(_fetch_kline_all)
+        if not klines:
+            raise ProviderError(f"eastmoney kline empty on all hosts: {code}")
 
         # kline 字符串格式：日期,开盘,收盘,最高,最低,成交量,成交额,振幅,涨跌幅,涨跌额,换手率
         candles = []
         for item in klines:
             f = item.split(",")
+            # CR4（2026-09-15 review）：上游截断/异常行时 len<7 会 IndexError 逃逸
+            # （非 ProviderError，chain_call 不捕获）→ 端点 500。提前跳过。
+            if len(f) < 7:
+                continue
             candles.append(
                 {
                     "date": f[0],
@@ -433,6 +441,8 @@ class AkshareProvider(BaseProvider):
                     "amount": _num(f[6]),
                 }
             )
+        if not candles:
+            raise ProviderError(f"eastmoney kline unparsable: {code}")
         return {
             "type": type_,
             "code": code,

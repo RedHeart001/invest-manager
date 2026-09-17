@@ -15,6 +15,12 @@ function todayIso(): string {
   return beijingToday(); // B4：统一走公共 util
 }
 
+// CR4（2026-09-15 review）：running 行陈旧判定阈值——data-service 任务表为内存态，
+// 超过该时长仍 running 视为执行方已丢失任务，允许重新提交（对齐任务 480s 超时 + 回调节拍）。
+// CR5-3：常量与前端判定函数收敛到零依赖模块 research-stale.ts（单一来源，防阈值漂移）。
+export { STALE_RUNNING_MS } from "./research-stale";
+import { STALE_RUNNING_MS } from "./research-stale";
+
 export type FullReport = {
   ok: boolean;
   rating?: string;
@@ -119,13 +125,25 @@ export async function startResearch(
 ): Promise<StartResult> {
   const dateIso = todayIso();
   const existing = await prisma.researchReport.findUnique({
-    where: { code_date: { code, date: dayStart(dateIso) } },
+    where: { type_code_date: { type, code, date: dayStart(dateIso) } },
   });
   if (existing?.status === "done") {
     return { status: "done", report: toRow(existing) };
   }
+  // CR4（2026-09-15 review）：data-service 任务表是内存态，任务执行中重启会
+  // 丢失任务与完成回调 → 该行永久停在 running（整天无法重触发 + 前端无限轮询）。
+  // running 且超阈值（对齐 RESEARCH_TASK_TIMEOUT_S 480s + 回调节拍）视为陈旧，
+  // 标记 failed 并允许重新提交。
   if (existing?.status === "running") {
-    return { status: "running", reason: "研究任务执行中" };
+    const ageMs = Date.now() - new Date(existing.updatedAt).getTime();
+    if (ageMs > STALE_RUNNING_MS) {
+      await prisma.researchReport.update({
+        where: { id: existing.id },
+        data: { status: "failed", error: "研究任务超时（执行方可能已重启），可重新提交" },
+      });
+    } else {
+      return { status: "running", reason: "研究任务执行中" };
+    }
   }
 
   let ds: { taskId?: string; rejected?: string; todayDone?: boolean };
@@ -138,7 +156,7 @@ export async function startResearch(
   } catch (e) {
     // data-service 不可达：记录 failed，避免用户无限等待
     const row = await prisma.researchReport.upsert({
-      where: { code_date: { code, date: dayStart(dateIso) } },
+      where: { type_code_date: { type, code, date: dayStart(dateIso) } },
       create: {
         type,
         code,
@@ -156,11 +174,14 @@ export async function startResearch(
     return { status: "rejected", reason: ds.rejected };
   }
   if (ds.rejected) {
+    // CR4（P3）：被拒但非"当日已完成"（如并发去重：另一实例正在执行）也登记
+    // 发起会话——否则 chat 仍提示"完成后在会话推送"却推送不到（C8 承诺落空）。
+    watchResearch(type, code, watcherSessionId);
     return { status: "running", reason: ds.rejected };
   }
 
   const row = await prisma.researchReport.upsert({
-    where: { code_date: { code, date: dayStart(dateIso) } },
+    where: { type_code_date: { type, code, date: dayStart(dateIso) } },
     create: { type, code, date: dayStart(dateIso), status: "running" },
     update: { status: "running", error: null },
   });
@@ -196,7 +217,7 @@ export async function ingestResearch(payload: IngestPayload): Promise<ReportRow>
     error: report?.ok ? null : (payload.error ?? report?.error ?? "研究失败").slice(0, 300),
   };
   const row = await prisma.researchReport.upsert({
-    where: { code_date: { code: payload.code, date: dayStart(dateIso) } },
+    where: { type_code_date: { type: payload.type, code: payload.code, date: dayStart(dateIso) } },
     create: {
       type: payload.type,
       code: payload.code,

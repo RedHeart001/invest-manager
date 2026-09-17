@@ -176,11 +176,71 @@ def test_tencent_parsers() -> None:
     check("腾讯行情：时间字段解析", q["timestamp"] == "20260911150000", str(q["timestamp"]))
 
 
+# ---------- CR5-1：CoinGecko 失败负缓存（修复静默失效的回归防线） ----------
+
+
+def test_crypto_failure_negative_cache() -> None:
+    """CR5-1（2026-09-17 review）：失败路径必须与成功路径对称记账。
+
+    背景：`_markets_fail_ts` 此前只在 __init__ 与**成功**路径置 0，失败路径从不写入，
+    导致守卫 `now - fail_ts < CG_FAIL_COOLDOWN` 恒假 → 负缓存是死代码，
+    CoinGecko 不可达时每个 crypto 请求仍完整重试约 41s。
+    """
+    import app.providers.crypto_provider as cp
+
+    provider = cp.CoinGeckoProvider()
+    calls = {"n": 0}
+
+    def _boom(path, params):
+        calls["n"] += 1
+        raise ProviderError("coingecko unreachable (simulated)")
+
+    orig_request = provider._request
+    orig_sleep = cp.time.sleep
+    orig_time = cp.time.time
+    provider._request = _boom
+    cp.time.sleep = lambda *_: None  # 避免测试真的 sleep
+    try:
+        # 第一次：真实尝试并失败
+        raised1 = False
+        try:
+            provider.get_quote("crypto", "BTC")
+        except ProviderError:
+            raised1 = True
+        check("CR5-1：首次失败如实抛错", raised1)
+        check("CR5-1：首次失败确实发起了外部请求", calls["n"] == 1, str(calls))
+
+        # 第二次：必须命中负缓存，**不得**再发起外部请求
+        raised2 = False
+        msg = ""
+        try:
+            provider.get_quote("crypto", "BTC")
+        except ProviderError as e:
+            raised2 = True
+            msg = str(e)
+        check("CR5-1：冷却期内再次调用仍抛降级错误", raised2)
+        check("CR5-1：冷却期内不再发起外部请求（负缓存生效）", calls["n"] == 1, str(calls))
+        check("CR5-1：降级说明含冷却提示", "cooling down" in msg, msg)
+
+        # 越过冷却窗口后应可恢复重试
+        cp.time.time = lambda: 1e12  # 远大于 _markets_fail_ts
+        provider._request = lambda path, params: [
+            {"symbol": "btc", "name": "Bitcoin", "current_price": 1.0}
+        ]
+        quote = provider.get_quote("crypto", "BTC")
+        check("CR5-1：冷却窗口过后可恢复", quote.get("code") == "BTC", str(quote))
+    finally:
+        provider._request = orig_request
+        cp.time.sleep = orig_sleep
+        cp.time.time = orig_time
+
+
 if __name__ == "__main__":
     test_limiter()
     test_symbol_mapping()
     test_chain()
     test_tencent_parsers()
+    test_crypto_failure_negative_cache()
     fails = [x for x in results if not x[1]]
     print(f"\n===== {len(results) - len(fails)}/{len(results)} 通过 =====")
     if fails:

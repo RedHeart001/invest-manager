@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 
 import requests
 
+from ..utils.num import to_float
 from .base import BaseProvider, ProviderError, register, register_list
 
 CG_BASE = "https://api.coingecko.com/api/v3"
@@ -21,6 +22,9 @@ REQUEST_TIMEOUT = 20
 MARKETS_TTL_SECONDS = 60
 TOP_N = 250
 MAX_KLINE_DAYS = 365
+# CR4（2026-09-15 code review）：失败冷却——CoinGecko 当前网络不可达时，
+# 不冷却会导致每个 crypto 请求都完整重试约 41s 占住 uvicorn 线程池 worker。
+CG_FAIL_COOLDOWN = 300
 
 
 def _proxies() -> dict | None:
@@ -57,6 +61,7 @@ class CoinGeckoProvider(BaseProvider):
     def __init__(self):
         self._markets: list[dict] | None = None
         self._markets_ts = 0.0
+        self._markets_fail_ts = 0.0
 
     def _request(self, path: str, params: dict) -> dict:
         last_err = None
@@ -76,19 +81,34 @@ class CoinGeckoProvider(BaseProvider):
         raise ProviderError(f"coingecko unreachable: {last_err}")
 
     def _fetch_markets(self) -> list[dict]:
-        if self._markets is not None and time.time() - self._markets_ts < MARKETS_TTL_SECONDS:
+        now = time.time()
+        if self._markets is not None and now - self._markets_ts < MARKETS_TTL_SECONDS:
             return self._markets
-        self._markets = self._request(
-            "/coins/markets",
-            {
-                "vs_currency": "usd",
-                "order": "market_cap_desc",
-                "per_page": TOP_N,
-                "page": 1,
-                "price_change_percentage": "24h",
-            },
-        )
+        # CR4 失败负缓存：上次失败后的冷却期内直接抛降级错误，
+        # 不再逐请求重试全程（不可达时每次约 41s，占住线程池 worker）。
+        if now - self._markets_fail_ts < CG_FAIL_COOLDOWN:
+            remain = int(CG_FAIL_COOLDOWN - (now - self._markets_fail_ts))
+            raise ProviderError(f"coingecko cooling down after recent failure; retry in ~{remain}s")
+        # CR5-1（2026-09-17 review）：失败路径此前**从不写入** `_markets_fail_ts`
+        # （仅在 __init__ 与成功路径置 0），Unix 时间下守卫恒假 → 负缓存是死代码，
+        # 不可达时每个 crypto 请求仍完整重试约 41s。此处与成功路径对称记账。
+        try:
+            markets = self._request(
+                "/coins/markets",
+                {
+                    "vs_currency": "usd",
+                    "order": "market_cap_desc",
+                    "per_page": TOP_N,
+                    "page": 1,
+                    "price_change_percentage": "24h",
+                },
+            )
+        except Exception:
+            self._markets_fail_ts = time.time()
+            raise
+        self._markets = markets
         self._markets_ts = time.time()
+        self._markets_fail_ts = 0.0
         return self._markets
 
     def _market_item(self, code: str) -> dict:
@@ -104,14 +124,15 @@ class CoinGeckoProvider(BaseProvider):
             "type": "crypto",
             "code": str(item.get("symbol", "")).upper(),
             "name": str(item.get("name", "")),
-            "price": item.get("current_price"),
+            # C21/CR4：数值统一 to_float，过滤非有限值直出
+            "price": to_float(item.get("current_price")),
             "change": None,
-            "changePct": item.get("price_change_percentage_24h"),
-            "high": item.get("high_24h"),
-            "low": item.get("low_24h"),
-            "marketCap": item.get("market_cap"),
-            "marketCapRank": item.get("market_cap_rank"),
-            "volume": item.get("total_volume"),
+            "changePct": to_float(item.get("price_change_percentage_24h")),
+            "high": to_float(item.get("high_24h")),
+            "low": to_float(item.get("low_24h")),
+            "marketCap": to_float(item.get("market_cap")),
+            "marketCapRank": to_float(item.get("market_cap_rank")),
+            "volume": to_float(item.get("total_volume")),
             "source": self.source,
         }
 
@@ -149,7 +170,9 @@ class CoinGeckoProvider(BaseProvider):
         prices = payload.get("prices") or []
         candles = []
         for ts_ms, price in prices:
-            if price is None:
+            # C21/CR4：防御式转换——非有限值（NaN/Inf 字面量可被 Python json 解析）视为缺失跳过
+            p = to_float(price)
+            if p is None:
                 continue
             date = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).strftime(
                 "%Y-%m-%d"
@@ -157,10 +180,10 @@ class CoinGeckoProvider(BaseProvider):
             candles.append(
                 {
                     "date": date,
-                    "open": float(price),
-                    "high": float(price),
-                    "low": float(price),
-                    "close": float(price),
+                    "open": p,
+                    "high": p,
+                    "low": p,
+                    "close": p,
                     "volume": None,
                 }
             )
@@ -183,8 +206,8 @@ class CoinGeckoProvider(BaseProvider):
                     "type": "crypto",
                     "code": symbol,
                     "name": str(item.get("name", "")),
-                    "price": item.get("current_price"),
-                    "changePct": item.get("price_change_percentage_24h"),
+                    "price": to_float(item.get("current_price")),
+                    "changePct": to_float(item.get("price_change_percentage_24h")),
                     "source": self.source,
                 }
         return out

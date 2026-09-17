@@ -31,3 +31,8 @@ Dockerfile
 .gitattributes
 .vscode
 .idea
+
+# 安全：.env（含 LLM key 等密钥）绝不进构建上下文/镜像
+.env
+.env.*
+!.env.example

@@ -39,7 +39,10 @@
 ## 环境与工具链（重要，踩过的坑）
 
 - **Docker 构建（P7 定版）**：docker.io 直连被拦截（auth 502）→ 基础镜像走 `docker.m.daocloud.io` 前缀（compose 的 `NODE_IMAGE`/`PY_IMAGE` 可覆盖）；**镜像 Python 必须与锁文件同版本**（现为 3.12，曾因 3.11 装 numpy 2.5.3 失败）且**锁文件须在容器内生成**；**web 镜像 base 阶段禁止设 `NODE_ENV=production`**（会跳过 devDependencies，缺 tailwind postcss 与 prisma CLI）；数据卷在 data-service 侧须 rw（恢复需写入，恢复前停 web）；全新卷无业务数据，需 `POST /api/sync`。
-- **容器起法**：`WEB_PORT=3100 docker compose up -d`（避免与开发态 3000 冲突）；`BASE=http://localhost:3100 node scripts/smoke.mjs` 验证；`--profile mcp` 启用 MCP HTTP（宿主 127.0.0.1:8765）。
+- **C24 依赖归属变更必须同步锁文件**：包在 dependencies/devDependencies 间移动后必须重跑 `npm install --package-lock-only`——`npm ci`/`npm prune` 以锁文件为准，只改 `package.json` 会让 `--omit=dev` 把运行时必需的包裁掉（2026-09-14 实测：`prisma` CLI 被误裁 → `migrate deploy` 必失败）
+- **C25 裁剪必须在独立 stage 完成**：`npm prune`/`rm -rf` 不能在 runner 内"先 COPY 全量再删"（被删文件留在更早层里，体积不降，实测仍 1.62GB）；正确做法 `FROM build AS prod-deps` 裁剪 → runner 只 `COPY --from=prod-deps`
+- **web 镜像体积事实（2026-09-14 实测）**：1.62GB → **1.25GB**（`docker images` 口径 -23%），容器内占用 0.89GB。**devDeps 不是大头**——裁剪后 node_modules 仍 833MB，主体是 `@next` SWC 273MB / `next` 156MB / `@prisma` 112MB / `prisma` 67MB / `echarts` 62MB / `@img/sharp` 46MB；musl+wasm 变体（165MB）已裁（本镜像 glibc）
+- **容器起法**：`WEB_PORT=3100 docker compose up -d`（避免与开发态 3000 冲突）；`BASE=http://localhost:3100 node scripts/smoke.mjs` 验证；`--profile mcp` 启用 MCP HTTP（宿主 127.0.0.1:8765）。Docker Desktop 未启动时 `docker compose build` 会报 `npipe ... daemon is running` 错误——需主人手动启动 GUI
 - **pip 操作必须加 `PYTHONPATH=`**：WorkBuddy 沙箱注入的 sitecustomize 会拦截 pip 的卸载动作（`SAFE_DELETE_BULK_CONFIRM_REQUIRED`），中断会留下"旧版已删、新版未装"的损坏态（P6 曾因此毁掉 data-service 的 venv）。正确姿势：`PYTHONPATH= .venv/Scripts/python.exe -m pip install ...`。
 - **依赖定版（勿随意升级）**：`fastmcp>=2.0,<3` + `starlette>=0.40,<0.51` + `fastapi>=0.115,<0.126`（fastmcp 4.x 依赖 starlette>=1.0.1，与 fastapi 硬冲突，装上后 data-service 起不来）；另需 `httpx>=0.27,<1`、`yfinance>=0.2`。
 - **本机 Bash 工具缺 coreutils**：命令前需 `export PATH="/usr/bin:/bin:$PATH"`（否则 head/wc/ls/rm 全不可用）；`pkill` 不存在。

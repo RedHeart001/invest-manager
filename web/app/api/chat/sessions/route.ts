@@ -30,6 +30,11 @@ export async function PUT(req: NextRequest) {
   if (!body.sessionId || !body.role || !body.content) {
     return NextResponse.json({ error: "sessionId/role/content required" }, { status: 400 });
   }
+  // CR4（P3）：role 运行时白名单校验——此前只有 TS 类型标注，任意字符串可落库，
+  // 该会话下次对话把非法 role 发给 LLM → 400。
+  if (!["user", "assistant", "tool"].includes(body.role)) {
+    return NextResponse.json({ error: "illegal role" }, { status: 400 });
+  }
   // 代码审查修复：向不存在的会话写消息会触发外键错误 → 未捕获 500
   const exists = await prisma.chatSession.findUnique({
     where: { id: body.sessionId },

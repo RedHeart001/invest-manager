@@ -63,8 +63,12 @@ function stageTable(type: string): string {
 
 async function ensureStageTable(type: string): Promise<string> {
   const table = stageTable(type);
+  // CR4（P3）：先 DROP 再 CREATE——`IF NOT EXISTS` 只建不校验，若进程崩溃残留的暂存表
+  // schema 已演进（列名/列数不符），后续 `INSERT ... SELECT` 会持续报错使该类型同步失败。
+  // 暂存表在下述流程中被 fully 重建并最终 DROP，故先删后建是安全的（表名受 SYNC_TYPES 约束，无注入面）。
+  await prisma.$executeRawUnsafe(`DROP TABLE IF EXISTS "${table}"`);
   await prisma.$executeRawUnsafe(
-    `CREATE TABLE IF NOT EXISTS "${table}" (
+    `CREATE TABLE "${table}" (
       "id" TEXT NOT NULL PRIMARY KEY,
       "type" TEXT NOT NULL,
       "code" TEXT NOT NULL,

@@ -13,8 +13,11 @@ R15：东财板块接口经源族限速器；板块名单内存缓存 6h。
 from __future__ import annotations
 
 import logging
+import math
 import os
+import re
 import time
+from zoneinfo import ZoneInfo
 from datetime import date, datetime
 
 import requests
@@ -25,6 +28,9 @@ from ..utils.timeout import run_with_timeout
 from . import llm_client
 
 load_env()  # 读取 data-service/.env 与 ../web/.env（TAVILY_API_KEY 别名已统一）
+
+# CR4（P3）：与 scheduler 一致使用北京时间（此前 finishedAt 用裸 datetime.now()）
+TZ = ZoneInfo("Asia/Shanghai")
 
 def _ak_guarded(fn, seconds: float = 45.0, name: str = "akshare"):
     """akshare 调用统一看门狗（C7，2026-09-13 code review 补）。
@@ -67,52 +73,56 @@ def _tavily(limit: int) -> list[dict]:
         proxies = {"http": px, "https": px}
     s = requests.Session()
     s.trust_env = False
+    try:
 
-    def _query(query: str, days: int) -> list[dict]:
-        r = s.post(
-            "https://api.tavily.com/search",
-            json={
-                "api_key": key,
-                "query": query,
-                "topic": "news",
-                "days": days,
-                "max_results": limit,
-            },
-            proxies=proxies,
-            timeout=25,
-        )
-        r.raise_for_status()
-        out = []
-        for it in (r.json() or {}).get("results", []):
-            url = str(it.get("url", ""))
-            out.append(
-                {
-                    "title": str(it.get("title", "")).strip(),
-                    "summary": str(it.get("content", "")).strip()[:200],
-                    "url": url,
-                    "time": str(it.get("published_date", "")),
-                }
+        def _query(query: str, days: int) -> list[dict]:
+            r = s.post(
+                "https://api.tavily.com/search",
+                json={
+                    "api_key": key,
+                    "query": query,
+                    "topic": "news",
+                    "days": days,
+                    "max_results": limit,
+                },
+                proxies=proxies,
+                timeout=25,
             )
-        return out
+            r.raise_for_status()
+            out = []
+            for it in (r.json() or {}).get("results", []):
+                url = str(it.get("url", ""))
+                out.append(
+                    {
+                        "title": str(it.get("title", "")).strip(),
+                        "summary": str(it.get("content", "")).strip()[:200],
+                        "url": url,
+                        "time": str(it.get("published_date", "")),
+                    }
+                )
+            return out
 
-    # 扩大检索面：3 天窗口 + 两条查询合并去重（单查询常仅 3 条）
-    merged: dict[str, dict] = {}
-    for q, days in (
-        ("今日 A股 市场热点 板块 政策", 1),
-        ("股市 板块 领涨 热点", 3),
-    ):
-        try:
-            for it in _query(q, days):
-                if it["title"] and it["url"] not in merged:
-                    merged[it["url"]] = it
-        except Exception as e:  # noqa: BLE001
-            if not merged:
-                raise
-            log.warning("tavily query %r failed: %s", q, e)
-    out = list(merged.values())[:limit]
-    if not out:
-        raise RuntimeError("tavily empty")
-    return out
+        # 扩大检索面：3 天窗口 + 两条查询合并去重（单查询常仅 3 条）
+        merged: dict[str, dict] = {}
+        for q, days in (
+            ("今日 A股 市场热点 板块 政策", 1),
+            ("股市 板块 领涨 热点", 3),
+        ):
+            try:
+                for it in _query(q, days):
+                    if it["title"] and it["url"] not in merged:
+                        merged[it["url"]] = it
+            except Exception as e:  # noqa: BLE001
+                if not merged:
+                    raise
+                log.warning("tavily query %r failed: %s", q, e)
+        out = list(merged.values())[:limit]
+        if not out:
+            raise RuntimeError("tavily empty")
+        return out
+    finally:
+        # CR4（2026-09-15 review）：低频调用也显式关闭，避免连接句柄滞留
+        s.close()
 
 
 def _cls_telegraph(limit: int) -> list[dict]:
@@ -390,8 +400,11 @@ def _sina_sector_map() -> dict[str, tuple[str, float | None]]:
                 n = str(name).strip()
                 if not n or n in mapping:
                     continue
+                # CR4（2026-09-15 review）：裸 float() 拦不住 NaN → "+nan%" 污染热点标题。
+                # 用 isfinite 过滤非有限值。
                 try:
-                    pct_val: float | None = float(pct)
+                    f = float(pct)
+                    pct_val: float | None = f if math.isfinite(f) else None
                 except (TypeError, ValueError):
                     pct_val = None
                 mapping[n] = (str(label).strip(), pct_val)
@@ -500,6 +513,28 @@ def map_board_products(board: str, limit: int = BOARD_STOCKS_PER_TOPIC) -> dict:
 # ---------------- 5. 组装与回调 ----------------
 
 
+def _bigrams(text: str) -> set[str]:
+    t = re.sub(r"\s+", "", text)
+    return {t[i : i + 2] for i in range(len(t) - 1)}
+
+
+def _topic_urls(topic: dict, news_items: list[dict], limit: int = 3) -> list[str]:
+    """CR4（P3）：按 topic 相关性挑选来源链接——此前所有 topic 都取相同的前 3 条
+    新闻 URL（与各自 topic 无关联）。用 topic 标题+板块名的字二元组与新闻
+    title+summary 的重叠数打分取前 N；无命中时回退首 N 条（与旧行为一致）。"""
+    key = " ".join([str(topic.get("title", "")), *[str(b) for b in topic.get("boards", [])]])
+    grams = _bigrams(key)
+    scored: list[tuple[int, dict]] = []
+    for n in news_items:
+        text = f"{n.get('title', '')} {n.get('summary', '')}"
+        score = len(grams & _bigrams(text))
+        if score > 0:
+            scored.append((score, n))
+    scored.sort(key=lambda x: -x[0])
+    picked = scored[:limit] if scored else [(0, n) for n in news_items[:limit]]
+    return [n["url"] for _, n in picked if n.get("url")]
+
+
 def build_items(topics: list[dict], news_meta: dict) -> tuple[list[dict], list[str]]:
     notes: list[str] = []
     items: list[dict] = []
@@ -521,7 +556,7 @@ def build_items(topics: list[dict], news_meta: dict) -> tuple[list[dict], list[s
                 "title": t["title"],
                 "summary": t.get("summary", ""),
                 "boardTags": t.get("boards", []),
-                "sourceUrls": [n["url"] for n in news_meta["items"][:3] if n.get("url")],
+                "sourceUrls": _topic_urls(t, news_meta["items"]),
                 "relatedCodes": related[:12],
             }
         )
@@ -575,5 +610,5 @@ def run_pipeline(trigger: str = "manual") -> dict:
             )
     else:
         result["ingested"] = 0
-    result["finishedAt"] = datetime.now().isoformat(timespec="seconds")
+    result["finishedAt"] = datetime.now(TZ).isoformat(timespec="seconds")
     return result

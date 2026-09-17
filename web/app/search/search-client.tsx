@@ -178,7 +178,12 @@ export default function SearchClient() {
       },
       cached ? 0 : 250,
     );
-    return () => clearTimeout(timer);
+    return () => {
+      clearTimeout(timer);
+      // CR4（P3）：清理时同步 abort 在途请求——此前只 clearTimeout，已发出的旧
+      // fetch 要等下一个 timer 触发才被 abort，窗口内旧响应会瞬态 setResults。
+      abortRef.current?.abort();
+    };
   }, [q, type, sortSel, page, browseMode, query, router]);
 
   function openProduct(r: Result) {

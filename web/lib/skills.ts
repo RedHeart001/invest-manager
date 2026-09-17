@@ -10,6 +10,8 @@
 import fs from "node:fs";
 import path from "node:path";
 
+import { Lru } from "./lru";
+
 export type SkillMeta = {
   name: string;
   description: string;
@@ -43,7 +45,13 @@ export function skillsDir(): string {
 
 type CacheEntry = { mtimeMs: number; skill: Skill };
 
-const cache = new Map<string, CacheEntry>();
+// CR5-P1（2026-09-17 review）：缓存挂 globalThis（C17/C27 口径，dev HMR 会重建
+// 模块作用域清空模块级 Map）；顺带换既有 Lru 加容量上限（O2：缓存无界增长）。
+const CACHE_KEY = Symbol.for("invest-manager.skills.cache");
+const cache: Lru<string, CacheEntry> = ((globalThis as unknown as Record<
+  symbol,
+  Lru<string, CacheEntry> | undefined
+>)[CACHE_KEY] ??= new Lru<string, CacheEntry>(200));
 
 /** 极简 frontmatter 解析（name/description/triggers/tools，comma 或 YAML list） */
 export function parseFrontmatter(raw: string): { meta: Record<string, string | string[]>; body: string } {
@@ -143,12 +151,19 @@ export function loadSkills(): Skill[] {
     return [];
   }
   const skills: Skill[] = [];
+  const seen = new Set<string>();
   for (const e of entries) {
     if (!e.isDirectory()) continue;
     const file = path.join(root, e.name, "SKILL.md");
     if (!fs.existsSync(file)) continue;
+    seen.add(file);
     const s = readSkill(file, e.name);
     if (s) skills.push(s);
+  }
+  // CR4（P3）：清理已删除技能目录的缓存条目——此前只在"文件存在性检查失败且被再次
+  // 查询"时删除，目录被移除后条目永不清理。
+  for (const key of [...cache.keys()]) {
+    if (key.startsWith(root) && !seen.has(key)) cache.delete(key);
   }
   return skills.sort((a, b) => a.name.localeCompare(b.name));
 }

@@ -66,7 +66,9 @@ def _evict_expired(max_age_hours: int = 24) -> int:
 
 def start_research(type_: str, code: str, name: str = "") -> dict:
     """提交研究任务。返回 {"taskId"} 或 {"rejected": 原因}。"""
-    log.warning("start_research called: type_=%r code=%r name=%r", type_, code, name)
+    # CR4（2026-09-15 review）：原为 WARNING 级调试日志（P5 联调遗留且含用户输入），
+    # 污染告警口径，降为 info。
+    log.info("start_research called: type_=%r code=%r name=%r", type_, code, name)
     key = _key(type_, code)
     with _lock:
         # 并发去重

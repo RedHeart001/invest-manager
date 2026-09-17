@@ -4,7 +4,10 @@ import { browseProducts, normalizeBrowse } from "@/lib/browse";
 import { searchProducts } from "@/lib/search";
 
 export async function GET(req: NextRequest) {
-  const q = req.nextUrl.searchParams.get("q") ?? "";
+  // CR4（P3）：q 长度上限——超长 CJK 查询经 buildMatchQuery 展开成巨大 FTS5
+  // MATCH 表达式，SQLite 解析耗时随 token 数增长。
+  const rawQ = req.nextUrl.searchParams.get("q") ?? "";
+  const q = rawQ.slice(0, 100);
   const typeParam = req.nextUrl.searchParams.get("type") ?? "all";
   const limitParam = Number(req.nextUrl.searchParams.get("limit") ?? "20");
   const limit = Number.isFinite(limitParam) ? Math.min(Math.max(limitParam, 1), 50) : 20;

@@ -7,6 +7,7 @@
 
 import time
 
+from ..utils.num import to_float
 from ..utils.timeout import run_with_timeout
 from .base import BaseProvider, ProviderError, ProviderNotSupported, register_chain
 
@@ -52,22 +53,26 @@ class SinaProvider(BaseProvider):
         candles: list[dict] = []
         for _, r in df.iterrows():
             d = str(r.get("date", ""))[:10]
-            close = r.get("close")
-            if not d or close is None:
+            # CR4（2026-09-15 review）：C21 漏网——裸 float() 拦不住 NaN
+            # （float(nan) 不抛异常），NaN 进 candles 被缓存 6h → 序列化 500。
+            # 统一 to_float，任一字段为 None 则跳过该行。
+            open_ = to_float(r.get("open"))
+            high = to_float(r.get("high"))
+            low = to_float(r.get("low"))
+            close = to_float(r.get("close"))
+            volume = to_float(r.get("volume"))
+            if not d or close is None or open_ is None or high is None or low is None:
                 continue
-            try:
-                candles.append(
-                    {
-                        "date": d,
-                        "open": float(r.get("open")),
-                        "high": float(r.get("high")),
-                        "low": float(r.get("low")),
-                        "close": float(close),
-                        "volume": float(r.get("volume")) if r.get("volume") is not None else None,
-                    }
-                )
-            except (TypeError, ValueError):
-                continue
+            candles.append(
+                {
+                    "date": d,
+                    "open": open_,
+                    "high": high,
+                    "low": low,
+                    "close": close,
+                    "volume": volume,
+                }
+            )
         if not candles:
             raise ProviderError(f"sina etf kline unparsable: {symbol}")
         self._cache[symbol] = (time.time(), candles)

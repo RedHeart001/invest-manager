@@ -25,3 +25,6 @@ out/
 .next-stale
 backups/
 docker-compose.override.yml
+
+# CR4（P3）：verify-all.mjs 的产物（跑测试时生成）
+verify-suites.txt

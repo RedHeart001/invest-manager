@@ -27,6 +27,30 @@ function truncateContent(content: string | null | undefined, budget: number): st
 }
 
 /**
+ * CR4（P3）：单条消息压缩——content 之外，tool_calls.arguments（大段 JSON）也可能
+ * 是体积大头，此前只截 content 截不动。仅在整条超预算时调用（末路兜底）。
+ */
+function shrinkMessage(m: LlmMessage, budget: number): LlmMessage {
+  if (msgSize(m) <= budget) return m;
+  const content = truncateContent(m.content, budget);
+  let toolCalls = m.tool_calls;
+  if (toolCalls && toolCalls.length > 0) {
+    const perCall = Math.max(200, Math.floor(budget / (toolCalls.length * 2)));
+    toolCalls = toolCalls.map((c) => ({
+      ...c,
+      function: {
+        ...c.function,
+        arguments:
+          c.function.arguments.length > perCall
+            ? `${c.function.arguments.slice(0, perCall)}…（参数过长已截断）`
+            : c.function.arguments,
+      },
+    }));
+  }
+  return { ...m, content, tool_calls: toolCalls };
+}
+
+/**
  * 裁剪消息序列到字符预算内：
  * - system 提示（首条）始终保留
  * - 溢出时从**最早的整轮**开始丢弃（轮以 user 消息为界），保证 tool 配对完整
@@ -38,7 +62,9 @@ export function trimContext(messages: LlmMessage[]): LlmMessage[] {
   const system = hasSystem ? messages[0] : null;
   const rest = hasSystem ? messages.slice(1) : messages;
 
-  let total = 0;
+  // CR4（P3）：system 也计入预算——此前只累计 rest，而 system（base prompt +
+  // ≤3 技能正文 ≈ 8K）在预算之外，实际峰值超 CHAT_CONTEXT_BUDGET 约 1/3。
+  let total = system ? msgSize(system) : 0;
   let overflow = false;
   for (let i = rest.length - 1; i >= 0; i--) {
     total += msgSize(rest[i]);
@@ -56,9 +82,7 @@ export function trimContext(messages: LlmMessage[]): LlmMessage[] {
         let u = i;
         while (u >= 0 && rest[u].role !== "user") u--;
         const start = u >= 0 ? u : i;
-        const kept = rest.slice(start).map((m) =>
-          msgSize(m) <= budget ? m : { ...m, content: truncateContent(m.content, budget) },
-        );
+        const kept = rest.slice(start).map((m) => shrinkMessage(m, budget));
         if (!system) return kept;
         return [
           { ...system, content: `${system.content}\n\n（更早的对话历史已因长度限制省略）` },
