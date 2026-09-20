@@ -1,5 +1,8 @@
 # 项目规则（Invest Manager）
 
+> 本文件由项目根 `CLAUDE.md` 通过 `@.claude/rules/project.md` 导入，**每次会话都会加载**，不要加 `paths:` frontmatter
+> （加了就只在处理匹配文件时才加载，而提交纪律必须每次都生效）。
+
 ## 提交纪律
 
 **本项目已授予常驻授权**：凡是主人让我改动了项目文件，**改动完成后主动 `git add` + `git commit`，不再逐次询问**。
@@ -9,7 +12,7 @@
 
 - **只 add 我本次改动涉及的具体文件**——逐个列路径，或 add 明确到本次改动的目录。
 - **禁止 `git add -A` / `git add .` / `git add -u`**。本仓库长期存在大量未提交的在制工作
-  （例如 CR6 那轮遗留的约 96 个路径），无差别 add 会把不同源的改动混进同一条提交，事后 blame 不出来。
+  （例如 CR6 那轮遗留的约 84 个路径），无差别 add 会把不同源的改动混进同一条提交，事后 blame 不出来。
 - add 前用 `git status --porcelain` 核对清单，确认里面没有我没碰过的文件。
 
 ### 什么时候触发
@@ -20,10 +23,12 @@
 
 ### commit message
 
-- 一句话说清**本次改了什么**，沿用本仓库既有的 Conventional Commits + 中文风格：
+- **标题一句话**说清本次改了什么，沿用本仓库既有的 Conventional Commits + 中文风格：
   `fix:` / `feat:` / `docs:` / `chore:` / `refactor:`，必要时带 scope（如 `docs(memory):`）。
-- 例：`docs: 拆分 PLAN 并建立 CONSTRAINTS / CODE-REVIEW / FIX-LEDGER`
-- 不要写"按用户要求修改"这类无信息量的描述——commit message 要能让半年后的自己看懂改了什么、为什么。
+- 例：`docs: 文档重组，PLAN/Progress 迁入 docs/ 并拆出 CONSTRAINTS/CODE-REVIEW/FIX-LEDGER`
+- **默认只写标题**。仅当改动跨多个文件、或包含"不看就说清"的非显然变化（如修正了一个错误结论、重建了缺失记录）时，
+  才补一个短 body，且不超过 5 行。
+- 不要写"按用户要求修改"这类无信息量的描述——要让半年后的自己看懂改了什么、为什么。
 
 ### 边界
 
@@ -32,22 +37,22 @@
 - **若当前在默认分支 `master`**：停下来先问，不要直接在 master 上提交。本项目日常开发分支是 `dev`。
 - **提交失败时**（pre-commit 拦截、无实际变更等）：如实报告失败原因，**不要为了让提交通过而改命令绕过**。
 
----
-
 ## 项目文档结构
 
 改代码前先看约束，改完按上文提交。
 
 | 文件 | 什么时候看 |
 |---|---|
-| [docs/PLAN.md](../docs/PLAN.md) | 需求与设计的**唯一来源**——要改行为先看这里是否已定稿 |
-| [docs/CONSTRAINTS.md](../docs/CONSTRAINTS.md) | **改代码前必自查**：C1–C34 不得回退的约束、跨服务契约坑、数据源事实、部署约束 |
-| [docs/PROGRESS.md](../docs/PROGRESS.md) | 唯一的进度账本——完成一个阶段/里程碑时更新它 |
-| [docs/CODE-REVIEW.md](../docs/CODE-REVIEW.md) | 各轮审查发现了什么（只增不改）；提新发现前先查文末的「已核验排除的误报」 |
-| [docs/FIX-LEDGER.md](../docs/FIX-LEDGER.md) | 每项修了没、怎么验的；**未闭环看板置顶** |
-| [docs/history/](../docs/history/) | 归档：逐项做法、改动文件清单、一次性操作记录 |
+| `docs/PLAN.md` | 需求与设计的**唯一来源**——要改行为先看这里是否已定稿 |
+| `docs/CONSTRAINTS.md` | **改代码前必自查**：C1–C34 不得回退的约束、跨服务契约坑、数据源事实、部署约束 |
+| `docs/PROGRESS.md` | 唯一的进度账本——完成一个阶段/里程碑时更新它 |
+| `docs/CODE-REVIEW.md` | 各轮审查发现了什么（只增不改）；提新发现前先查文末的「已核验排除的误报」 |
+| `docs/FIX-LEDGER.md` | 每项修了没、怎么验的；**未闭环看板置顶** |
+| `docs/history/` | 归档：逐项做法、改动文件清单、一次性操作记录 |
 
-其他长期有效的纪律（不在此重复，以来源为准）：
+## 其他长期有效的纪律
+
+（不在此重复正文，以来源为准）
 
 - **测试失败最多重试 3 次**，仍失败即停止并沟通，不无限重试（`docs/PLAN.md` R9）。
 - **开发期间不在 `next dev` 运行时执行 `npm run build`**（类型检查用 `npx tsc --noEmit`）——
