@@ -1,6 +1,17 @@
 # Invest Manager
 
-个人投资理财助手。需求与执行计划见 [PLAN.md](PLAN.md)，进度见 [Progress.md](Progress.md)。
+个人投资理财助手。需求与设计见 [docs/PLAN.md](docs/PLAN.md)，执行进度见 [docs/PROGRESS.md](docs/PROGRESS.md)。
+
+## 文档
+
+| 文件 | 内容 |
+|---|---|
+| [docs/PLAN.md](docs/PLAN.md) | 需求与设计（单一来源）：R 需求、M1–M8 模块、实施阶段、配置项、验证方式、决策记录 |
+| [docs/PROGRESS.md](docs/PROGRESS.md) | 执行进度账本：状态总览 + 倒序日志 + 阻塞与问题 |
+| [docs/CONSTRAINTS.md](docs/CONSTRAINTS.md) | 改代码前必自查：C1–C34 约束、跨服务契约坑、数据源事实、部署约束 |
+| [docs/CODE-REVIEW.md](docs/CODE-REVIEW.md) | 各轮代码审查发现了什么（只增不改）+ 轮次↔编号↔commit 对照表 |
+| [docs/FIX-LEDGER.md](docs/FIX-LEDGER.md) | 每项修了没、怎么验的；未闭环看板置顶 |
+| [docs/history/](docs/history/) | 归档：逐项做法、改动文件清单、一次性操作记录 |
 
 ## 结构
 
@@ -92,7 +103,7 @@ docker compose start web
 
 ## 配置
 
-复制 `web/.env.example` 为 `web/.env`；LLM/搜索 API key 按阶段启用（见 PLAN.md 配置项）。
+复制 `web/.env.example` 为 `web/.env`；LLM/搜索 API key 按阶段启用（见 [docs/PLAN.md](docs/PLAN.md) 配置项）。
 
 ## 测试（双服务启动后运行）
 
