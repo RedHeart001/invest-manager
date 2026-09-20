@@ -12,7 +12,7 @@ export type QuoteLike = {
   source?: string;
 };
 
-const ENRICH_TYPES = new Set(["stock", "fund", "bond", "crypto"]);
+const ENRICH_TYPES = new Set(["stock", "fund", "bond", "crypto", "hk", "us"]);
 
 /** 按类型批量取行情，返回 `${type}:${code}` → QuoteLike */
 export async function fetchQuotesByType(

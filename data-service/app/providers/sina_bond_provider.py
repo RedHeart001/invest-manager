@@ -40,6 +40,9 @@ class SinaBondProvider(BaseProvider):
         self._rows: dict[str, dict] = {}
         self._ts = 0.0
         self._lock = threading.Lock()
+        # CR-18（本轮 code review）：刷新失败沿用旧快照时记录原因与旧快照时点，
+        # 供响应 note 标注"数据陈旧"（R10/R16：降级须显式）。
+        self._stale_note: str | None = None
 
     # ---------- 快照加载（带缓存与并发去重） ----------
 
@@ -65,8 +68,15 @@ class SinaBondProvider(BaseProvider):
                 # 刷新失败：沿用旧快照（若有），否则向上抛错触发后续降级
                 if self._rows:
                     log.warning("bond snapshot refresh failed, reuse stale cache: %s", err)
+                    # CR-18：标注陈旧（含旧快照时点），响应侧显式提示
+                    age_s = int(time.time() - self._ts)
+                    self._stale_note = (
+                        f"转债快照刷新失败（{type(err).__name__}），沿用 {age_s}s 前的旧快照"
+                    )
                     return self._rows
                 raise ProviderError(f"新浪转债快照不可用: {type(err).__name__}: {err}") from err
+            # 刷新成功：清除陈旧标注
+            self._stale_note = None
 
             rows: dict[str, dict] = {}
             for _, r in df.iterrows():
@@ -112,13 +122,21 @@ class SinaBondProvider(BaseProvider):
             raise ProviderError(
                 f"转债 {code} 不在实时列表（可能未上市 / 已退市 / 非沪深转债）"
             )
-        return dict(q)
+        out = dict(q)
+        # CR-18：沿用旧快照时显式标注（chain_call 会把 note 合并到最终响应）
+        if self._stale_note:
+            out["note"] = self._stale_note
+        return out
 
     def get_quotes(self, type_: str, codes: list[str]) -> dict[str, dict]:
         if type_ != "bond":
             raise ProviderNotSupported(f"sina-bond serves bond only, got {type_}")
         rows = self._load()
-        return {c: dict(rows[c]) for c in codes if c in rows}
+        return {
+            c: ({**dict(rows[c]), **({"note": self._stale_note} if self._stale_note else {})})
+            for c in codes
+            if c in rows
+        }
 
     # ---------- K 线（不支持：见模块 docstring 的排除清单） ----------
 

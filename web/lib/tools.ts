@@ -240,7 +240,7 @@ async function toolGetQuote(args: { type: string; code: string }): Promise<ToolR
       high: numOrNull(q.high),
       low: numOrNull(q.low),
       prevClose: numOrNull(q.prevClose),
-      volume: q.volume ?? null,
+      volume: numOrNull(q.volume),
       source: q.source ?? null,
     },
   };

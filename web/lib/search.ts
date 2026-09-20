@@ -2,6 +2,7 @@
 // 打分规则见 lib/score.ts；召回策略保证中文子串、拼音、首字母、代码均可命中。
 
 import { type Quote } from "./data-service";
+import { chatJson } from "./llm";
 import { fetchQuotesByType } from "./quote-enrich";
 import { prisma } from "./prisma";
 import { parseTags, scoreProduct } from "./score";
@@ -105,17 +106,13 @@ async function gatherCandidates(q: string, type?: string): Promise<{
   return { products: Array.from(byId.values()), ftsIds };
 }
 
-export async function searchProducts(opts: {
-  q: string;
-  type?: string;
-  limit?: number;
-}): Promise<SearchResult[]> {
-  const q = opts.q.trim();
-  // B2：limit 裁剪到 1~50（此前负数会走 slice(0,-1) 产生异常条数）
-  const limit = Math.min(Math.max(opts.limit ?? 20, 1), 50);
-  if (!q) return [];
-
-  const { products, ftsIds } = await gatherCandidates(q, opts.type);
+/** 内部：给定查询词执行一次"召回→打分→排序→截断"（不含行情富集） */
+async function scoreQuery(
+  q: string,
+  type: string | undefined,
+  limit: number,
+): Promise<SearchResult[]> {
+  const { products, ftsIds } = await gatherCandidates(q, type);
 
   // 个性化加权数据
   const [watchlist, clickGroups] = await Promise.all([
@@ -131,7 +128,7 @@ export async function searchProducts(opts: {
     clickGroups.map((c) => [`${c.type}:${c.code}`, c._count._all]),
   );
 
-  const scored = products
+  return products
     .map((p) => ({
       p,
       score: scoreProduct(q, p, {
@@ -142,16 +139,64 @@ export async function searchProducts(opts: {
     }))
     .filter((x) => x.score > 0)
     .sort((a, b) => b.score - a.score || a.p.code.localeCompare(b.p.code))
-    .slice(0, limit);
+    .slice(0, limit)
+    .map(({ p, score }) => ({
+      type: p.type,
+      code: p.code,
+      name: p.name,
+      exchange: p.exchange,
+      tags: parseTags(p.tags),
+      score,
+    }));
+}
 
-  const results: SearchResult[] = scored.map(({ p, score }) => ({
-    type: p.type,
-    code: p.code,
-    name: p.name,
-    exchange: p.exchange,
-    tags: parseTags(p.tags),
-    score,
-  }));
+/**
+ * G4（批次 D）：FTS/LIKE 无结果时的 LLM 兜底召回。
+ * 让 LLM 从自然语言查询里抽取"产品名/代码/概念关键词"，再走一次检索。
+ * 失败（LLM 未配置/不可用/无法抽取）一律静默返回空——兜底不得阻塞搜索。
+ */
+async function llmFallback(q: string, type: string | undefined, limit: number) {
+  const extracted = await chatJson(
+    "你是理财产品检索助手，从用户查询中抽取最可能的检索关键词。" +
+      '输出 JSON：{"keywords":["关键词1","关键词2"]}。' +
+      "关键词应为产品简称、代码或板块概念名（如 贵州茅台、600519、新能源），最多 3 个；" +
+      "若无法抽取则返回空数组。不要输出解释。",
+    q,
+  );
+  const kws = Array.isArray((extracted as { keywords?: unknown })?.keywords)
+    ? ((extracted as { keywords: unknown[] }).keywords as unknown[])
+        .map((k) => String(k).trim())
+        .filter(Boolean)
+        .slice(0, 3)
+    : [];
+  if (kws.length === 0) return [] as SearchResult[];
+  for (const kw of kws) {
+    const hits = await scoreQuery(kw, type, limit);
+    if (hits.length > 0) return hits;
+  }
+  return [] as SearchResult[];
+}
+
+export async function searchProducts(opts: {
+  q: string;
+  type?: string;
+  limit?: number;
+}): Promise<SearchResult[]> {
+  const q = opts.q.trim();
+  // B2：limit 裁剪到 1~50（此前负数会走 slice(0,-1) 产生异常条数）
+  const limit = Math.min(Math.max(opts.limit ?? 20, 1), 50);
+  if (!q) return [];
+
+  let results = await scoreQuery(q, opts.type, limit);
+
+  // G4：无结果 → LLM 抽取关键词兜底重查（失败静默，不阻塞）
+  if (results.length === 0) {
+    try {
+      results = await llmFallback(q, opts.type, limit);
+    } catch {
+      results = [];
+    }
+  }
 
   await enrichWithQuotes(results);
   return results;

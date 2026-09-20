@@ -23,7 +23,7 @@
 | R10 | **外部数据源不可达时必须优雅降级**（标注来源/留空），不阻塞其余功能 | P1 | provider 降级 + `inconclusive` 标注 |
 | R11 | **变化归因两阶段策略**：P2 详情页做算法阶段划分（时长/幅度）+ 大波动日事件标注（一律标"可能相关"，不做因果断言）；完整多因素归因归 P5 深度研报 | P2 设计定稿 | 详情页 ③④ 区 |
 | R12 | **海外数据源自动降级**：海外源（Tavily/OpenBB/CoinGecko）经用户本地代理优先尝试；不可达时自动切换国内源（东财/新浪）并在界面与产出中显式标注降级状态 | P3–P5 评估定稿 | 各 provider 降级链 + 前端降级标注 |
-| R13 | **多源数据对比验证**：关键行情指标（收盘价、净值等）在数据源允许时做双源交叉验证，差异超阈值时显式标注来源与偏差，不做静默取舍；各数据源可用性验证推迟到对应阶段落地时进行 | 规划期补充 | provider 层 + 测试断言 |
+| R13 | **多源数据对比验证**：关键行情指标（收盘价、净值等）在数据源允许时做双源交叉验证，差异超阈值时显式标注来源与偏差，不做静默取舍；各数据源可用性验证推迟到对应阶段落地时进行 | 规划期补充 | **G3 落地 2026-09-19**：`/quote/verified` 端点 + `providers/chain.py` 的 `verify_metric`（按需，不叠加普通 /quote）+ 测试断言 |
 | R14 | **分类浏览**：搜索页选中类型标签即浏览该类全部产品（无需关键词），支持按涨幅/名称/代码排序与分页；全局排序基于行情快照列（同步/刷新任务写入），列表展示仍为实时富集 | P2 | `/api/search` 浏览分支 + `lib/browse.ts` + `lib/market-snapshot.ts` |
 | R15 | **多源自动降级 + 请求频率控制**：同类数据源主备链（主源失败/熔断 → 自动切备源，响应标注来源与降级状态）；按"源族"令牌桶限速（东财多域名共享额度，因封禁为 IP 级）+ 连续失败熔断冷却；**目标是用户侧永不空白**，无可用备源时显式缺口说明 | P2 收尾（2026-09-12 批准） | provider 主备链 + `app/utils/limiter.py` + 腾讯/新浪备源 provider |
 | R16 | **异常/失败终态必须如实呈现**：服务端失败必须以失败形态呈现，**不得回落为"成功/中性"等假象**（如研报失败不得渲染成"已完成·中性评级"）；降级与数据缺口一律显式标注，不粉饰 | CR5 审查（2026-09-17） | 各前端消费点（`ChatUI` 研报推送、`ResearchPanel` 等） |
@@ -100,9 +100,10 @@
 - **定时任务统一在 data-service（APScheduler）**：每日盘前/盘后 2 次（产品列表同步等同框架调度，Next.js 侧不跑 cron）
 - 流程：搜索 API（Tavily）抓财经新闻 → LLM 把热点**结构化为板块/概念标签** → 走 AkShare 板块成分接口（`stock_board_concept_cons_em` / 行业板块）取**成分股 + 主题基金** → 产出 digest 后**回调 `/api/hotspots/ingest` 落库** `HotspotDigest`（data-service 不直连数据库）
   - 相比关键词模糊匹配，板块映射的关联精度与可解释性显著提升（"光伏热点 → 光伏板块 N 只成分股"）
-- **推送为正式交付项**：① 站内 dashboard 热点卡片流 + SSE 实时推送（任务完成即推到前端）；② webhook 通道（企业微信/邮件，可配置开关）
+- **推送为正式交付项**：① 站内 dashboard 热点卡片流 + SSE 实时推送（任务完成即推到前端）；② ~~webhook 通道（企业微信/邮件，可配置开关）~~ → **2026-09-19 显式裁剪**（见文末「批次 D 决策记录」）
 - 热点卡片下挂"相关产品"（点击进详情页）+"深度解读"入口（调统一 Agent 的 L2 工具出研报）
 - 搜索 API 无 key 时降级为"仅站内数据"，标注 `inconclusive`
+- **G2 落地（2026-09-19）**：产品主数据每日自动同步——data-service `app/sync_scheduler.py`（APScheduler，默认 02:00 Asia/Shanghai，`SYNC_HOUR`/`SYNC_MINUTE` 可覆盖）+ 启动补跑，回调 web `POST /api/sync`；状态端点 `/sync/status`、手动触发 `/sync/run`。此前仅手动触发（需求"每日全量同步"未自动落地）。
 
 - **P3 补强（2026-09-12 评估定稿）**：
   - **新闻双源 + 自动降级（R12）**：Tavily（经本地代理）优先；不可达时自动切换东财/新浪新闻源（AkShare，国内可达），digest 与界面显式标注降级状态——原"仅站内数据"降级无热点可发，替换为国内源降级；启动第一步做连通性 spike
@@ -112,15 +113,16 @@
 
 ### M2 智能搜索（需求 2）
 
-- 每日全量同步产品列表到 `Product`（走 data-service provider 层，A股/基金走 AkShare，加密走 OpenBB/CoinGecko）
+- 每日全量同步产品列表到 `Product`（走 data-service provider 层，A股/基金走 AkShare，加密走 OpenBB/CoinGecko）——**自动调度见 M1「G2 落地」**
 - FTS5 匹配（名称/拼音/标签）+ 代码前缀精确匹配加权 → 组合打分；自选/近期查看/**历史点击率**（`SearchClickLog`）加权
-- 兜底：FTS 无结果时 LLM 提取意图关键词再查
+- 兜底：FTS 无结果时 LLM 提取意图关键词再查（**G4 落地 2026-09-19**：`lib/search.ts` 的 `llmFallback` + `lib/llm.ts` 的 `chatJson`；失败静默降级不阻塞搜索）
 - UI：搜索框 + 类别 Tab + 结果列表（代码、名称、最新价、涨跌幅、标签），点击进详情（点击行为落 `SearchClickLog`）
+- **自选（Watchlist）可写（G5 落地 2026-09-19）**：`/api/watchlist`（GET/POST/DELETE）+ 详情页「加自选」按钮；此前该表只被搜索加权**读取**、无写入入口
 - **分类浏览（R14，2026-09-12）**：空关键词 + 分类标签 → 浏览模式（20 条/页，覆盖全部 3.4 万产品）；排序支持涨幅（快照列全局排序 + 当前页实时富集展示）/名称（拼音序）/代码；行情快照随每日同步自动刷新，亦可 `POST /api/market/refresh` 手动触发；快照缺失时退化为代码序并在行情列显示实时值
 - **结果价格富集（覆盖全部产品类型，单次批量请求）**：
   - 股票 / 场内基金（ETF、LOF）/ 可转债 → 东财实时行情（`ulist.np` 批量接口）
   - 场外基金 → 每日净值表（全市场单请求 + 内存缓存 30 分钟，含日增长率）
-  - 加密货币 → CoinGecko 批量行情
+  - 加密货币 → CoinGecko 批量行情；**港股（hk）→ 东财 `stock_hk_spot_em` 快照（G6 落地 2026-09-19）**
   - 无报价品种（如已退市转债）显示 `--` 优雅降级，不阻塞结果展示
 
 ### M3 产品详情页（需求 3）
@@ -269,6 +271,17 @@
   | 可转债 列表 | 东财 `bond_zh_cov`（1052 只，含未上市） | **新浪 cov_spot（约 320 只在交易标的）**——东财限流时不再返回空列表（覆盖度较低属降级可用） |
   | 场外基金净值 | 东财天天基金（独立域名族，限流期间实测可用） | 待补（蛋卷/新浪需验证） |
   | 加密 | CoinGecko（R12 代理优先） | 待补（OKX/币安经代理） |
+  | 港股 行情 | 东财 `push2` 系（`clist/get` 多 host 降级） | **腾讯 `qt.gtimg.cn`（✅ 2026-09-20 实测：`hk00700` HTTP 200 / 78 字段，字段位置与 A 股一致）**——扩展 `tencent_provider`，注册为 hk 备源（position=1） |
+  | 港股 日K | 东财 `push2his` 系（多 host 降级） | **腾讯 `web.ifzq.gtimg.cn/fqkline`（✅ 2026-09-20 实测：`hk00700,day,...` 返回 day 数组，行格式与 A 股同，`qfqday or day` 回退已覆盖）**——同一 provider 覆盖；复权口径与主源一致（均前复权） |
+  | 港股 列表 | 东财 `clist/get`（多 host 降级） | **确认无可用备源**（腾讯无全量港股列表接口）→ 显式降级：已有数据保留（C1 空载荷保护 + 降级缩水保护）+ 同步显式报错（R10 语义） |
+
+- **港股接入的实测认知与工程约束（2026-09-20 实测，不得回退）**：
+  - **东财 CDN 节点可用性因网络而异，禁止依赖单一节点**：实测 `72.push2.eastmoney.com`（akshare `stock_hk_spot_em` **硬编码**的节点）返回 `RemoteDisconnected`，而 `push2delay.eastmoney.com` / `7.push2.eastmoney.com` 返回 200 真实数据（`89988 阿里巴巴-WR`）。故 `hk_provider` **不套用 akshare 封装**，改为直连东财 + 多 host 按序降级（`HK_SPOT_HOSTS` = push2 / push2delay / 7.push2 / 72.push2；`HK_HIST_HOSTS` = push2his / 33.push2his / 63.push2his），走同一源族限速器（与 A 股共享东财额度）+ 看门狗，全失败才抛 `ProviderError`。**同理适用于任何复用 akshare 封装的路径**：akshare 硬编码单节点 = 绕过本项目的多 host 降级能力。
+  - **港股代码为 5 位数字，与 A 股/基金的 6 位不同 → 腾讯符号映射必须按类型显式分派**：新增 `_hk_symbol(code)`（5 位补零 → `hkXXXXX`；非数字或 >5 位返回 `None`）与 `_symbol_for(type_, code)`（`type_=="hk"` 走港股映射，否则走原 `_symbol`）。**禁止复用 A 股的 `_symbol`**——其前缀规则会把 `00700` 误判为 `sz00700`、`89988` 误判为 `sh89988`。**禁止改用"按长度猜类型"的隐式约定**（与 CR-17 同类反模式）。
+  - **东财港股列表必须分页，且列表接口禁止用于行情路径（2026-09-20 实测）**：
+    - 东财 `clist/get` 对港股**忽略大分页参数**：`pz` 给 100/1000/10000 均只返回 **100 条**；港股 `total≈4707` → 必须按 `total` 分页遍历（约 48 页）。
+    - **接口分工红线**：单股行情用 `/api/qt/stock/get`（1 次请求）、批量行情用 `/api/qt/ulist.np/get`（1 次请求）、**全量列表才用 `clist/get` 分页**。**行情路径严禁触发列表分页**——早期版本让 `get_quote` 复用列表快照，实测查询单个港股需拉取 4700 条、耗时约 4 分钟，属设计缺陷（已修正，并由单测 `test_quote_does_not_trigger_list_paging` 锁定）。
+    - **同步耗时与其对 BFF 超时的要求**：48 页经源族限速器（最小间隔 5s）→ 实测约 **236s**。故 BFF `lib/sync.ts` 拉取 `/products` 的超时由 180s 放宽至 **600s**（`/api/sync` 的 `maxDuration=800` 覆盖）；**同步期间的其它东财请求会排队**（共享源族额度），属 R15 有意设计，凌晨低峰执行影响可控。
 
 - **转债标的甄别（2026-09-13 重要认知）**：**未上市/已退市转债不在实时行情列表内**（如 113710 四方转债、123285 润禾转02）——其 K 线与行情**本就不可得**，取数时报明确错误而非静默缺失。此前 P2 遗留的"转债 K 线 2 项失败"即因**测试动态选中了此类未上市标的**，被长期误归因为东财限流
 - **活跃代码段（K 线口径参考）**：沪 111/113/118、深 123/127/128；`110xxx` 多为沪市老债/已到期段，通常无行情
@@ -557,3 +570,21 @@ RESEARCH_MAX_COLLECT_THREADS=4       # 研报采集并发线程上限（utils/ti
 - `hotspots ingest` 拉全量 title 去重（量小，已在 C 系列修复口径问题）
 - `ProductCharts` 大数组虚拟化（当前 90 点，风险低）
 - MCP 服务器进一步功能（HTTP profile 已可用，外部 stdio 第三方 server 保持 disabled 至网络环境允许）
+
+## 批次 D 决策记录（2026-09-19，第一轮 code review 需求缺口处置）
+
+> 第一轮 code review（见 `code-review.md` 第三节）列出 7 项需求交付缺口 G1–G7，经主人决策如下。
+
+| 编号 | 缺口 | 决策 | 落地/说明 |
+|---|---|---|---|
+| **G1** | M1 webhook 推送（企业微信/邮件）未实现 | **显式裁剪** | 站内 dashboard + SSE 实时推送已覆盖核心需求；webhook 与"本地单机"定位不匹配，按裁剪处理。**需求条目已在上文 M1 划除**；未来如需，重新立项 |
+| **G2** | 产品主数据无自动同步 | **实现** | `data-service/app/sync_scheduler.py` + `/sync/status`、`/sync/run`；默认每日 02:00（北京时间），含启动补跑 |
+| **G3** | R13 双源交叉验证未落地 | **实现** | `providers/chain.py#verify_metric` + `/quote/verified`（按需端点，不叠加普通 /quote，避免放大外部请求）；差异超阈值在 `note` 显式标注 |
+| **G4** | M2 FTS 无结果时 LLM 兜底召回未实现 | **实现** | `lib/search.ts#llmFallback` + `lib/llm.ts#chatJson`；LLM 未配置/失败时静默降级 |
+| **G5** | Watchlist 只读不通写 | **实现** | `/api/watchlist`（GET/POST/DELETE）+ `app/components/WatchButton.tsx`（详情页） |
+| **G6** | `hk` 类型无 provider | **实现 + 补备源** | ① `data-service/app/providers/hk_provider.py`（东财直连 + **多 host 降级**，非 akshare 封装）；② **腾讯港股备源**（扩展 `tencent_provider`：`_hk_symbol`/`_symbol_for` + `register_chain(["hk"], …, position=1)`）；③ web 侧 `SYNC_TYPES`、搜索 Tab、行情富集、快照白名单纳入 hk。详见 M8 表「港股」三行 |
+| **G7** | 写接口无鉴权 | **部分实现** | B4 已加 Origin/Referer 校验（拦浏览器跨站简单表单）；**完整身份鉴权留待上云前**补齐（届时需 token，当前单机无暴露面） |
+
+**未闭环/前置项**：G7 的完整鉴权；G2/G3/G6 的真实外部源连通性验证（沙箱网络受限，需本地环境实测：`POST /api/sync?type=hk`、`GET /quote?type=hk&code=00700`、`GET /quote/verified?type=stock&code=600519`、`/sync/status`）。
+
+**G6 追加记录（2026-09-20，本地连通性排查后）**：本地 `POST /api/sync?type=hk` 首次失败（`RemoteDisconnected`），排查确认**根因非"港股被封"，而是 akshare `stock_hk_spot_em` 硬编码的 `72.push2` 节点不可达**（同族 `push2delay` / `7.push2` 返回 200 真实数据）。据此：① 重写 `hk_provider` 为直连 + 多 host 降级；② 补腾讯备源（行情 + 日K 均实测可用；列表无备源，显式降级）。**故 hk 实际为「东财多host主源 + 腾讯备源」双层防线**，而非单点。

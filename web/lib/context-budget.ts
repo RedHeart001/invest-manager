@@ -65,11 +65,9 @@ export function trimContext(messages: LlmMessage[]): LlmMessage[] {
   // CR4（P3）：system 也计入预算——此前只累计 rest，而 system（base prompt +
   // ≤3 技能正文 ≈ 8K）在预算之外，实际峰值超 CHAT_CONTEXT_BUDGET 约 1/3。
   let total = system ? msgSize(system) : 0;
-  let overflow = false;
   for (let i = rest.length - 1; i >= 0; i--) {
     total += msgSize(rest[i]);
     if (total > budget) {
-      overflow = true;
       // 溢出发生在 i：从 i 之后第一个 user 消息开始保留（不切断轮内配对）
       let j = i + 1;
       while (j < rest.length && rest[j].role !== "user") j++;
@@ -99,6 +97,5 @@ export function trimContext(messages: LlmMessage[]): LlmMessage[] {
   }
 
   // 未超预算：原样返回
-  void overflow;
   return messages;
 }

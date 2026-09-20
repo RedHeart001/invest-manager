@@ -18,6 +18,9 @@ out/
 # database
 *.db
 *.db-journal
+# SQLite WAL 模式边车文件（启用 WAL 后产生；含未检查点数据，不应入库）
+*.db-wal
+*.db-shm
 
 # misc
 .DS_Store

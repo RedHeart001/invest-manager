@@ -24,23 +24,44 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+/** 构造批量快照 UPDATE 的 SQL 与绑定参数（纯函数，便于单测；CR-09） */
+export function buildSnapshotUpdate(
+  type: string,
+  rows: { code: string; price: number | null; changePct: number | null }[],
+): { sql: string; params: unknown[] } {
+  const codes = rows.map((r) => r.code);
+  const placeholders = codes.map(() => "?").join(",");
+  const caseOf = (n: number) => Array.from({ length: n }, () => "WHEN ? THEN ?").join(" ");
+
+  const params: unknown[] = [];
+  for (const r of rows) params.push(r.code, r.price);
+  for (const r of rows) params.push(r.code, r.changePct);
+
+  const sql = `UPDATE "Product" SET
+       "lastPrice" = COALESCE(CASE "code" ${caseOf(rows.length)} END, "lastPrice"),
+       "lastChangePct" = COALESCE(CASE "code" ${caseOf(rows.length)} END, "lastChangePct")
+     WHERE "type" = ? AND "code" IN (${placeholders})`;
+  return { sql, params: [...params, type, ...codes] };
+}
+
 async function updateChunk(
   type: string,
   rows: { code: string; price: number | null; changePct: number | null }[],
 ): Promise<void> {
-  // 注意：Prisma 内置 SQLite 引擎不支持 UPDATE...FROM (VALUES)（实测语法错误），
-  // 用单事务批量 updateMany（走 type+code 唯一索引，万级行秒级）
-  await prisma.$transaction(
-    async (tx) => {
-      for (const r of rows) {
-        await tx.product.updateMany({
-          where: { type, code: r.code },
-          data: { lastPrice: r.price, lastChangePct: r.changePct },
-        });
-      }
-    },
-    { timeout: 120_000, maxWait: 10_000 },
-  );
+  // CR6-P1-2（2026-09-18 review）：此前是"一个事务里跑 100 条 updateMany"，
+  // 在 SQLite 单写锁下把锁窗口拉到秒级（timeout 120s），与页面读库并发时
+  // 读请求会遭遇 SQLITE_BUSY。改为**整批一条 UPDATE**（CASE 表达式），
+  // 锁窗口从秒级降到毫秒级——未命中的 code 不更新。
+  //
+  // 参数上限：BATCH=100 → 100×2（price）+100×2（changePct）+1（type）+100（code）
+  // = 501 个绑定参数，低于 SQLite 默认 999 上限。
+  if (rows.length === 0) return;
+  // CR-09（本轮 code review）：某字段缺失（null）时**保留旧值**——
+  // 此前 CASE 会把该行另一为 null 的字段直接写成 NULL，覆盖上一轮有效快照。
+  // 用 COALESCE(新值, 旧值)：新值为 null 时沿用旧值，避免部分降级把快照列擦空。
+  // code/type 均来自库内白名单（products 表），无注入面；值一律走绑定参数。
+  const { sql, params } = buildSnapshotUpdate(type, rows);
+  await prisma.$executeRawUnsafe(sql, ...params);
 }
 
 // M2/O3：单飞——每日 sync 与手动 refresh 并发触发时共享同一次刷新，

@@ -13,6 +13,7 @@ const TABS = [
   { key: "fund", label: "基金" },
   { key: "bond", label: "债券" },
   { key: "crypto", label: "虚拟币" },
+  { key: "hk", label: "港股" },
 ] as const;
 
 type Result = SearchResult;

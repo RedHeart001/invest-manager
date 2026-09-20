@@ -46,6 +46,7 @@ model HotspotDigest {
   note         String? // P3：降级/缺口说明
   createdAt    DateTime @default(now())
 
+  @@unique([date, title])
   @@index([date])
 }
 
@@ -82,9 +83,14 @@ model ChatMessage {
   toolCalls String? // JSON：assistant 的 tool_calls（模型请求的工具调用）
   toolCallId String? // tool 消息对应的 tool_call_id（function calling 配对）
   name      String? // tool 消息的工具名
+  // CR6-P2-6：真实时间戳——此前无此列，getMessages 用 cuid 主键冒充 createdAt；
+  // cuid 大致时间有序但不保证字典序等价于插入序，极端并发下会错序，
+  // 影响送进 LLM 的历史顺序与 UI 展示。
+  createdAt DateTime    @default(now())
   session   ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
 
   @@index([sessionId])
+  @@index([sessionId, createdAt])
 }
 
 // 自选产品（搜索排序加权）

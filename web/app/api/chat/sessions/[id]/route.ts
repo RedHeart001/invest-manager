@@ -26,11 +26,17 @@ export async function DELETE(
   ctx: { params: Promise<{ id: string }> },
 ) {
   const { id } = await ctx.params;
+  // CR-15（本轮 code review）：区分"会话不存在"（P2025）与真实 DB 故障——
+  // 此前任何异常都吞成 404，掩盖了数据库错误。
   try {
     await deleteSession(id);
     return NextResponse.json({ ok: true });
-  } catch {
-    return NextResponse.json({ error: "session not found" }, { status: 404 });
+  } catch (e) {
+    if (typeof e === "object" && e !== null && (e as { code?: string }).code === "P2025") {
+      return NextResponse.json({ error: "session not found" }, { status: 404 });
+    }
+    console.error("[sessions] delete failed:", e instanceof Error ? e.message : e);
+    return NextResponse.json({ error: "delete failed" }, { status: 500 });
   }
 }
 

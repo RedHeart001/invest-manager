@@ -39,6 +39,11 @@ function dayStart(iso: string): Date {
   return new Date(`${iso}T00:00:00.000Z`);
 }
 
+/** Prisma 唯一约束冲突（P2002）判定 */
+function isUniqueViolation(e: unknown): boolean {
+  return typeof e === "object" && e !== null && (e as { code?: string }).code === "P2002";
+}
+
 type DigestDbRow = {
   id: string;
   date: Date;
@@ -192,20 +197,33 @@ export async function ingestDigests(
     }
     const boardTags = (item.boardTags ?? []).map((t) => String(t).trim()).filter(Boolean);
     const related = await resolveRelated(item.relatedCodes ?? [], boardTags);
-    const row = await prisma.hotspotDigest.create({
-      data: {
-        date: dayStart(dateIso),
-        title: title.slice(0, 200),
-        summary: String(item.summary ?? "").slice(0, 500),
-        boardTags: JSON.stringify(boardTags),
-        sourceUrls: JSON.stringify((item.sourceUrls ?? []).slice(0, 5)),
-        relatedCodes: JSON.stringify(related),
-        newsSource: payload.newsSource ?? null,
-        engine: payload.engine ?? null,
-        degraded: Boolean(payload.degraded),
-        note: payload.note ? String(payload.note).slice(0, 500) : null,
-      },
-    });
+    let row;
+    try {
+      row = await prisma.hotspotDigest.create({
+        data: {
+          date: dayStart(dateIso),
+          title: title.slice(0, 200),
+          summary: String(item.summary ?? "").slice(0, 500),
+          boardTags: JSON.stringify(boardTags),
+          sourceUrls: JSON.stringify((item.sourceUrls ?? []).slice(0, 5)),
+          relatedCodes: JSON.stringify(related),
+          newsSource: payload.newsSource ?? null,
+          engine: payload.engine ?? null,
+          degraded: Boolean(payload.degraded),
+          note: payload.note ? String(payload.note).slice(0, 500) : null,
+        },
+      });
+    } catch (e) {
+      // CR-11（本轮 code review）：唯一约束 (date,title) 兜住并发 ingest 的
+      // "先读后写"竞态——两个实例同时通过 existTitles 检查时，后写者在此被
+      // 数据库拒绝（P2002），按"已存在"处理（跳过），不再产生重复卡片。
+      if (isUniqueViolation(e)) {
+        skipped += 1;
+        existTitles.add(title);
+        continue;
+      }
+      throw e;
+    }
     existTitles.add(title);
     inserted += 1;
     createdRows.push(toDigestRow(row));

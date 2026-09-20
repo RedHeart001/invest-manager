@@ -309,6 +309,12 @@ type ServerRuntime = {
   reason?: string;
   lastAttempt: number;
   tools: RawTool[];
+  /**
+   * CR-12（本轮 code review）：停止代际。`stopAllMcp` 自增该值；进行中的
+   * `ensureConnected` 完成时若发现代际已变，则丢弃结果并关掉刚建立的连接——
+   * 否则"停止"后仍会把 client 写回并置 connected（复活已停止的 server）。
+   */
+  generation: number;
 };
 
 /**
@@ -375,6 +381,7 @@ function runtimeFor(cfg: ServerCfg): ServerRuntime {
     reason: cfg.enabled === false ? "配置中 enabled=false" : undefined,
     lastAttempt: 0,
     tools: [],
+    generation: 0,
   };
   runtimes.set(cfg.name, fresh);
   return fresh;
@@ -403,29 +410,60 @@ async function ensureConnected(rt: ServerRuntime): Promise<AnyClient | null> {
   if (rt.state === "degraded" && now - rt.lastAttempt < RETRY_COOLDOWN_MS) return null;
   rt.lastAttempt = now;
 
-  rt.connecting = (async () => {
+  // 用持有者对象避免 async 函数体内自引用的 TDZ（TS 控制流分析不接受）
+  const holder: { p: Promise<AnyClient | null> | null } = { p: null };
+  const attempt = (async (): Promise<AnyClient | null> => {
     const transport = rt.cfg.transport ?? "stdio";
+    // CR-12（本轮 code review）：捕获启动时的代际；连接完成若代际已变
+    // （期间 stopAllMcp 被调用），则丢弃结果并关掉连接，防止"复活已停止的 server"。
+    const gen = rt.generation;
+    // CR6-P2-2：client 提升到 try 外，便于 catch 中清理——listTools() 失败时
+    // 子进程已 spawn 却未被 kill（与 CR4 修的 connect() 握手段同类漏网），
+    // 每次冷却重试都会再 spawn 一个 → 孤儿进程累积。
+    let client: AnyClient | null = null;
     try {
       if (transport === "sse") throw new Error("sse（旧传输）不在 MVP 支持范围，请用 stdio 或 http");
-      const client: AnyClient =
-        transport === "stdio" ? new StdioClient(rt.cfg) : new HttpClient(rt.cfg);
+      client = transport === "stdio" ? new StdioClient(rt.cfg) : new HttpClient(rt.cfg);
       await client.connect();
-      rt.tools = await client.listTools();
+      const tools = await client.listTools();
+      if (gen !== rt.generation) {
+        // 连接过程中被"停止"：不写回状态，关闭刚建立的连接
+        try {
+          client.stop();
+        } catch {
+          /* 停止失败忽略 */
+        }
+        return null;
+      }
+      rt.tools = tools;
       rt.client = client;
       rt.state = "connected";
       rt.reason = undefined;
       return client;
     } catch (e) {
-      rt.client = null;
-      rt.state = "degraded";
-      rt.reason = e instanceof Error ? e.message : "连接失败";
-      console.warn(`[mcp:${rt.cfg.name}] 降级（不阻塞对话）：${rt.reason}`);
+      // 清理状态前先停掉已 spawn 的连接（HttpClient 无子进程，stop 为幂等空操作）
+      try {
+        client?.stop();
+      } catch {
+        /* 清理失败不应覆盖原始错误 */
+      }
+      // 代际已变说明这是被废弃的连接尝试：不改状态，避免覆盖停止语义
+      if (gen === rt.generation) {
+        rt.client = null;
+        rt.state = "degraded";
+        rt.reason = e instanceof Error ? e.message : "连接失败";
+        console.warn(`[mcp:${rt.cfg.name}] 降级（不阻塞对话）：${rt.reason}`);
+      }
       return null;
     } finally {
-      rt.connecting = null;
+      // 仅当 in-flight 仍是本次连接时才清空——避免 stopAllMcp 已清空后
+      // 本次收尾又覆盖掉"后续新连接"的 connecting 引用。
+      if (rt.connecting === holder.p) rt.connecting = null;
     }
   })();
-  return rt.connecting;
+  holder.p = attempt;
+  rt.connecting = attempt;
+  return attempt;
 }
 
 /** MCP 工具 → LLM 工具定义（未连接的 server 不注入任何工具） */
@@ -456,17 +494,37 @@ export async function mcpLlmTools(): Promise<LlmToolDef[]> {
   return defs;
 }
 
-/** 调用 MCP 工具（失败一律返回降级结果，不抛异常） */
+/** 调用 MCP 工具（失败一律返回降级结果，不抛异常）
+ *
+ * CR-13（本轮 code review）：工具名形如 `mcp_<server>_<tool>`（见 toLlmToolName），
+ * 可据此**定位目标 server，只连它一个**——此前为匹配工具名会对配置里每个 server
+ * 逐个 ensureConnected（可能 spawn 无关子进程），且目标 server 降级时一路 continue，
+ * 最终把"工具存在但源不可用"误报成"未知 MCP 工具"。
+ */
 export async function callMcpTool(
   llmName: string,
   args: Record<string, unknown>,
 ): Promise<{ ok: boolean; summary: string; data?: unknown }> {
+  const clean = (s: string) => s.replace(/[^A-Za-z0-9_]/g, "_");
   const cfgs = loadServerConfigs();
-  for (const cfg of cfgs) {
+  // 按名字前缀定位候选 server（含长名截断哈希的情况：前缀匹配仍成立者优先）
+  const candidates = cfgs.filter((c) => llmName.startsWith(`mcp_${clean(c.name)}_`));
+  if (candidates.length === 0) {
+    return { ok: false, summary: `未知 MCP 工具：${llmName}` };
+  }
+
+  let lastReason = "";
+  for (const cfg of candidates) {
     const rt = runtimeFor(cfg);
-    if (rt.state === "disabled") continue;
+    if (cfg.enabled === false || rt.state === "disabled") {
+      lastReason = `该 MCP 源已禁用（${cfg.name}）`;
+      continue;
+    }
     const client = await ensureConnected(rt);
-    if (!client) continue;
+    if (!client) {
+      lastReason = `该 MCP 源当前不可用（已降级）：${rt.reason ?? "连接失败"}`;
+      continue;
+    }
     const allow = cfg.enabledTools;
     for (const t of rt.tools) {
       if (allow && allow.length > 0 && !allow.includes(t.name)) continue;
@@ -494,8 +552,12 @@ export async function callMcpTool(
         };
       }
     }
+    lastReason = `该 MCP 源不提供此工具（${cfg.name}）`;
   }
-  return { ok: false, summary: `未知 MCP 工具：${llmName}` };
+  return {
+    ok: false,
+    summary: lastReason || `未知 MCP 工具：${llmName}`,
+  };
 }
 
 /**
@@ -528,6 +590,10 @@ export async function mcpStatus(
 /** 测试/运维用：断开全部 stdio server */
 export function stopAllMcp(): void {
   for (const [, rt] of runtimes) {
+    // CR-12（本轮 code review）：自增代际——进行中的 ensureConnected 完成时
+    // 会发现代际已变而丢弃结果并关连接（否则会把 client 写回、置 connected，
+    // "复活"已停止的 server）。
+    rt.generation += 1;
     rt.client?.stop();
     rt.client = null;
     rt.connecting = null;

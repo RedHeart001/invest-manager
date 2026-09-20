@@ -71,9 +71,11 @@ export function buildSystemPrompt(message: string): { prompt: string; activeSkil
  *  C17（2026-09-14 code review 修复）：跨请求单例挂 globalThis——dev HMR 会重建
  *  模块作用域，模块级变量随之清空 → 缓存失效、下次轮询重复探测。 */
 type StatusData = Awaited<ReturnType<typeof buildStatus>>;
+/** CR-15：按 connect 分键缓存（plain=未探测 / connect=已探测） */
+type StatusCacheMap = Partial<Record<"plain" | "connect", { at: number; data: StatusData }>>;
 const STATUS_CACHE_KEY = Symbol.for("invest-manager.gateway.statusCache");
-const statusCacheBox: { current: { at: number; data: StatusData } | null } = ((
-  globalThis as unknown as Record<symbol, { current: { at: number; data: StatusData } | null } | undefined>
+const statusCacheBox: { current: StatusCacheMap | null } = ((
+  globalThis as unknown as Record<symbol, { current: StatusCacheMap | null } | undefined>
 )[STATUS_CACHE_KEY] ??= { current: null });
 const STATUS_TTL_MS = 30_000;
 
@@ -100,11 +102,15 @@ async function buildStatus(opts: { connect?: boolean }) {
 
 export async function gatewayStatus(opts: { connect?: boolean } = {}) {
   const now = Date.now();
-  const cached = statusCacheBox.current;
+  // CR-15（本轮 code review）：缓存按 connect 分键——此前只有单一缓存槽，
+  // 首次 connect:false 探测会把"未探测（idle）"的结果污染后续 connect:true 的
+  // 30s 窗口（当前唯一调用方传 true，影响有限，但语义上应隔离）。
+  const slot = opts.connect ? "connect" : "plain";
+  const cached = statusCacheBox.current?.[slot];
   if (cached && now - cached.at < STATUS_TTL_MS) {
     return cached.data;
   }
   const data = await buildStatus(opts);
-  statusCacheBox.current = { at: now, data };
+  statusCacheBox.current = { ...(statusCacheBox.current ?? {}), [slot]: { at: now, data } };
   return data;
 }

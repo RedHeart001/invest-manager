@@ -3,10 +3,11 @@ import type { EChartsOption } from "echarts";
 
 import Breadcrumbs from "@/app/components/Breadcrumbs";
 import EChart from "@/app/components/EChart";
+import WatchButton from "@/app/components/WatchButton";
 import ProductCharts from "./ProductCharts";
 import ResearchPanel from "./ResearchPanel";
 import { dsGet, type Quote } from "@/lib/data-service";
-import { fetchEvents } from "@/lib/events";
+import { fetchEvents, narrowByDates, pickEventDates } from "@/lib/events";
 import { getKlineRange, normalizeRange, type KlineResult } from "@/lib/kline";
 import { detectPhases } from "@/lib/phases";
 import { buildProfile, isExchangeTradedFund, type QuoteEnriched } from "@/lib/profile";
@@ -113,10 +114,25 @@ export default async function ProductPage({
   const phases = kline && kline.candles.length > 1 ? detectPhases(kline.candles) : [];
 
   // 事件标注（R11 轻量归因）
-  const events =
+  // CR-10：只保留"阶段转折点 + 大波动日"的事件（此前全量按日期返回，
+  // pickEventDates 未接线）。无 K 线时保持全量（降级路径）。
+  const rawEvents =
     eventsRes.status === "fulfilled"
       ? eventsRes.value
       : { byDate: {}, note: eventsRes.reason instanceof Error ? eventsRes.reason.message : "事件获取失败", degraded: true };
+  const events: typeof rawEvents =
+    effectiveKline.candles.length > 1
+      ? {
+          ...rawEvents,
+          byDate: narrowByDates(
+            rawEvents.byDate,
+            pickEventDates(
+              effectiveKline.candles.map((c) => ({ date: c.date, close: c.close })),
+              phases.map((p) => p.endDate),
+            ),
+          ),
+        }
+      : rawEvents;
 
   // ⑤ 明细区按类型槽位
   let holdings: HoldingsResp | null = null;
@@ -230,6 +246,10 @@ export default async function ProductPage({
           <span className="rounded bg-zinc-100 px-2 py-0.5 text-xs text-zinc-500">
             {TYPE_LABEL[type] ?? type}
             {product.exchange ? ` · ${product.exchange}` : ""}
+          </span>
+          {/* G5：自选入口（Watchlist 加权来源） */}
+          <span className="ml-auto">
+            <WatchButton type={type} code={code} name={product.name} />
           </span>
         </div>
         {tags.length > 0 && (

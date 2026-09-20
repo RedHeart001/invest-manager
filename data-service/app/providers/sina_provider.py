@@ -7,6 +7,7 @@
 
 import time
 
+from ..utils.lru import Lru, env_capacity
 from ..utils.num import to_float
 from ..utils.timeout import run_with_timeout
 from .base import BaseProvider, ProviderError, ProviderNotSupported, register_chain
@@ -26,7 +27,11 @@ class SinaProvider(BaseProvider):
     source = "sina"
 
     def __init__(self) -> None:
-        self._cache: dict[str, tuple[float, list[dict]]] = {}
+        # CR6-P2-1：原为无界 dict（按 symbol 缓存整段序列，长期运行单调增长）。
+        # 上限可经 env 覆盖：SINA_KLINE_CACHE_MAX。
+        self._cache: Lru[str, tuple[float, list[dict]]] = Lru(
+            env_capacity("SINA_KLINE_CACHE_MAX", 256)
+        )
 
     def get_quote(self, type_: str, code: str) -> dict:
         raise ProviderNotSupported("sina quote not needed (tencent covers)")

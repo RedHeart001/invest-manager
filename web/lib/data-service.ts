@@ -2,10 +2,24 @@
 
 const DATA_SERVICE_URL = process.env.DATA_SERVICE_URL ?? "http://localhost:8000";
 
+/** CR6-P3-3：区分"超时"与"连不上"——此前 catch 一律报 unreachable，
+ *  `AbortSignal.timeout` 触发的 TimeoutError 语义被吞掉，排查时无法定位。 */
+function unreachableMessage(e: unknown, timeoutMs: number): string {
+  const name = (e as { name?: string } | null)?.name;
+  if (name === "TimeoutError" || name === "AbortError") {
+    return `data-service timeout after ${timeoutMs}ms（服务在跑但未及时响应）`;
+  }
+  return "data-service unreachable（连接被拒绝/网络不可达）";
+}
+
 export class DataServiceError extends Error {
   constructor(
     message: string,
     readonly status?: number,
+    // CR6-P1-1：保留已解析的响应体，供上层按业务语义分流
+    // （如 /research/start 用 409 + {rejected,todayDone} 表达"被拒"，
+    // 若不透出 body，调用方只能看到"提交失败"）。
+    readonly body?: unknown,
   ) {
     super(message);
     this.name = "DataServiceError";
@@ -27,8 +41,8 @@ export async function dsGet<T>(
       cache: "no-store",
       signal: AbortSignal.timeout(timeoutMs),
     });
-  } catch {
-    throw new DataServiceError("data-service unreachable");
+  } catch (e) {
+    throw new DataServiceError(unreachableMessage(e, timeoutMs));
   }
   if (!res.ok) {
     const body = await res.json().catch(() => ({}) as Record<string, unknown>);
@@ -54,14 +68,15 @@ export async function dsPost<T>(
       cache: "no-store",
       signal: AbortSignal.timeout(timeoutMs),
     });
-  } catch {
-    throw new DataServiceError("data-service unreachable");
+  } catch (e) {
+    throw new DataServiceError(unreachableMessage(e, timeoutMs));
   }
   const parsed = (await res.json().catch(() => ({}))) as T & { detail?: string };
   if (!res.ok) {
     throw new DataServiceError(
       String(parsed.detail ?? `data-service returned ${res.status}`),
       res.status,
+      parsed,
     );
   }
   return parsed as T;

@@ -122,6 +122,8 @@ def _ak_request(fn, seconds: float = 30.0, name: str = "akshare"):
 
 # B4：_num 下沉到 app/utils/num.py（与 tencent_provider 共用）
 from ..utils.num import to_float as _num  # noqa: E402
+# CR6-P2-1：进程内缓存需容量上限（与 web lib/lru.ts 语义对齐），防长期运行内存无界增长。
+from ..utils.lru import Lru, env_capacity  # noqa: E402
 
 
 def _secid(code: str) -> str:
@@ -151,6 +153,18 @@ def _exchange(code: str) -> str:
     if code.startswith(("0", "3")):
         return "SZ"
     if code.startswith(("4", "8", "9")):
+        return "BJ"
+    return ""
+
+
+def _sina_symbol_exchange(symbol: str) -> str:
+    """新浪 symbol（如 sh113050 / sz123285）→ 交易所代码（CR-17）。"""
+    s = symbol.lower()
+    if s.startswith("sh"):
+        return "SH"
+    if s.startswith("sz"):
+        return "SZ"
+    if s.startswith("bj"):
         return "BJ"
     return ""
 
@@ -203,8 +217,16 @@ class AkshareProvider(BaseProvider):
     def __init__(self):
         self._fund_nav = None
         self._fund_nav_ts = 0.0
-        self._news_cache: dict[str, tuple[float, list[dict]]] = {}
-        self._fund_report_cache: dict[str, tuple[float, dict]] = {}
+        # CR-19：净值表单失败负缓存时间戳（0 = 无失败）
+        self._fund_nav_fail_ts = 0.0
+        # CR6-P2-1：原为无界 dict（热点 pipeline 会命中大量不同 code → 持续累积）。
+        # 上限可经 env 覆盖：AK_NEWS_CACHE_MAX / AK_FUND_REPORT_CACHE_MAX。
+        self._news_cache: Lru[str, tuple[float, list[dict]]] = Lru(
+            env_capacity("AK_NEWS_CACHE_MAX", 512)
+        )
+        self._fund_report_cache: Lru[str, tuple[float, dict]] = Lru(
+            env_capacity("AK_FUND_REPORT_CACHE_MAX", 256)
+        )
         self._yield_curve = None
         self._yield_curve_ts = 0.0
 
@@ -308,17 +330,30 @@ class AkshareProvider(BaseProvider):
     # ---------- 场外基金净值（单请求全市场 + 内存缓存） ----------
 
     FUND_NAV_TTL = 1800  # 30 分钟；净值每日更新一次，无需高频拉取
+    # CR-19（本轮 code review）：失败负缓存——场外基金净值表单是全市场单请求，
+    # 失败（限流/接口变动）时此前无冷却，导致限流期每个场外基金请求都整表重拉
+    # （60s 看门狗），反复捶打天天基金。对齐 crypto_provider 的失败冷却模式。
+    FUND_NAV_FAIL_COOLDOWN = 300  # 5 分钟
 
     def _fund_nav_table(self):
         now = time.time()
         if self._fund_nav is not None and now - self._fund_nav_ts < self.FUND_NAV_TTL:
             return self._fund_nav
+        # 失败冷却期内直接降级（不重复整表重拉）
+        if now - self._fund_nav_fail_ts < self.FUND_NAV_FAIL_COOLDOWN:
+            raise ProviderError(
+                f"fund nav table cooling down after recent failure; retry in ~"
+                f"{int(self.FUND_NAV_FAIL_COOLDOWN - (now - self._fund_nav_fail_ts))}s"
+            )
         import akshare as ak
 
         try:
             self._fund_nav = _ak_request(ak.fund_open_fund_daily_em, 60.0, "ak.fund_open_fund_daily_em")
             self._fund_nav_ts = now
+            self._fund_nav_fail_ts = 0.0
         except Exception as e:  # noqa: BLE001 接口变动/网络
+            # CR-19：失败路径必须与成功路径对称记账（否则守卫恒假 = 死代码）
+            self._fund_nav_fail_ts = time.time()
             raise ProviderError(f"fund nav table failed: {e}") from e
         return self._fund_nav
 
@@ -430,13 +465,19 @@ class AkshareProvider(BaseProvider):
             # （非 ProviderError，chain_call 不捕获）→ 端点 500。提前跳过。
             if len(f) < 7:
                 continue
+            # CR6-P1-3：KlineDaily.open/high/low/close 为 NOT NULL，单行 null
+            # 会让 web 侧整批 upsert 失败、该标的 K 线持续不可用。与 sina 对齐，
+            # 任一 OHLC 缺失即跳过该行。
+            o, c, h, low_ = _num(f[1]), _num(f[2]), _num(f[3]), _num(f[4])
+            if None in (o, c, h, low_):
+                continue
             candles.append(
                 {
                     "date": f[0],
-                    "open": _num(f[1]),
-                    "close": _num(f[2]),
-                    "high": _num(f[3]),
-                    "low": _num(f[4]),
+                    "open": o,
+                    "close": c,
+                    "high": h,
+                    "low": low_,
                     "volume": _num(f[5]),
                     "amount": _num(f[6]),
                 }
@@ -822,6 +863,9 @@ class AkshareProvider(BaseProvider):
                 if not code or not name:
                     continue
                 full, initials = _pinyin_pair(name)
+                # CR-17（本轮 code review）：优先用调用方显式给出的交易所（新浪备源的
+                # symbol 带 sh/sz 前缀）；缺失时才回退到数字前缀推断，不再依赖隐含约定。
+                exchange = item.get("exchange") or _exchange(code)
                 out.append(
                     {
                         "type": "bond",
@@ -829,7 +873,7 @@ class AkshareProvider(BaseProvider):
                         "name": name,
                         "pinyin": full,
                         "pinyinInitials": initials,
-                        "exchange": _exchange(code),
+                        "exchange": exchange,
                         "tags": ["可转债"],
                     }
                 )
@@ -858,6 +902,8 @@ class AkshareProvider(BaseProvider):
                 "code": str(r.get("code") or "").strip()
                 or str(r.get("symbol") or "").strip()[2:],
                 "name": str(r.get("name", "")).strip(),
+                # CR-17：从新浪 symbol 前缀（sh/sz）显式带出交易所，不再依赖数字前缀推断
+                "exchange": _sina_symbol_exchange(str(r.get("symbol") or "").strip()),
             }
             for _, r in df2.iterrows()
         )

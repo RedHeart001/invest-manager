@@ -11,12 +11,13 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from datetime import date, datetime
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
+from ..utils.timeutil import beijing_today
 from .pipeline import run_pipeline
 
 log = logging.getLogger("hotspot.scheduler")
@@ -103,7 +104,8 @@ def _catch_up_if_needed() -> None:
         web = os.environ.get("WEB_BASE_URL", "http://localhost:3000")
         r = requests.get(
             f"{web}/api/hotspots/ingest",
-            params={"date": date.today().isoformat()},
+            # CR-06：补跑日期与 pipeline 落库口径一致（均北京时间）
+            params={"date": beijing_today()},
             timeout=10,
         )
         count = int((r.json() or {}).get("count", 0)) if r.ok else 0

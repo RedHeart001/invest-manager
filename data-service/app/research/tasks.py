@@ -12,9 +12,10 @@ import logging
 import threading
 import time
 import uuid
-from datetime import date, datetime
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
+from ..utils.timeutil import beijing_today
 from . import adapter, engine
 
 log = logging.getLogger("research.tasks")
@@ -54,7 +55,8 @@ def _evict_expired(max_age_hours: int = 24) -> int:
                     removed += 1
         # _daily_done：键为 "type:code"、值为最近成功日期；
         # 限次判断只比较"== 今天"，因此非今日条目皆可清除
-        today = date.today().isoformat()
+        # CR-06：统一北京时间（与 web 侧 beijingToday 同口径）
+        today = beijing_today()
         for k in list(_daily_done.keys()):
             if _daily_done.get(k) != today:
                 _daily_done.pop(k, None)
@@ -79,8 +81,8 @@ def start_research(type_: str, code: str, name: str = "") -> dict:
         ]
         if running:
             return {"rejected": "该标的已有研究任务在执行", "taskId": running[0]["id"]}
-        # 每日限 1 次（P5 成本管控）
-        if _daily_done.get(key) == date.today().isoformat():
+        # 每日限 1 次（P5 成本管控）；CR-06：北京时间口径
+        if _daily_done.get(key) == beijing_today():
             return {
                 "rejected": "该标的今日已完成一次深度研究（每日限 1 次）",
                 "todayDone": True,
@@ -130,7 +132,8 @@ def start_research(type_: str, code: str, name: str = "") -> dict:
             payload = {
                 "type": type_,
                 "code": code,
-                "date": date.today().isoformat(),
+                # CR-06：回调日期与 web 侧 beijingToday 同口径（否则跨 TZ 会错位一天）
+                "date": beijing_today(),
             }
             if t["status"] == "done" and t["result"]:
                 payload["report"] = t["result"]
@@ -169,7 +172,7 @@ def start_research(type_: str, code: str, name: str = "") -> dict:
                 if report.get("ok"):
                     t["status"] = "done"
                     t["result"] = report
-                    _daily_done[key] = date.today().isoformat()
+                    _daily_done[key] = beijing_today()
                 else:
                     t["status"] = "failed"
                     t["error"] = report.get("error", "研究失败")
@@ -184,7 +187,6 @@ def start_research(type_: str, code: str, name: str = "") -> dict:
                 t["error"] = f"{type(e).__name__}: {e}"[:300]
                 t["finishedAt"] = datetime.now(TZ).isoformat(timespec="seconds")
             _emit_ingest()
-        _ = started
 
     threading.Thread(target=_run, daemon=True).start()
     return {"taskId": task_id}
@@ -217,7 +219,7 @@ def statuses() -> dict:
         base = {
             "running": sum(1 for t in _tasks.values() if t["status"] == "running"),
             "total": len(_tasks),
-            "dailyDone": {k: v for k, v in _daily_done.items() if v == date.today().isoformat()},
+            "dailyDone": {k: v for k, v in _daily_done.items() if v == beijing_today()},
         }
     base["collect"] = collect_stats()  # L3：采集线程可观测
     return base

@@ -24,5 +24,6 @@ from . import akshare_provider  # noqa: F401  导入即注册（主源）
 from . import tencent_provider  # noqa: F401  备源：A股/场内基金 行情+日K
 from . import sina_provider  # noqa: F401  备源：场内基金日K（新浪）
 from . import sina_bond_provider  # noqa: F401  备源：转债实时行情（新浪 cov_spot 快照）
+from . import hk_provider  # noqa: F401  港股 provider（G6/批次 D）
 from . import crypto_provider  # noqa: F401
 from . import openbb_provider  # noqa: F401  美股 provider（yfinance 后端，P5/M6）

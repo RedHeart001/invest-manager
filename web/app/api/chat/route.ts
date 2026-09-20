@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { LlmNotConfiguredError, type LlmMessage, type LlmToolCall, chatStream } from "@/lib/llm";
 import { buildSystemPrompt, executeAgentTool, getAgentTools } from "@/lib/gateway";
 import { appendMessage, createSession, getMessages } from "@/lib/chat";
+import { repairToolPairing } from "@/lib/chat-history";
 import { startResearch } from "@/lib/research";
 import { extractResearchTarget } from "@/lib/research-target";
 import { trimContext } from "@/lib/context-budget";
@@ -98,7 +99,10 @@ export async function POST(req: NextRequest) {
         }
 
         // 组装 LLM 消息（系统提示 + 历史 + 本轮用户消息）
-        const history = await getMessages(sid);
+        // CR-01（本轮 code review）：历史条目可能因"取最近 200 条"窗口切割、
+        // 或 safeAppend 单条失败而出现**孤立 tool 消息 / tool_calls 无回应**，
+        // OpenAI 兼容端点会一律 400 且该会话此后不可用。故先做配对修复。
+        const history = repairToolPairing(await getMessages(sid));
         const messages: LlmMessage[] = [
           { role: "system", content: sys.prompt },
           ...history.map((m): LlmMessage => {
@@ -110,7 +114,9 @@ export async function POST(req: NextRequest) {
               };
             }
             if (m.role === "tool") {
-              return { role: "tool", content: m.content, tool_call_id: m.toolCallId ?? "call", name: m.name };
+              // 修复后仍走到这里的 tool 消息必带 toolCallId（否则已被丢弃）；
+              // 兜底不再写常量 "call"（那会与 assistant 声明的 id 不匹配 → 400）。
+              return { role: "tool", content: m.content, tool_call_id: m.toolCallId ?? "", name: m.name };
             }
             return { role: m.role, content: m.content };
           }),

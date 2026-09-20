@@ -8,7 +8,8 @@ import { refreshSnapshot } from "./market-snapshot";
 import { prisma } from "./prisma";
 import { buildSearchText } from "./search-text";
 
-export const SYNC_TYPES = ["stock", "fund", "bond", "crypto"] as const;
+// G6（批次 D）：新增 hk（港股）——data-service 已提供 provider 与列表接口
+export const SYNC_TYPES = ["stock", "fund", "bond", "crypto", "hk"] as const;
 export type SyncType = (typeof SYNC_TYPES)[number];
 
 // 分型同步单飞锁（C17：进程内单例挂 globalThis，避免 dev HMR 重建模块作用域后失效）
@@ -111,10 +112,13 @@ async function _syncTypeInner(type: string): Promise<SyncResult> {
   const started = Date.now();
   let stageTableName: string | null = null;
   try {
+    // 超时说明（2026-09-20）：港股列表必须分页（东财 `clist/get` 对港股忽略大分页参数，
+    // 固定 100 条/页；约 4700 只 → 48 页），且每页经源族限速器（最小间隔 5s）
+    // → 最坏约 4 分钟。原 180s 会在港股同步时必然超时，故放宽到 600s。
     const data = await dsGet<{ count: number; products: ProductPayload[] }>(
       "/products",
       { type },
-      180_000,
+      600_000,
     );
     const rows = (data.products ?? []).map((p) => ({
       id: randomUUID(),
@@ -143,6 +147,22 @@ async function _syncTypeInner(type: string): Promise<SyncResult> {
       return {
         type,
         error: "empty payload from data-service, existing data kept",
+        tookMs: Date.now() - started,
+      };
+    }
+
+    // 降级缩水保护（G2 引入，2026-09-20 集成验收发现）：
+    // 全量替换语义是"新载荷 = 该类型完整集合"。但主源限流时会降级到**覆盖度更低**的
+    // 备源（实测：转债东财 1052 只 → 新浪 cov_spot 仅 329 只），直接替换会把主数据
+    // **缩小**（既有 1052 条被 329 条覆盖），属静默数据劣化。此处与现有条数比较，
+    // 新载荷明显缩水（< 70%）时保留旧数据并显式标注，等主源恢复后再全量更新。
+    const existingCount = await prisma.product.count({ where: { type } });
+    if (existingCount > 0 && rows.length < existingCount * 0.7) {
+      return {
+        type,
+        error:
+          `payload shrunk (${rows.length} < ${existingCount} 的 70%)，` +
+          `疑似降级备源覆盖度不足，已保留现有数据`,
         tookMs: Date.now() - started,
       };
     }
@@ -227,10 +247,17 @@ async function _syncTypeInner(type: string): Promise<SyncResult> {
  * 孤儿清理与 type 无关且安全（仅删主表中已不存在的行）。
  */
 export async function rebuildFts(type: string): Promise<void> {
+  // CR-15（本轮 code review）：三条语句分步 try/catch——此前整段一个 try，
+  // 第一条成功、后两条失败时 FTS 索引处于**半更新态**且无任何日志
+  // （现象上搜索靠 LIKE 兜底，问题被静默）。此处逐步记录，暴露真实失败。
   try {
     await prisma.$executeRawUnsafe(
       `DELETE FROM Product_fts WHERE productId NOT IN (SELECT id FROM Product)`,
     );
+  } catch (e) {
+    console.warn(`[fts] 孤儿清理失败（${type}）:`, e instanceof Error ? e.message : e);
+  }
+  try {
     await prisma.$executeRawUnsafe(
       `DELETE FROM Product_fts WHERE productId IN (SELECT id FROM Product WHERE type = ?)`,
       type,
@@ -240,8 +267,9 @@ export async function rebuildFts(type: string): Promise<void> {
        SELECT id, COALESCE(searchText, '') FROM Product WHERE type = ?`,
       type,
     );
-  } catch {
-    // FTS5 虚表不存在时忽略；搜索层有 LIKE 兜底
+  } catch (e) {
+    // FTS5 虚表不存在时忽略（搜索层有 LIKE 兜底）；其余情况记录，避免索引半更新静默
+    console.warn(`[fts] 重建失败（${type}），本次搜索可能退化为 LIKE:`, e instanceof Error ? e.message : e);
   }
 }
 

@@ -14,7 +14,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import requests
@@ -339,4 +339,7 @@ def collect_all(type_: str, code: str) -> tuple[dict, list[str]]:
 
 
 def research_date() -> str:
-    return date.today().isoformat()
+    # CR-06：统一北京时间口径
+    from ..utils.timeutil import beijing_today
+
+    return beijing_today()

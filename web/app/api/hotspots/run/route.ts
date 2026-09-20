@@ -1,6 +1,7 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 
 import { dsPost, DataServiceError } from "@/lib/data-service";
+import { checkRequestOrigin } from "@/lib/request-origin";
 
 // 手动触发热点抓取（代码审查修复）：
 // 此前 Dashboard 由**浏览器直连** `${NEXT_PUBLIC_DATA_SERVICE_URL ?? localhost:8000}`，
@@ -10,7 +11,12 @@ export const dynamic = "force-dynamic";
 // 热点 pipeline 含多次外部抓取 + LLM 结构化，耗时可达分钟级
 export const maxDuration = 300;
 
-export async function POST() {
+export async function POST(req: NextRequest) {
+  // CR-08：拒绝浏览器跨站简单表单触发（无请求体的 POST 尤其易被 CSRF）
+  const blocked = checkRequestOrigin(req);
+  if (blocked) {
+    return NextResponse.json({ error: blocked }, { status: 403 });
+  }
   try {
     const data = await dsPost<Record<string, unknown>>(
       "/hotspots/run?trigger=manual-ui",

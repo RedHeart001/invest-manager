@@ -63,6 +63,53 @@ export function llmReady(): boolean {
 }
 
 /**
+ * 非流式 JSON 调用（G4 兜底召回用）。
+ * 未配置/请求失败/解析失败一律返回 null（调用方降级），不抛异常。
+ */
+export async function chatJson(
+  system: string,
+  user: string,
+  timeoutMs = 20_000,
+): Promise<unknown> {
+  const cfg = llmConfig();
+  if (!cfg) return null;
+  try {
+    const res = await fetch(`${cfg.base}/chat/completions`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${cfg.key}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: cfg.model,
+        messages: [
+          { role: "system", content: system },
+          { role: "user", content: user },
+        ],
+        temperature: 0.2,
+        response_format: { type: "json_object" },
+      }),
+      cache: "no-store",
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!res.ok) return null;
+    const body = (await res.json()) as {
+      choices?: { message?: { content?: string } }[];
+    };
+    const content = body.choices?.[0]?.message?.content ?? "";
+    const m = content.match(/\{[^]*\}/) ?? content.match(/\[[^]*\]/);
+    if (!m) return null;
+    try {
+      return JSON.parse(m[0]);
+    } catch {
+      return null;
+    }
+  } catch {
+    return null;
+  }
+}
+
+/**
  * 流式对话（function calling）。
  * yield 顺序：若干 {type:"delta"}（正文增量）→ 若模型要求工具，最后 yield 一次
  * {type:"tool_calls"}（已按 index 拼装完整）。无 tool_calls 则无第二个事件。
@@ -88,23 +135,39 @@ export async function* chatStream(opts: {
   }
 
   const t0 = Date.now();
-  // CR4（2026-09-15 review）：首字节连接也设超时——上游"连接建立但一直不吐头"
-  // 时原 fetch 只受 opts.signal（用户断开）约束，请求会永久挂起占连接。
-  const connectSignals = [opts.signal, AbortSignal.timeout(CONNECT_TIMEOUT_MS)].filter(
+  // CR-02（本轮 code review）：连接超时只能约束**握手/首字节**。
+  // 此前把 `AbortSignal.timeout(CONNECT_TIMEOUT_MS)` 并进 fetch 的 signal——
+  // 而 fetch 的 signal 作用于**整个请求生命周期（含响应体流）**，导致任何
+  // 单轮流式输出超过 60s 的长回答被中途 abort（delta 截断 + error），
+  // 且真正的"无数据才超时"保护 IDLE_TIMEOUT_MS 形同失效。
+  // 正确做法：仅在等待响应头（res）阶段设超时，拿到 res 后立即清除，
+  // body 读取阶段交由下方的 withIdle 空闲看门狗 + 用户 opts.signal 约束。
+  const connectTimer = new AbortController();
+  const connectTimeout = setTimeout(
+    () => connectTimer.abort(new Error(`LLM 连接超时（>${CONNECT_TIMEOUT_MS}ms 未返回响应头）`)),
+    CONNECT_TIMEOUT_MS,
+  );
+  const connectSignals = [opts.signal, connectTimer.signal].filter(
     (s): s is AbortSignal => Boolean(s),
   );
-  const res = await fetch(`${cfg.base}/chat/completions`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${cfg.key}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(body),
-    // Next.js patched fetch 会缓冲 SSE 流（等待完整响应以判定缓存），
-    // 必须 no-store 才能让流式 chunk 直通（P4 实测修复挂起问题）
-    cache: "no-store",
-    signal: connectSignals.length > 0 ? AbortSignal.any(connectSignals) : undefined,
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${cfg.base}/chat/completions`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${cfg.key}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+      // Next.js patched fetch 会缓冲 SSE 流（等待完整响应以判定缓存），
+      // 必须 no-store 才能让流式 chunk 直通（P4 实测修复挂起问题）
+      cache: "no-store",
+      signal: connectSignals.length > 0 ? AbortSignal.any(connectSignals) : undefined,
+    });
+  } finally {
+    // 响应头已到（或已失败）：清除连接超时，后续 body 读取不再受它约束。
+    clearTimeout(connectTimeout);
+  }
   // B3：默认静默；需要排查时设 LLM_DEBUG=1 再输出（此前每次请求无条件打印）
   if (process.env.LLM_DEBUG) {
     console.log(`[llm] fetch status=${res.status} in ${Date.now() - t0}ms (base=${cfg.base})`);
@@ -119,8 +182,6 @@ export async function* chatStream(opts: {
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
-  let finish: string | null = null;
-  void finish; // 仅用于日志/诊断；工具调用的产出不再依赖它（见文件末尾说明）
   const toolAcc = new Map<number, { id: string; name: string; arguments: string }>();
 
   // 处理一行 SSE data 载荷（抽成闭包，供循环与收尾 flush 复用）
@@ -139,7 +200,6 @@ export async function* chatStream(opts: {
             function?: { name?: string; arguments?: string };
           }[];
         };
-        finish_reason?: string | null;
       }[];
     };
     try {
@@ -149,7 +209,7 @@ export async function* chatStream(opts: {
     }
     const choice = parsed.choices?.[0];
     if (!choice) return null;
-    if (choice.finish_reason) finish = choice.finish_reason;
+    // CR-15：不再读取 finish_reason（工具调用产出只看累积结果，见文件末尾说明）
     const delta = choice.delta;
     if (!delta) return null;
     if (delta.tool_calls) {
@@ -221,6 +281,9 @@ export async function* chatStream(opts: {
   // 收尾 flush（代码审查修复）：最后一帧常常**没有换行结尾**，此前直接被丢弃；
   // 若该帧恰好携带 finish_reason / tool_calls 分片，就会导致工具调用静默失效
   // （用户只看到空回复）。此处补处理残留 buffer。
+  // CR-15（本轮 code review）：先做 decoder 收尾 flush——`{ stream: true }` 模式下
+  // 跨 chunk 的多字节字符可能被暂存在 decoder 内部，不 flush 会丢末尾字符。
+  buffer += decoder.decode();
   if (buffer.trim()) {
     const chunk = handleLine(buffer);
     if (chunk) yield chunk;

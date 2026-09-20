@@ -274,6 +274,12 @@ def run_research(type_: str, code: str, name: str, on_progress=None) -> dict:
                 *( [payload["kline"]["source"]] if payload["kline"].get("ok") else [] ),
                 *( [payload["news"]["source"]] if payload["news"].get("ok") else [] ),
             }),
+            # 维度可用性（2026-09-19 集成验收补充）：sources 按**来源名去重**，
+            # 当行情/K线/新闻恰好同源（如均为 akshare）时会塌缩成 1 项，
+            # 无法反映"采到了几个维度"。此处显式给出已采集维度，供 UI/验收判定。
+            "dimensions": [
+                dim for dim in ("market", "kline", "news") if payload[dim].get("ok")
+            ],
             "degraded": degraded,
             "note": "；".join(note_bits)[:400] or None,
             "phasesSource": "P2 同源阶段算法",

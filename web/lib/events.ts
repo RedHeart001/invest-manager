@@ -55,6 +55,23 @@ export function groupByDate(items: EventItem[]): Record<string, EventItem[]> {
   return byDate;
 }
 
+/**
+ * 纯函数（CR-10）：把"全量按日期分组"的事件收窄到指定日期集合。
+ * R11 的设计是**只**给"阶段转折点 + 大波动日"挂接事件；此前 `fetchEvents`
+ * 返回全部有新闻的日期（`pickEventDates` 成了只被单测引用的死代码）。
+ */
+export function narrowByDates(
+  byDate: Record<string, EventItem[]>,
+  dates: string[],
+): Record<string, EventItem[]> {
+  const want = new Set(dates);
+  const out: Record<string, EventItem[]> = {};
+  for (const [d, items] of Object.entries(byDate)) {
+    if (want.has(d)) out[d] = items;
+  }
+  return out;
+}
+
 /** 纯函数：挑选需要标注事件的日期（转折点 + 大波动日），最多 12 个 */
 export function pickEventDates(
   candles: { date: string; close: number }[],

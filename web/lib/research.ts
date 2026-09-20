@@ -4,7 +4,7 @@
 import { appendMessage } from "./chat";
 import { beijingToday } from "./time";
 import { prisma } from "./prisma";
-import { dsPost } from "./data-service";
+import { DataServiceError, dsPost } from "./data-service";
 import { broadcast } from "./sse";
 
 function dayStart(iso: string): Date {
@@ -142,6 +142,10 @@ export async function startResearch(
         data: { status: "failed", error: "研究任务超时（执行方可能已重启），可重新提交" },
       });
     } else {
+      // CR-03（本轮 code review）：任务已由其它入口（详情页按钮 / 另一会话）启动
+      // 且仍在执行时，必须登记当前发起会话——否则完成回调找不到本会话，
+      // "完成后在本会话推送"的承诺落空（409 并发去重路径已登记，此处此前漏掉）。
+      watchResearch(type, code, watcherSessionId);
       return { status: "running", reason: "研究任务执行中" };
     }
   }
@@ -154,7 +158,20 @@ export async function startResearch(
       30_000,
     );
   } catch (e) {
-    // data-service 不可达：记录 failed，避免用户无限等待
+    // CR6-P1-1：/research/start 用 409 表达"被拒"（当日已完成 / 并发去重），
+    // 而 dsPost 对任何非 2xx 都抛 DataServiceError → rejected 分支曾是死代码，
+    // 且被拒会被误写成 failed、丢失 watcher 会话推送。此处特判救活 rejected 语义。
+    if (e instanceof DataServiceError && e.status === 409) {
+      const b = (e.body ?? {}) as { rejected?: string; todayDone?: boolean };
+      if (b.todayDone) {
+        // 每日限 1 次：库中尚无 done 行（可能由另一实例完成），直接返回原因
+        return { status: "rejected", reason: b.rejected ?? "该标的今日已完成深度研究" };
+      }
+      // 并发去重：任务仍在执行 → 登记 watcher，兑现"完成后本会话推送"
+      watchResearch(type, code, watcherSessionId);
+      return { status: "running", reason: b.rejected ?? "该标的已有研究任务在执行" };
+    }
+    // 其余（不可达 / 5xx）：记录 failed，避免用户无限等待
     const row = await prisma.researchReport.upsert({
       where: { type_code_date: { type, code, date: dayStart(dateIso) } },
       create: {

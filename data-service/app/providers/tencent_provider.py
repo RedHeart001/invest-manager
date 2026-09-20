@@ -16,7 +16,7 @@ SYMBOL_MARKETS = {"sh", "sz", "bj"}
 
 
 def _symbol(code: str) -> str | None:
-    """腾讯行情代码：sh/sz/bj + 6 位代码。"""
+    """腾讯行情代码：sh/sz/bj + 6 位代码。**仅用于 A股/场内基金**。"""
     if code.startswith(("920", "921")):
         return f"bj{code}"
     if code.startswith(("6", "5", "9", "11")):
@@ -24,6 +24,29 @@ def _symbol(code: str) -> str | None:
     if code.startswith(("0", "3", "12", "15", "16", "18")):
         return f"sz{code}"
     return None
+
+
+def _hk_symbol(code: str) -> str | None:
+    """腾讯港股符号：hk + 5 位代码（不足补零）。
+
+    港股代码为 **5 位数字**，与 A股/基金的 6 位不同——**绝不能复用 `_symbol`**：
+    其前缀规则会把 `00700` 误判为 `sz00700`、`89988` 误判为 `sh89988`
+    （2026-09-20 实测认知，见 PLAN M8）。
+    """
+    c = code.strip()
+    if not c.isdigit() or len(c) > 5:
+        return None
+    return f"hk{c.zfill(5)}"
+
+
+def _symbol_for(type_: str, code: str) -> str | None:
+    """按**产品类型**显式分派符号映射（港股的 5 位数字与 A股前缀规则冲突）。
+
+    禁止改用"按长度猜类型"的隐式约定（与 CR-17 同类反模式）。
+    """
+    if type_ == "hk":
+        return _hk_symbol(code)
+    return _symbol(code)
 
 
 # B4：_num 下沉到 app/utils/num.py（与 akshare_provider 共用）
@@ -80,7 +103,7 @@ class TencentProvider(BaseProvider):
         }
 
     def get_quote(self, type_: str, code: str) -> dict:
-        sym = _symbol(code)
+        sym = _symbol_for(type_, code)
         if sym is None:
             raise ProviderNotSupported(f"tencent does not support code: {code}")
         raw = self._fetch_quotes_raw([sym])
@@ -90,7 +113,7 @@ class TencentProvider(BaseProvider):
         return self._fields_to_quote(type_, code, f)
 
     def get_quotes(self, type_: str, codes: list[str]) -> dict[str, dict]:
-        syms = [(c, _symbol(c)) for c in codes]
+        syms = [(c, _symbol_for(type_, c)) for c in codes]
         syms = [(c, s) for c, s in syms if s]
         if not syms:
             return {}
@@ -114,7 +137,7 @@ class TencentProvider(BaseProvider):
     ) -> dict:
         if interval != "1d":
             raise ProviderNotSupported("tencent minute kline not implemented")
-        sym = _symbol(code)
+        sym = _symbol_for(type_, code)
         if sym is None:
             raise ProviderNotSupported(f"tencent does not support code: {code}")
 
@@ -155,13 +178,18 @@ class TencentProvider(BaseProvider):
             # 行格式：[日期, 开, 收, 高, 低, 量, ...]
             if len(row) < 6:
                 continue
+            # CR6-P1-3：与 sina/akshare 对齐，任一 OHLC 缺失即跳过该行——
+            # KlineDaily 列为 NOT NULL，null 会让 web 侧整批 upsert 失败。
+            o, c, h, low_ = _num(row[1]), _num(row[2]), _num(row[3]), _num(row[4])
+            if None in (o, c, h, low_):
+                continue
             candles.append(
                 {
                     "date": str(row[0]),
-                    "open": _num(row[1]),
-                    "close": _num(row[2]),
-                    "high": _num(row[3]),
-                    "low": _num(row[4]),
+                    "open": o,
+                    "close": c,
+                    "high": h,
+                    "low": low_,
                     "volume": _num(row[5]),
                 }
             )
@@ -179,3 +207,7 @@ class TencentProvider(BaseProvider):
 _provider = TencentProvider()
 # 备源注册：A股 / 场内基金（行情 + 日K）。场内基金由调用方按代码判定，这里统一挂 fund。
 register_chain(["stock", "fund"], _provider, position=1)
+# G6（2026-09-20）：港股备源（行情 + 日K，符号 hk+5位）。
+# 主源为 hk_provider（东财多 host）；腾讯在其全节点不可达/限流时接管。
+# 注：港股**列表**无备源（腾讯无全量港股列表接口）→ 显式降级（R10）。
+register_chain(["hk"], _provider, position=1)

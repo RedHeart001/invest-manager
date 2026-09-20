@@ -18,13 +18,14 @@ import os
 import re
 import time
 from zoneinfo import ZoneInfo
-from datetime import date, datetime
+from datetime import datetime
 
 import requests
 
 from ..config import load_env, search_api_key
 from ..utils.limiter import get_limiter
 from ..utils.timeout import run_with_timeout
+from ..utils.timeutil import beijing_today
 from . import llm_client
 
 load_env()  # 读取 data-service/.env 与 ../web/.env（TAVILY_API_KEY 别名已统一）
@@ -183,8 +184,12 @@ def _em_global_news(limit: int) -> list[dict]:
     return out
 
 
-def fetch_news(limit: int = NEWS_LIMIT) -> dict:
-    """R12：海外源优先、国内源降级；返回 {items, source, degraded, note}。"""
+def fetch_news(limit: int = NEWS_LIMIT, deadline: float | None = None) -> dict:
+    """R12：海外源优先、国内源降级；返回 {items, source, degraded, note}。
+
+    CR-16（本轮 code review）：接收整体 deadline——新闻源逐个尝试，若预算已耗尽
+    则停止后续源的尝试（此前新闻抓取完全不受 pipeline 超时预算约束）。
+    """
     notes: list[str] = []
     if os.environ.get("SEARCH_API_KEY"):
         try:
@@ -196,6 +201,9 @@ def fetch_news(limit: int = NEWS_LIMIT) -> dict:
         notes.append("未配置 SEARCH_API_KEY，使用国内新闻源")
 
     for name, fn in (("cls", _cls_telegraph), ("eastmoney-news", _em_global_news)):
+        if deadline is not None and time.monotonic() > deadline:
+            notes.append(f"pipeline 超时，跳过新闻源 {name}")
+            break
         try:
             items = _ak_guarded(lambda: fn(limit), 45.0, "news-source")
             return {
@@ -303,7 +311,7 @@ _LLM_SYSTEM = (
 )
 
 
-def structure_topics(news_items: list[dict]) -> dict:
+def structure_topics(news_items: list[dict], deadline: float | None = None) -> dict:
     if not news_items:
         return {"topics": [], "engine": "none", "note": "无新闻可结构化"}
 
@@ -311,7 +319,17 @@ def structure_topics(news_items: list[dict]) -> dict:
         f"{i + 1}. {it['title']}｜{it.get('summary', '')[:80]}"
         for i, it in enumerate(news_items[:20])
     )
-    llm = llm_client.chat_json(_LLM_SYSTEM, headlines)
+    # CR-16：LLM 结构化的超时取"剩余预算"（默认 60s 上限），不越过 pipeline deadline。
+    remaining = None
+    if deadline is not None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 1:
+            # 预算已尽：直接走关键词回退（不调用 LLM）
+            llm = None
+        else:
+            llm = llm_client.chat_json(_LLM_SYSTEM, headlines, timeout=min(60.0, remaining))
+    else:
+        llm = llm_client.chat_json(_LLM_SYSTEM, headlines)
     if isinstance(llm, dict) and isinstance(llm.get("topics"), list) and llm["topics"]:
         topics = []
         for t in llm["topics"][:TOPIC_LIMIT]:
@@ -535,13 +553,25 @@ def _topic_urls(topic: dict, news_items: list[dict], limit: int = 3) -> list[str
     return [n["url"] for _, n in picked if n.get("url")]
 
 
-def build_items(topics: list[dict], news_meta: dict) -> tuple[list[dict], list[str]]:
+def build_items(
+    topics: list[dict], news_meta: dict, deadline: float | None = None
+) -> tuple[list[dict], list[str]]:
+    """CR6-P2-3：board 映射最坏可达 ~900s（5 topic × 2 board × 2 源 × 45s），
+    `run_pipeline` 此前无整体超时 → `_state["running"]` 长期占用、所有触发被拒。
+    此处接收 deadline，每轮 board 循环开头检查；超时即停止后续映射，但**每个 topic
+    仍产出**（只是未完成成分映射），并在 note 标注降级。
+    """
     notes: list[str] = []
     items: list[dict] = []
+    timed_out = False
     for t in topics:
         related: list[dict] = []
         board_notes: list[str] = []
         for board in t.get("boards", [])[:2]:
+            # 已超时：不再调用外部映射（这是唯一的重活），该 topic related 留空
+            if deadline is not None and time.monotonic() > deadline:
+                timed_out = True
+                break
             mapped = map_board_products(board)
             if mapped["note"]:
                 board_notes.append(mapped["note"])
@@ -560,6 +590,8 @@ def build_items(topics: list[dict], news_meta: dict) -> tuple[list[dict], list[s
                 "relatedCodes": related[:12],
             }
         )
+    if timed_out:
+        notes.append("pipeline 超时，部分 topic 未完成成分映射")
     return items, notes
 
 
@@ -576,12 +608,20 @@ def emit_ingest(payload: dict) -> dict:
 
 def run_pipeline(trigger: str = "manual") -> dict:
     started = time.time()
-    news = fetch_news()
-    struct = structure_topics(news["items"])
-    items, board_notes = build_items(struct["topics"], news)
+    # CR6-P2-3：整体超时预算（env 可覆盖，默认 300s）。主要约束 build_items 的
+    # board 映射（最坏 ~900s）。保证最坏情况下 _state["running"] 有限期释放。
+    try:
+        timeout_s = float(os.environ.get("HOTSPOT_PIPELINE_TIMEOUT_S", "300"))
+    except ValueError:
+        timeout_s = 300.0
+    deadline = time.monotonic() + timeout_s
+    news = fetch_news(deadline=deadline)
+    struct = structure_topics(news["items"], deadline=deadline)
+    items, board_notes = build_items(struct["topics"], news, deadline=deadline)
     notes = [x for x in [news.get("note"), struct.get("note")] if x] + board_notes
     payload = {
-        "date": date.today().isoformat(),
+        # CR-06：digest 日期统一北京时间（与 web 侧 dayStart/beijingToday 同口径）
+        "date": beijing_today(),
         "trigger": trigger,
         "engine": struct["engine"],
         "newsSource": news["source"],

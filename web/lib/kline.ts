@@ -50,14 +50,22 @@ const RECHECK_MS = 30 * 60 * 1000;
 // 会重置模块级变量，lastFailed 的失败窗口（R15 限流保护）随之失效。
 type LruRef = { current: Lru<string, number> };
 const LAST_CHECKED_KEY = Symbol.for("invest-manager.kline.lastChecked");
+// CR-05（本轮 code review）：头部缺口补全与尾部增量此前共用 `lastChecked`，
+// 头补成功会立即压制同请求的尾部增量（同一 30 分钟窗口）→ 本次拿不到最新一日。
+// 拆出独立的尾部复查键，两者互不影响。
+const LAST_CHECKED_TAIL_KEY = Symbol.for("invest-manager.kline.lastCheckedTail");
 const LAST_FAILED_KEY = Symbol.for("invest-manager.kline.lastFailed");
 const lastCheckedBox: LruRef = ((globalThis as unknown as Record<symbol, LruRef | undefined>)[
   LAST_CHECKED_KEY
 ] ??= { current: new Lru<string, number>(500) });
+const lastCheckedTailBox: LruRef = ((globalThis as unknown as Record<symbol, LruRef | undefined>)[
+  LAST_CHECKED_TAIL_KEY
+] ??= { current: new Lru<string, number>(500) });
 const lastFailedBox: LruRef = ((globalThis as unknown as Record<symbol, LruRef | undefined>)[
   LAST_FAILED_KEY
 ] ??= { current: new Lru<string, number>(500) });
-const lastChecked = lastCheckedBox.current;
+const lastChecked = lastCheckedBox.current; // 头部缺口补全的复查窗口
+const lastCheckedTail = lastCheckedTailBox.current; // 尾部增量的复查窗口（CR-05 拆分）
 const lastFailed = lastFailedBox.current; // 失败负缓存（整段回源失败的窗口抑制）
 
 function dayStart(iso: string): Date {
@@ -84,7 +92,7 @@ export function normalizeRange(
   const s = iso(start) ?? isoAddDays(todayIso(), -90);
   const e = iso(end) ?? todayIso();
   if (dayStart(s) > dayStart(e)) return { error: "start must be <= end" };
-  if (dayStart(e) < dayStart(s) || (dayStart(e).getTime() - dayStart(s).getTime()) / 86_400_000 > MAX_RANGE_DAYS) {
+  if ((dayStart(e).getTime() - dayStart(s).getTime()) / 86_400_000 > MAX_RANGE_DAYS) {
     return { error: `range too large (max ${MAX_RANGE_DAYS} days)` };
   }
   return { start: s, end: e };
@@ -111,13 +119,29 @@ async function fetchDs(
   );
 }
 
+/** CR6-P1-3 护栏：日期合法且 OHLC 均为有限数值，才允许写入 KlineDaily（列为 NOT NULL）。 */
+export function isUsableCandle(c: {
+  date: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+}): boolean {
+  return (
+    /^\d{4}-\d{2}-\d{2}$/.test(c.date) &&
+    [c.open, c.high, c.low, c.close].every(Number.isFinite)
+  );
+}
+
 async function upsertCandles(
   type: string,
   code: string,
   candles: { date: string; open: number; high: number; low: number; close: number; volume: number | null }[],
   source: string,
 ): Promise<number> {
-  const valid = candles.filter((c) => /^\d{4}-\d{2}-\d{2}$/.test(c.date));
+  // CR6-P1-3：护栏——provider 侧已剔除 null OHLC，这里再兜一层，防未来
+  // 新 provider 漏过滤时单行脏数据让整批 upsert 中断。
+  const valid = candles.filter(isUsableCandle);
   if (valid.length === 0) return 0;
   // 只写入新日期（已存在的日期跳过，避免重复 UPDATE 与虚增 fetchedDays）
   const dates = valid.map((c) => dayStart(c.date).toISOString());
@@ -126,35 +150,50 @@ async function upsertCandles(
     select: { date: true },
   });
   const have = new Set(existing.map((r) => r.date.toISOString().slice(0, 10)));
+  const fresh = valid.filter((c) => !have.has(c.date));
+  if (fresh.length === 0) return 0;
+
+  // CR-15（本轮 code review）：首段回源（5 年 ≈ 1200 行）此前逐行 await create，
+  // 1200 次往返；改为分块多行 INSERT OR IGNORE——一次往返写多行，
+  // 且 OR IGNORE 天然吸收并发请求对同一 (type,code,date) 的重复写入（无需 catch P2002）。
+  // 分块 50：50 行 × 10 列 = 500 个绑定参数，低于 SQLite 默认 999 上限。
+  //
+  // 回归修复（本轮集成验收发现）：Prisma 对 SQLite 的 DateTime 存的是 **Unix 毫秒整数**，
+  // 而 `$executeRawUnsafe` 传 ISO 字符串会存成 **text** → 与 Prisma 生成的
+  // `date >= ? / <= ?`（数字比较）不匹配，导致这些行在带日期范围的查询里**被漏掉**
+  // （实测：KlineDaily 中 text 行查不出，R13 交叉验证因此失败）。
+  // 故原生 INSERT 的日期参数必须与 Prisma 同为毫秒数字（`dayStart().getTime()`）。
+  const CHUNK = 50;
   let n = 0;
-  for (const c of valid) {
-    if (have.has(c.date)) continue;
-    try {
-      await prisma.klineDaily.create({
-        data: {
-          type,
-          code,
-          date: dayStart(c.date),
-          open: c.open,
-          high: c.high,
-          low: c.low,
-          close: c.close,
-          volume: c.volume,
-          source,
-        },
-      });
-      n += 1;
-    } catch (e) {
-      // 并发请求可能同时对同一 (type,code,date) 判定"不存在"后各写一次
-      // （代码审查修复）：唯一约束冲突按"已写入"处理，其余错误上抛。
-      if (!isUniqueViolation(e)) throw e;
-    }
+  for (let i = 0; i < fresh.length; i += CHUNK) {
+    const batch = fresh.slice(i, i + CHUNK);
+    const rowPlaceholder = "(?,?,?,?,?,?,?,?,?,?)";
+    const params = batch.flatMap((c) => [
+      randomId(), // 走原生 INSERT，id 需显式生成（Prisma 默认 cuid 不参与）
+      type,
+      code,
+      dayStart(c.date).getTime(), // 毫秒整数：与 Prisma DateTime 存储一致
+      c.open,
+      c.high,
+      c.low,
+      c.close,
+      c.volume,
+      source,
+    ]);
+    await prisma.$executeRawUnsafe(
+      `INSERT OR IGNORE INTO "KlineDaily"
+         ("id","type","code","date","open","high","low","close","volume","source")
+       VALUES ${batch.map(() => rowPlaceholder).join(",")}`,
+      ...params,
+    );
+    n += batch.length;
   }
   return n;
 }
 
-function isUniqueViolation(e: unknown): boolean {
-  return typeof e === "object" && e !== null && (e as { code?: string }).code === "P2002";
+/** 原生 INSERT 需要显式主键（Prisma 的 cuid 默认值不参与 $executeRaw） */
+function randomId(): string {
+  return crypto.randomUUID();
 }
 
 export async function getKlineRange(
@@ -263,9 +302,10 @@ export async function getKlineRange(
       }
     }
     // 尾部增量（缓存末日 < 请求末日）：30 分钟内已复查过则跳过（R15：避免非交易日空转）
+    // CR-05：读/写独立的 `lastCheckedTail`，不再被头部缺口补全压制。
     if (maxCached < end) {
       const recentlyChecked =
-        Date.now() - (lastChecked.get(cacheKey) ?? 0) < RECHECK_MS;
+        Date.now() - (lastCheckedTail.get(cacheKey) ?? 0) < RECHECK_MS;
       if (recentlyChecked) {
         notes.push("增量复查窗口内（30 分钟），本次使用缓存");
       } else {
@@ -273,10 +313,10 @@ export async function getKlineRange(
           const ds = await fetchDs(type, code, isoAddDays(maxCached, 1), end, interval);
           fetched += await upsertCandles(type, code, ds.candles, ds.source);
           fetchedSource = fetchedSource || ds.source;
-          lastChecked.set(cacheKey, Date.now());
+          lastCheckedTail.set(cacheKey, Date.now());
         } catch (e) {
           notes.push(`增量回源失败：${e instanceof Error ? e.message : "unknown"}`);
-          lastChecked.set(cacheKey, Date.now()); // 失败也进入窗口，避免连续重试
+          lastCheckedTail.set(cacheKey, Date.now()); // 失败也进入窗口，避免连续重试
         }
       }
     }

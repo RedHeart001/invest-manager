@@ -19,6 +19,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from .hotspot import scheduler as hotspot_scheduler
+from . import sync_scheduler
 from .providers import (
     ProviderError,
     ProviderNotSupported,
@@ -40,8 +41,11 @@ def _primary(type_: str):
 async def lifespan(_app: FastAPI):
     # P3：启动热点调度（盘前/盘后 + 启动补跑）
     hotspot_scheduler.start_scheduler()
+    # G2（批次 D）：启动产品主数据每日同步调度（含启动补跑）
+    sync_scheduler.start_scheduler()
     yield
     hotspot_scheduler.shutdown_scheduler()
+    sync_scheduler.shutdown_scheduler()
 
 
 app = FastAPI(title="invest-manager data-service", version="0.5.0", lifespan=lifespan)
@@ -69,7 +73,10 @@ def _chain_call(type_: str, fn) -> dict:
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "version": app.version}
+    # CR-22：附带看门狗"已放弃存活线程"计数，供运维观测上游是否持续挂起
+    from .utils.timeout import abandoned_count
+
+    return {"status": "ok", "version": app.version, "abandonedWatchdogs": abandoned_count()}
 
 
 @app.get("/quote")
@@ -97,6 +104,35 @@ def quotes(
     except ProviderError as e:
         raise HTTPException(status_code=502, detail=str(e))
     return {"type": type, "quotes": data.get("quotes", {}), "note": data.get("note")}
+
+
+# ---------- R13 新增：双源交叉验证（G3 / 批次 D） ----------
+
+
+@app.get("/quote/verified")
+def quote_verified(
+    type: str = Query("stock", description="产品类型"),
+    code: str = Query(..., description="产品代码"),
+    field: str = Query("price", description="比对字段（price/prevClose/close 等）"),
+    threshold_pct: float = Query(0.5, description="偏差阈值（相对 %），超出则显式标注"),
+):
+    """行情 + 双源交叉验证（R13）：主源结果叠加备源比对，差异超阈值显式标注。
+
+    按需端点——不叠加到普通 /quote，避免成倍放大对限流敏感的数据源请求。
+    """
+    from .providers.chain import verify_metric
+
+    try:
+        return verify_metric(
+            type,
+            lambda p: p.get_quote(type, code),
+            field=field,
+            threshold_pct=max(0.0, min(threshold_pct, 100.0)),
+        )
+    except ProviderError as e:
+        if str(e).startswith("unsupported type"):
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        raise HTTPException(status_code=502, detail=str(e))
 
 
 @app.get("/kline")
@@ -217,6 +253,21 @@ def hotspots_status():
     return hotspot_scheduler.status()
 
 
+# ---------- G2 新增：产品主数据每日同步调度（批次 D） ----------
+
+
+@app.post("/sync/run")
+def sync_run(trigger: str = Query("manual-ui", description="触发来源标注")):
+    """手动触发产品主数据同步（G2：BFF 侧另有 /api/sync 直连入口，此为调度侧）。"""
+    return sync_scheduler.run_now(trigger=trigger)
+
+
+@app.get("/sync/status")
+def sync_status():
+    """同步调度状态：下次执行时间、最近一次结果、时区。"""
+    return sync_scheduler.status()
+
+
 # ---------- P5 新增：深度研究（M5） ----------
 
 
@@ -230,7 +281,9 @@ def research_start(body: dict):
         raise HTTPException(status_code=400, detail="code is required")
     result = research_tasks.start_research(type_, code, name)
     if result.get("rejected"):
-        return JSONResponse(result, status_code=409)
+        # CR6-P1-1：409 响应体同时带 detail，与其它端点的错误口径一致
+        # （web 侧按 status/body 分流，detail 便于日志与人工定位）。
+        return JSONResponse({**result, "detail": result["rejected"]}, status_code=409)
     return result
 
 

@@ -18,6 +18,7 @@ from app.providers.base import (
     register,
     register_chain,
 )
+from app.providers.akshare_provider import _sina_symbol_exchange
 from app.providers.sina_provider import _etf_symbol
 from app.providers.tencent_provider import TencentProvider, _symbol
 from app.utils.limiter import FamilyLimiter
@@ -69,6 +70,10 @@ def test_symbol_mapping() -> None:
     check("新浪符号：159915→sz", _etf_symbol("159915") == "sz159915")
     check("新浪符号：510300→sh", _etf_symbol("510300") == "sh510300")
     check("新浪符号：场外基金不支持", _etf_symbol("110022") is None)
+    # CR-17：新浪转债 symbol → 交易所显式解析（不依赖数字前缀推断）
+    check("CR-17：sh113050→SH", _sina_symbol_exchange("sh113050") == "SH")
+    check("CR-17：sz123285→SZ", _sina_symbol_exchange("sz123285") == "SZ")
+    check("CR-17：未知前缀→空", _sina_symbol_exchange("xx000000") == "")
 
 
 # ---------- 主备链 ----------
@@ -235,12 +240,135 @@ def test_crypto_failure_negative_cache() -> None:
         cp.time.time = orig_time
 
 
+# ---------- CR6-P1-3：K 线脏行（null OHLC）契约统一 ----------
+
+
+def test_kline_null_ohlc_filtered() -> None:
+    """CR6-P1-3（2026-09-18 review）：akshare/tencent 必须剔除 OHLC 缺失的行。
+
+    KlineDaily.open/high/low/close 为 NOT NULL，单行 null 会让 web 侧整批
+    upsert 失败、该标的 K 线持续不可用。以 sina 为契约基准，任一 OHLC
+    为 None 即跳过该行（其余行保留）。
+    """
+    import app.providers.akshare_provider as akp
+    import app.providers.tencent_provider as tp
+
+    # --- akshare/eastmoney：一行正常 + 一行 open 为 "-"（→ None）---
+    # 格式：日期,开,收,高,低,量,额,...
+    good = "2026-09-11,10.0,10.5,10.8,9.9,1000,10500,1.0,5.0,0.5,1.0"
+    bad = "2026-09-12,-,10.5,10.8,9.9,1000,10500,1.0,5.0,0.5,1.0"
+    orig_em = akp._em_request
+    akp._em_request = lambda fn: [good, bad]
+    try:
+        out = akp.AkshareProvider().get_kline("stock", "600000", "20260911", "20260912")
+    finally:
+        akp._em_request = orig_em
+    dates = [c["date"] for c in out["candles"]]
+    check("CR6-P1-3：akshare 剔除 null OHLC 行（保留正常行）",
+          dates == ["2026-09-11"], str(dates))
+
+    # --- tencent：一行正常 + 一行 high 为 "-"（非数值）---
+    class KResp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {
+                "data": {
+                    "sz159915": {
+                        "qfqday": [
+                            ["2026-09-11", "3.323", "3.341", "3.354", "3.280", "100"],
+                            ["2026-09-12", "3.400", "3.410", "-", "3.390", "100"],
+                        ]
+                    }
+                }
+            }
+
+    orig_get = tp.requests.get
+    tp.requests.get = lambda *a, **k: KResp()
+    try:
+        tout = tp.TencentProvider().get_kline("fund", "159915", "20260911", "20260912")
+    finally:
+        tp.requests.get = orig_get
+    tdates = [c["date"] for c in tout["candles"]]
+    check("CR6-P1-3：tencent 剔除 null OHLC 行（保留正常行）",
+          tdates == ["2026-09-11"], str(tdates))
+
+
+# ---------- CR-19：场外基金净值表单失败负缓存 ----------
+
+
+def test_fund_nav_failure_negative_cache() -> None:
+    """CR-19（本轮 code review）：失败路径必须与成功路径对称记账。
+
+    此前 `_fund_nav_table` 失败时不写任何冷却时间戳 → 限流期每个场外基金请求
+    都会整表重拉（60s 看门狗），反复捶打天天基金。修复后失败写 `_fund_nav_fail_ts`，
+    冷却期内直接降级不再发起外部请求。
+    """
+    import app.providers.akshare_provider as akp
+
+    provider = akp.AkshareProvider()
+    calls = {"n": 0}
+
+    def _boom(*a, **k):
+        calls["n"] += 1
+        raise RuntimeError("nav table blocked (simulated)")
+
+    orig = akp._ak_request
+    akp._ak_request = _boom
+    try:
+        # 第一次：真实尝试并失败
+        raised1 = False
+        try:
+            provider._fund_nav_table()
+        except ProviderError:
+            raised1 = True
+        check("CR-19：净值表首次失败如实抛错", raised1)
+        check("CR-19：首次失败确实发起外部请求", calls["n"] == 1, str(calls))
+
+        # 第二次：命中失败冷却，不再发起外部请求
+        raised2 = False
+        msg = ""
+        try:
+            provider._fund_nav_table()
+        except ProviderError as e:
+            raised2 = True
+            msg = str(e)
+        check("CR-19：冷却期内仍抛降级错误", raised2)
+        check("CR-19：冷却期内不再发起外部请求（负缓存生效）", calls["n"] == 1, str(calls))
+        check("CR-19：降级说明含冷却提示", "cooling down" in msg, msg)
+    finally:
+        akp._ak_request = orig
+
+
+# ---------- CR-22：看门狗放弃线程计数 ----------
+
+
+def test_abandoned_watchdog_count() -> None:
+    """CR-22：超时放弃的看门狗线程应被计数（观测用）。"""
+    import time as _t
+
+    from app.utils import timeout as to
+
+    before = to.abandoned_count()
+    # 一个必然超时的调用：fn 睡 2s，超时 0.1s
+    value, err = to.run_with_timeout(lambda: _t.sleep(2.0) or "done", 0.1, "cr22-slow")
+    check("CR-22：超时返回 (None, TimeoutError)", value is None and isinstance(err, TimeoutError))
+    check("CR-22：放弃线程计数 +1", to.abandoned_count() == before + 1, str(to.abandoned_count()))
+    # 正常完成的调用不计入
+    v2, e2 = to.run_with_timeout(lambda: "ok", 1.0, "cr22-fast")
+    check("CR-22：正常完成不计入", v2 == "ok" and e2 is None and to.abandoned_count() == before + 1)
+
+
 if __name__ == "__main__":
     test_limiter()
     test_symbol_mapping()
     test_chain()
     test_tencent_parsers()
     test_crypto_failure_negative_cache()
+    test_kline_null_ohlc_filtered()
+    test_fund_nav_failure_negative_cache()
+    test_abandoned_watchdog_count()
     fails = [x for x in results if not x[1]]
     print(f"\n===== {len(results) - len(fails)}/{len(results)} 通过 =====")
     if fails:
