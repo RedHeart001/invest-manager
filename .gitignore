@@ -31,3 +31,7 @@ docker-compose.override.yml
 
 # CR4（P3）：verify-all.mjs 的产物（跑测试时生成）
 verify-suites.txt
+
+# npx skills 的"通用位"产物：只有 Codex 等其他 agent 读它，Claude Code 只读 .claude/skills/
+# 技能实体已落在 .claude/skills/<name>/，故此处忽略，避免同一份内容在仓库里存两份
+.agents/
