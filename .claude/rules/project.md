@@ -117,7 +117,7 @@ git diff --cached | grep -iE '(sk-|tvly-|ghp_|AKIA)[A-Za-z0-9_-]{10,}'     # 暂
 |---|---|---|
 | **纪律** | 一句话能说清 | 本文件「其他长期有效的纪律」节 |
 | **禁区** | "不许碰"——不得回退的约束、契约坑、数据源事实 | `docs/CONSTRAINTS.md` |
-| **流程** | 多步骤 + 有判断分支 | `.claude/skills/<name>/SKILL.md`（**目前待建**） |
+| **流程** | 多步骤 + 有判断分支 | `.claude/skills/<name>/SKILL.md`（规范与候选见 `.claude/skills/README.md`） |
 
 **流程的原料来自归档**：`docs/history/` 各归档文件的 `## 可复用的做法` 小节（信号→判断→动作→验证）。
 判据同样是「**一次是事件，两次是模式**」——同一条做法**重复出现**才够格提炼为 skill，第一次遇到不提炼。
