@@ -54,7 +54,7 @@ Claude Code 原生技能不认。
 
 | 技能 | 来源 | 版本标识 | 状态 |
 |---|---|---|---|
-| `typesafe-ai` | [github.com/typesafe-ai/skills](https://github.com/typesafe-ai/skills)（MIT） | 无 `version` 字段 → 以内容哈希钉住：`SKILL.md` sha256 `0ab58b7533ebe4ba…`（抓取于 2026-09-21） | **未安装**（仅评估） |
+| `typesafe-ai` | [github.com/typesafe-ai/skills](https://github.com/typesafe-ai/skills)（MIT） | 无 `version` 字段 → 以内容哈希钉住：`SKILL.md` sha256 `0ab58b7533ebe4ba5342ad6260d69e492cd0955ca9d3ee20b3c91375eea0203d`（抓取于 2026-09-21） | **未安装**（仅评估） |
 
 `typesafe-ai` 是 TypeSafe 的 System One / Jev 集成指南——把自然语言+应用状态变成带类型的判断与概率
 （`Choice` / `Noul` / `Score` 三个原语）。**目前未应用于任何任务。**
