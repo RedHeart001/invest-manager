@@ -255,10 +255,7 @@
 
 **M7 已知优化点（非阻塞，低优先，2026-09-13 体检记录）**
 
-1. **技能触发词为子串匹配**，存在误命中可能（如"日报""季报"出现在无关语境也会激活）；当前影响可控（正文注入上限 2400 字符），后续可加词边界匹配或更特化的触发词。**2026-09-20 复核：仍未修复**，`web/lib/skills.ts:175` 依旧为 `text.includes(t.toLowerCase())`
-   - **候选方案（⏳ 待拍板，2026-09-21 记）**：改用**类型化判断原语**替代触发词表——不写死子串，而把"这句话属于哪个技能"作为一次**结构化判断**交给模型（返回带概率的选项），代码只消费结果。来源：第三方技能 [`typesafe-ai`](../.claude/skills/typesafe-ai/SKILL.md)（TypeSafe System One / Jev，`Choice`/`Noul`/`Score` 三原语），其主张 "**select instead of generate**" 与 "**route and fill known arguments**" 与本优化点同构。
-   - **采用前必须先查证（尚未做）**：① 延迟与成本——当前是纯本地同步匹配，改成模型调用会引入网络往返，对"每次对话都要跑"的路径是硬约束；② 是否境外服务——若在境外，按 [CONSTRAINTS.md §C](CONSTRAINTS.md) 需走代理（R12 已有先例）；③ 是否愿意引入新外部依赖——本项目对第三方能力现行口径是"白名单 + 不自动安装"（见 `web/mcp.json` 说明）。
-   - **不替代原方案**：词边界匹配仍是**零依赖兜底**。上述任一条不成立，就回到原方案，本候选作废。
+1. **技能触发词为子串匹配**，存在误命中可能（如"日报""季报"出现在无关语境也会激活）；当前影响可控（正文注入上限 2400 字符），后续可加词边界匹配或更特化的触发词。**2026-09-20 复核：仍未修复**，`web/lib/skills.ts:175` 依旧为 `text.includes(t.toLowerCase())`。**候选方案（⏳ 待拍板）见 [FIX-LEDGER.md](FIX-LEDGER.md) 的「待评估的优化候选」——未验证，勿据此改动。**
 2. **状态面板探测超时边界**：探测模式下若某 server 挂起，接口最长阻塞一个 `timeoutMs`（默认 20s）；后续可加探测专用短超时。**2026-09-20 复核：未见修复**
 3. ~~**进程内缓存无上限**：技能缓存、provider 的 `_news_cache` / `_fund_report_cache` 等为无界 Map~~ —— **已闭环（2026-09-19）**：`data-service/app/utils/lru.py` 落地，`akshare_provider` 的 `_news_cache`（`Lru(512)`）/ `_fund_report_cache`（`Lru(256)`）与 `sina_provider._cache` 均已换用
 
