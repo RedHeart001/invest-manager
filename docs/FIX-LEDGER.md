@@ -50,7 +50,7 @@
 
 | 编号 | 候选 | 针对 | 状态 | 卡点 |
 |---|---|---|---|---|
-| **OPT-1** | 用**类型化判断原语**替代技能触发词子串匹配——不写死子串，而把"这句话属于哪个技能"作为一次**结构化判断**交给模型，代码只消费结果 | M7 优化点 1（[PLAN.md](PLAN.md)），`web/lib/skills.ts:175` | ✅ **已拍板**（2026-09-22）：改走「路线 C · `load_skill` 工具化加载」 | 评估证据与实施要点见下 |
+| **OPT-1** | 用**类型化判断原语**替代技能触发词子串匹配——不写死子串，而把"这句话属于哪个技能"作为一次**结构化判断**交给模型，代码只消费结果 | M7 优化点 1（[PLAN.md](PLAN.md)），`web/lib/skills.ts:175` | ✅ **已落地**（2026-09-22，`SKILL_ROUTER=llm` 默认档上线，commit `10745ff`） | 评估证据与实施要点见下；逐文件明细见 [history](history/2026-09-22-opt1-路线C-技能路由改造.md) |
 
 **OPT-1 来源**（2026-09-21 登记）：第三方技能 [`typesafe-ai`](../.claude/skills/typesafe-ai/SKILL.md)——TypeSafe System One / Jev，`Choice`/`Noul`/`Score` 三原语。其主张 "**select instead of generate**" 与 "**route and fill known arguments**" 与本优化点同构。
 
@@ -68,6 +68,12 @@
 - **已知代价**：技能相关提问 +1 次 LLM 往返（决定→加载→作答）；`MAX_TOOL_ROUNDS` 维持 4（轮次耗尽有强制总结兜底，已有测试）
 - **测试改造**：`test-p6.mjs` 的 meta.skills 确定性命中断言改到 keyword 档跑（llm 档只断言工具列表含 `load_skill`）；`meta.skills` 移到 `done` 事件汇报实际加载（前端只读 sessionId，无感）；新增 `eval-skill-router.mjs`（真实 LLM、手动跑、不进 verify-all）
 - **验收门槛**：明确命中消息加载率 ≥90%、明确无关消息误加载率 ≤10%；不达标退 `hybrid` 档
+
+**OPT-1 执行记录（2026-09-22，当日实施并验收）**：
+
+- 实施 commit：`10745ff`（9 文件：skills/gateway/route/ChatUI/.env.example + 三套测试改造 + 新增 eval 脚本）；逐文件明细见 [history/2026-09-22-opt1-路线C-技能路由改造.md](history/2026-09-22-opt1-路线C-技能路由改造.md)
+- 验证：`tsc --noEmit` 0 错 ｜ `vitest` **148/148**（24 文件，基线 140）｜ `test-p6.mjs` llm 档实跑 **24/24** ｜ `eval-skill-router.mjs` 真实 LLM：**加载率 6/6=100%（≥90%✅）、误加载率 0/5=0%（≤10%✅）→ 达标，无需退 hybrid**
+- 回滚方式：`web/.env` 设 `SKILL_ROUTER=keyword` 重启即回原行为
 
 ---
 
