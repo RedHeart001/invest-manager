@@ -37,18 +37,25 @@ npx skills add <repo> --skill <name> --copy
 | 技能 | 来源 | 状态 | 位置 |
 |---|---|---|---|
 | `typesafe-ai` | [github.com/typesafe-ai/skills](https://github.com/typesafe-ai/skills)（MIT） | 已装 2026-09-21 | `.claude/skills/typesafe-ai/` |
+| `humanizer-zh` | [github.com/op7418/Humanizer-zh](https://github.com/op7418/Humanizer-zh)（MIT，© 2026 歸藏） | 已装 2026-09-22 | `.claude/skills/humanizer-zh/` |
 
 `typesafe-ai` 是 TypeSafe 的 System One / Jev 集成指南——把自然语言+应用状态变成带类型的判断与概率
 （`Choice` / `Noul` / `Score` 三原语）。**目前未应用于任何任务**；其思路与 M7 优化点 1（技能触发词子串匹配）
 的关联已于 **2026-09-22 评估完毕**——TypeSafe SaaS 路线作废，改走路线 C 落地，证据见
 [FIX-LEDGER.md](../../docs/FIX-LEDGER.md) 的 OPT-1。
 
+`humanizer-zh` 是中文"去 AI 写作痕迹"编辑指南——检测并修复 24 类 AI 写作模式（夸大象征、宣传语、
+-ing 式肤浅分析、模糊归因、破折号滥用、三段式、AI 高频词等），用于编辑/审阅文本使其更像人写的。
+上游翻译自 [blader/humanizer](https://github.com/blader/humanizer)，工具部分参考
+[hardikpandya/stop-slop](https://github.com/hardikpandya/stop-slop)。**尚未应用于任何任务**。
+
 **版本标识**——上游 frontmatter 无 `version` 字段的，用内容哈希钉：
 
 | 对象 | sha256 | 怎么复现 |
 |---|---|---|
-| 下载原文件（CRLF） | `0ab58b7533ebe4ba5342ad6260d69e492cd0955ca9d3ee20b3c91375eea0203d` | `sha256sum SKILL.md`（装后、未过 git） |
-| **入库内容（LF）** | `71ea90d7906c6554c4f4c460ef7361b2d26f59116ccdae986dc6d997b9389f52` | `git cat-file blob HEAD:.claude/skills/typesafe-ai/SKILL.md \| sha256sum` |
+| typesafe-ai 下载原文件（CRLF） | `0ab58b7533ebe4ba5342ad6260d69e492cd0955ca9d3ee20b3c91375eea0203d` | `sha256sum SKILL.md`（装后、未过 git） |
+| typesafe-ai **入库内容（LF）** | `71ea90d7906c6554c4f4c460ef7361b2d26f59116ccdae986dc6d997b9389f52` | `git cat-file blob HEAD:.claude/skills/typesafe-ai/SKILL.md \| sha256sum` |
+| humanizer-zh 入库内容（LF） | `e0edbdbc9008644263d5573fb59beac95794e188fd99c35012bfd79e9ae4beeb` | `git cat-file blob HEAD:.claude/skills/humanizer-zh/SKILL.md \| sha256sum` |
 
 > ⚠️ **在仓库里核对用第二行。** 两者差异**仅为行尾**（CRLF→LF，git 入库自动规范化）；直接对工作区文件
 > 跑 `sha256sum` 会因本机检出回 CRLF 而对不上。
