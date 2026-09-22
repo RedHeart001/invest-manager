@@ -1,8 +1,6 @@
 # 项目技能（.claude/skills/）
 
 > **这里放什么**：**只放第三方技能**——外部厂商/社区提供的 `SKILL.md`。
-> 本项目**不自建技能**：原「从 history 归档提炼流程技能 + `LOCAL-` 前缀 + 重复出现 2 次判据 + 候选登记」
-> 已于 **2026-09-21 整体取消**。
 > 也不是给 App 用户用的领域技能（那是 [../../web/skills/](../../web/skills/)，格式与加载器都不同，别混）。
 
 ## 读取路径
@@ -41,8 +39,9 @@ npx skills add <repo> --skill <name> --copy
 | `typesafe-ai` | [github.com/typesafe-ai/skills](https://github.com/typesafe-ai/skills)（MIT） | 已装 2026-09-21 | `.claude/skills/typesafe-ai/` |
 
 `typesafe-ai` 是 TypeSafe 的 System One / Jev 集成指南——把自然语言+应用状态变成带类型的判断与概率
-（`Choice` / `Noul` / `Score` 三原语）。**目前未应用于任何任务**；它与 M7 优化点 1（技能触发词子串匹配）
-的关联已登记在 [PLAN.md](../../docs/PLAN.md) 的 M7 节，状态为待拍板。
+（`Choice` / `Noul` / `Score` 三原语）。**目前未应用于任何任务**；其思路与 M7 优化点 1（技能触发词子串匹配）
+的关联已于 **2026-09-22 评估完毕**——TypeSafe SaaS 路线作废，改走路线 C 落地，证据见
+[FIX-LEDGER.md](../../docs/FIX-LEDGER.md) 的 OPT-1。
 
 **版本标识**——上游 frontmatter 无 `version` 字段的，用内容哈希钉：
 
