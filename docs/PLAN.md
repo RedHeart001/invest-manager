@@ -255,7 +255,7 @@
 
 **M7 已知优化点（非阻塞，低优先，2026-09-13 体检记录）**
 
-1. **技能触发词为子串匹配**，存在误命中可能（如"日报""季报"出现在无关语境也会激活）；当前影响可控（正文注入上限 2400 字符），后续可加词边界匹配或更特化的触发词。**2026-09-20 复核：仍未修复**，`web/lib/skills.ts:175` 依旧为 `text.includes(t.toLowerCase())`。**候选方案（⏳ 待拍板）见 [FIX-LEDGER.md](FIX-LEDGER.md) 的「待评估的优化候选」——未验证，勿据此改动。**
+1. **技能触发词为子串匹配**，存在误命中可能（如"日报""季报"出现在无关语境也会激活）；当前影响可控（正文注入上限 2400 字符），后续可加词边界匹配或更特化的触发词。**2026-09-20 复核：仍未修复**，`web/lib/skills.ts:175` 依旧为 `text.includes(t.toLowerCase())`。**2026-09-22 已拍板**：走「路线 C」——注册内置工具 `load_skill` 由主 LLM 自主加载技能正文，废除子串匹配路由（`SKILL_ROUTER` 三档开关，`keyword` 档保留作 env 回滚）；TypeSafe/Jev（境外 SaaS）与 Laya（自托管）两条候选路线评估后均未采纳。评估证据与实施要点见 [FIX-LEDGER.md](FIX-LEDGER.md) OPT-1。**
 2. **状态面板探测超时边界**：探测模式下若某 server 挂起，接口最长阻塞一个 `timeoutMs`（默认 20s）；后续可加探测专用短超时。**2026-09-20 复核：未见修复**
 3. ~~**进程内缓存无上限**：技能缓存、provider 的 `_news_cache` / `_fund_report_cache` 等为无界 Map~~ —— **已闭环（2026-09-19）**：`data-service/app/utils/lru.py` 落地，`akshare_provider` 的 `_news_cache`（`Lru(512)`）/ `_fund_report_cache`（`Lru(256)`）与 `sina_provider._cache` 均已换用
 

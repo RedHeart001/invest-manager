@@ -50,17 +50,24 @@
 
 | 编号 | 候选 | 针对 | 状态 | 卡点 |
 |---|---|---|---|---|
-| **OPT-1** | 用**类型化判断原语**替代技能触发词子串匹配——不写死子串，而把"这句话属于哪个技能"作为一次**结构化判断**交给模型（返回带概率的选项），代码只消费结果 | M7 优化点 1（[PLAN.md](PLAN.md)），`web/lib/skills.ts:175` | ⏳ 待拍板 | 见下「采用前必查证」 |
+| **OPT-1** | 用**类型化判断原语**替代技能触发词子串匹配——不写死子串，而把"这句话属于哪个技能"作为一次**结构化判断**交给模型，代码只消费结果 | M7 优化点 1（[PLAN.md](PLAN.md)），`web/lib/skills.ts:175` | ✅ **已拍板**（2026-09-22）：改走「路线 C · `load_skill` 工具化加载」 | 评估证据与实施要点见下 |
 
 **OPT-1 来源**（2026-09-21 登记）：第三方技能 [`typesafe-ai`](../.claude/skills/typesafe-ai/SKILL.md)——TypeSafe System One / Jev，`Choice`/`Noul`/`Score` 三原语。其主张 "**select instead of generate**" 与 "**route and fill known arguments**" 与本优化点同构。
 
-**采用前必查证（尚未做）**：
+**OPT-1 评估与拍板（2026-09-22）**——三条路线查证结论：
 
-1. **延迟与成本**——当前是纯本地同步匹配；改成模型调用会引入网络往返，对"每次对话都要跑"的路径是硬约束
-2. **是否境外服务**——若在境外，按 [CONSTRAINTS.md §C](CONSTRAINTS.md) 需走代理（R12 已有先例）
-3. **是否引入新外部依赖**——本项目对第三方能力的现行口径是"白名单 + 不自动安装"（见 `web/mcp.json` 说明）
+1. **TypeSafe Jev（SaaS）→ 作废**。登记时自设的三条卡点两条不成立：①唯一形态是境外托管 API（`api.typesafe.ai`，Bearer key，Cloudflare 托管），聊天内容须出境、按 CONSTRAINTS §C 走代理；②新增凭据 + SDK + SaaS 可用性依赖，违反「白名单 + 不自动安装」口径（`web/mcp.json`）。另有登记时未预见的硬伤：官方明示英文为主、CJK 效果不保证，而本负载是纯中文；且调用点在每条消息 SSE 流开始前的同步路径（`route.ts` → `buildSystemPrompt`），境外 RTT 直接打进 TTFT。成本本身可忽略（$0.042/Mtok 输入、输出免费）。
+2. **Laya（[github.com/NandhaKishorM/laya](https://github.com/NandhaKishorM/laya)，自托管）→ 未采纳，留作备选**。与 Jev 同构三原语（choice/score/noul）但本地推理：Apache-2.0、无凭据零外呼、模型卡明确支持 zh（mmBERT-base 322M，T4 约 33ms/问），翻盘了 SaaS 的卡点。未采纳原因：Python/torch 依赖与 web（Node）侧同步调用点架构错配；权重 + torch 显著撑大 P7 容器镜像；单人作者、基准自报、成熟度未验证。
+3. **路线 C · 主 LLM 工具化加载 → ✅ 拍板采用**。技能 meta（name+description）本已常驻 system prompt，注册内置工具 `load_skill(name)` 由主模型自主拉取正文——"候选在代码、选择交给模型、代码消费结果"。用现有 LLM，零新依赖、零数据出境。
 
-**不替代原方案**：词边界匹配仍是**零依赖兜底**。上述任一条不成立，就回到原方案，本候选作废。
+**实施要点（2026-09-22 与主人确认）**：
+
+- **每请求闭包** `createSkillLoader()`（`def`/`run`/`loaded`），加载计数随请求生灭——不进全局注册表，避开 C17/C27 类单例并发坑；技能目录为空时 `def=null` 不注册
+- **失败即引导**：未知名返回可用候选列表让模型下一轮自愈；`name` 白名单校验（C33）；正文截断复用 `maxBodyChars`（2400）
+- **`SKILL_ROUTER` 三档开关**：`keyword`（现状原样保留）/ `llm`（**默认**）/ `hybrid`——改 env 即回滚
+- **已知代价**：技能相关提问 +1 次 LLM 往返（决定→加载→作答）；`MAX_TOOL_ROUNDS` 维持 4（轮次耗尽有强制总结兜底，已有测试）
+- **测试改造**：`test-p6.mjs` 的 meta.skills 确定性命中断言改到 keyword 档跑（llm 档只断言工具列表含 `load_skill`）；`meta.skills` 移到 `done` 事件汇报实际加载（前端只读 sessionId，无感）；新增 `eval-skill-router.mjs`（真实 LLM、手动跑、不进 verify-all）
+- **验收门槛**：明确命中消息加载率 ≥90%、明确无关消息误加载率 ≤10%；不达标退 `hybrid` 档
 
 ---
 
