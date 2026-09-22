@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { LlmNotConfiguredError, type LlmMessage, type LlmToolCall, chatStream } from "@/lib/llm";
 import { buildSystemPrompt, executeAgentTool, getAgentTools } from "@/lib/gateway";
+import { createSkillLoader, skillRouterMode } from "@/lib/skills";
 import { appendMessage, createSession, getMessages } from "@/lib/chat";
 import { repairToolPairing } from "@/lib/chat-history";
 import { startResearch } from "@/lib/research";
@@ -61,10 +62,17 @@ export async function POST(req: NextRequest) {
         }
       };
       try {
-        // P6：技能命中判定（仅命中技能的正文进上下文，元信息常驻）
+        // P6：技能路由（SKILL_ROUTER 分档，OPT-1 路线 C）
+        // - llm（默认）：正文不注入；每请求一个 load_skill 加载器（计数随请求生灭，并发隔离）
+        // - keyword：原行为（触发词命中注入）；hybrid：照注 + 工具开放给长尾
+        const mode = skillRouterMode();
+        const loader = createSkillLoader();
         const sys = buildSystemPrompt(message);
-        // 工具集：内置（名字不变）+ 已连接的 MCP server 工具（不可用时自动降级为空）
-        const tools = await getAgentTools();
+        // 工具集：内置（名字不变）+ 已连接的 MCP server 工具（不可用时自动降级为空）+ load_skill（keyword 档不注册）
+        const tools = [
+          ...(await getAgentTools()),
+          ...(mode !== "keyword" && loader.def ? [loader.def] : []),
+        ];
         send("meta", { sessionId: sid, skills: sys.activeSkills, toolCount: tools.length });
 
         // 意图升档（PLAN M4/M5：关键词规则命中 → 真实触发 L2 深度研究）
@@ -201,7 +209,11 @@ export async function POST(req: NextRequest) {
               args = {};
             }
             send("status", { name: tc.function.name, args });
-            const result = await executeAgentTool(tc.function.name, args);
+            // load_skill 是每请求闭包（带"已加载数"状态），不进统一执行器
+            const result =
+              tc.function.name === "load_skill"
+                ? loader.run(String((args as { name?: unknown }).name ?? ""))
+                : await executeAgentTool(tc.function.name, args);
             send("tool_result", {
               name: tc.function.name,
               ok: result.ok,
@@ -243,7 +255,8 @@ export async function POST(req: NextRequest) {
             send("warn", { message: "已达工具调用上限且未生成最终回答，部分结果可能不完整" });
           }
         }
-        send("done", { sessionId: sid });
+        // 实际激活的技能：keyword 档在 meta 已汇报；llm/hybrid 档由 loader 在此汇报
+        send("done", { sessionId: sid, skills: mode === "keyword" ? sys.activeSkills : loader.loaded() });
       } catch (e) {
         console.error("[chat] route error:", e instanceof Error ? `${e.name}: ${e.message}` : e);
         if (e instanceof LlmNotConfiguredError) {

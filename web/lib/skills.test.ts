@@ -7,11 +7,13 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
+  createSkillLoader,
   loadSkills,
   maxActiveSkills,
   maxBodyChars,
   parseFrontmatter,
   selectSkills,
+  skillRouterMode,
   skillsBodyPrompt,
   skillsMetaPrompt,
 } from "./skills";
@@ -127,5 +129,84 @@ describe("热加载", () => {
     const after = loadSkills().find((s) => s.name === "hot");
     expect(after?.description).toBe("新");
     expect(skillsBodyPrompt("热")).toContain("NEW");
+  });
+});
+
+describe("skillRouterMode（OPT-1 路线 C）", () => {
+  it("默认 llm；keyword/hybrid 显式生效（大小写不敏感）；非法值回退默认", () => {
+    delete process.env.SKILL_ROUTER;
+    expect(skillRouterMode()).toBe("llm");
+    process.env.SKILL_ROUTER = "keyword";
+    expect(skillRouterMode()).toBe("keyword");
+    process.env.SKILL_ROUTER = "HYBRID";
+    expect(skillRouterMode()).toBe("hybrid");
+    process.env.SKILL_ROUTER = "bogus";
+    expect(skillRouterMode()).toBe("llm");
+  });
+
+  it("llm 档元信息引导调用 load_skill；keyword 档保持原文案", () => {
+    mkSkill(tmp, "alpha", "---\nname: alpha\ndescription: 甲技能\ntriggers:\n  - 热点\n---\nBODY");
+    process.env.SKILL_ROUTER = "llm";
+    const llmMeta = skillsMetaPrompt(undefined, "llm");
+    expect(llmMeta).toContain("load_skill");
+    expect(llmMeta).not.toContain("BODY");
+    process.env.SKILL_ROUTER = "keyword";
+    expect(skillsMetaPrompt()).toContain("命中触发词时会自动加载");
+  });
+});
+
+describe("createSkillLoader（OPT-1 路线 C）", () => {
+  beforeEach(() => {
+    mkSkill(tmp, "alpha", "---\nname: alpha\ndescription: 甲技能\ntriggers:\n  - 热点\n---\nALPHA BODY");
+    mkSkill(tmp, "beta", "---\nname: beta\ndescription: 乙技能\ntriggers:\n  - 均线\n---\nBETA BODY");
+  });
+
+  it("空技能目录不注册工具（模型无从误调）", () => {
+    expect(createSkillLoader([]).def).toBeNull();
+  });
+
+  it("def 携带工具名与候选 enum 白名单", () => {
+    const { def } = createSkillLoader();
+    expect(def?.function.name).toBe("load_skill");
+    const params = def?.function.parameters as { properties: { name: { enum: string[] } } };
+    expect(params.properties.name.enum).toEqual(["alpha", "beta"]);
+  });
+
+  it("加载返回正文并计入 loaded；未知名返回可用候选引导自愈", () => {
+    const loader = createSkillLoader();
+    const r = loader.run("alpha");
+    expect(r.ok).toBe(true);
+    expect((r.data as { body: string }).body).toBe("ALPHA BODY");
+    expect(loader.loaded()).toEqual(["alpha"]);
+
+    const bad = loader.run("nope");
+    expect(bad.ok).toBe(false);
+    expect(bad.summary).toContain("alpha / beta");
+    expect(loader.loaded()).toEqual(["alpha"]);
+  });
+
+  it("超上限拒绝并保留已加载列表；重复加载幂等（不重复计数）", () => {
+    process.env.SKILL_MAX_ACTIVE = "1";
+    const loader = createSkillLoader();
+    expect(loader.run("alpha").ok).toBe(true);
+    const over = loader.run("beta");
+    expect(over.ok).toBe(false);
+    expect(over.summary).toContain("最多加载 1");
+    expect(loader.loaded()).toEqual(["alpha"]);
+
+    const dup = loader.run("alpha");
+    expect(dup.ok).toBe(true);
+    expect((dup.data as { body: string }).body).toBe("ALPHA BODY");
+    expect(loader.loaded()).toEqual(["alpha"]);
+  });
+
+  it("正文超长时截断并标注 truncated", () => {
+    process.env.SKILL_MAX_BODY_CHARS = "10";
+    mkSkill(tmp, "long", `---\nname: long\ndescription: 长正文\n---\n${"字".repeat(50)}`);
+    const loader = createSkillLoader();
+    const r = loader.run("long");
+    const data = r.data as { body: string; truncated: boolean };
+    expect(data.truncated).toBe(true);
+    expect(data.body).toContain("技能正文超长已截断");
   });
 });

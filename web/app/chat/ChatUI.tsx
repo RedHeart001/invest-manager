@@ -29,6 +29,7 @@ const TOOL_LABEL: Record<string, string> = {
   get_hotspots: "查询热点",
   get_fund_holdings: "查询基金重仓",
   get_phase_analysis: "阶段分析",
+  load_skill: "加载技能指引",
 };
 
 // Markdown 渲染样式（表格/列表/代码的工整呈现）

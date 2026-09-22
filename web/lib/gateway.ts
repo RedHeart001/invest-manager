@@ -11,7 +11,7 @@
 
 import { AGENT_TOOLS, executeTool } from "./tools";
 import { mcpLlmTools, callMcpTool, mcpStatus } from "./mcp";
-import { loadSkills, selectSkills, skillsBodyPrompt, skillsMetaPrompt, skillsStatus } from "./skills";
+import { loadSkills, selectSkills, skillRouterMode, skillsBodyPrompt, skillsMetaPrompt, skillsStatus } from "./skills";
 import type { LlmToolDef } from "./llm";
 
 export type ToolSource = "builtin" | "skill" | "mcp";
@@ -53,15 +53,19 @@ export async function executeAgentTool(
 }
 
 /**
- * 动态 system prompt：
- * - 常驻注入技能**元信息**（name + description，成本极低）
- * - 命中触发词时注入技能**正文**（token 上限保护，见 lib/skills.ts）
+ * 动态 system prompt（按 SKILL_ROUTER 分档）：
+ * - llm（默认，OPT-1 路线 C）：元信息常驻 + 引导 load_skill；正文不注入，实际加载由 loader 在 done 事件汇报
+ * - keyword/hybrid：元信息常驻 + 触发词命中注入正文（keyword 为原行为，hybrid 另开放工具补长尾）
  */
 export function buildSystemPrompt(message: string): { prompt: string; activeSkills: string[] } {
   const all = loadSkills();
+  const mode = skillRouterMode();
+  if (mode === "llm") {
+    return { prompt: `${BASE_SYSTEM_PROMPT}${skillsMetaPrompt(all, mode)}`, activeSkills: [] };
+  }
   // B1：只选一次，结果同时用于 meta 与正文注入（此前重复触发词匹配 ×2）
   const matched = selectSkills(message, all);
-  const prompt = `${BASE_SYSTEM_PROMPT}${skillsMetaPrompt(all)}${skillsBodyPrompt(message, all, matched)}`;
+  const prompt = `${BASE_SYSTEM_PROMPT}${skillsMetaPrompt(all, mode)}${skillsBodyPrompt(message, all, matched)}`;
   return { prompt, activeSkills: matched.map((s) => s.name) };
 }
 
@@ -88,6 +92,7 @@ async function buildStatus(opts: { connect?: boolean }) {
       builtin: { count: names.length, tools: names },
       skill: {
         count: skills.skills.length,
+        router: skills.router,
         skills: skills.skills.map((s) => s.name),
         maxActive: skills.maxActive,
         maxBodyChars: skills.maxBodyChars,

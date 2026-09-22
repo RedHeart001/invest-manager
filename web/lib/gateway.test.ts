@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { AGENT_TOOLS } from "./tools";
 import { buildSystemPrompt, executeAgentTool, getAgentTools, gatewayStatus } from "./gateway";
@@ -87,7 +87,14 @@ describe("命名空间分派", () => {
   });
 });
 
-describe("技能注入", () => {
+describe("技能注入（keyword 档：显式固定，保持确定性断言）", () => {
+  beforeEach(() => {
+    process.env.SKILL_ROUTER = "keyword";
+  });
+  afterEach(() => {
+    delete process.env.SKILL_ROUTER;
+  });
+
   it("元信息常驻，正文仅命中时注入", () => {
     const miss = buildSystemPrompt("帮我算一下 1+1");
     expect(miss.activeSkills).toEqual([]);
@@ -112,6 +119,27 @@ describe("技能注入", () => {
   });
 });
 
+describe("技能注入（llm 档，OPT-1 路线 C）", () => {
+  beforeEach(() => {
+    process.env.SKILL_ROUTER = "llm";
+  });
+  afterEach(() => {
+    delete process.env.SKILL_ROUTER;
+  });
+
+  it("正文一律不注入，meta 引导调用 load_skill；实际加载移交 loader 在 done 事件汇报", () => {
+    const miss = buildSystemPrompt("帮我算一下 1+1");
+    expect(miss.activeSkills).toEqual([]);
+    expect(miss.prompt).toContain("load_skill");
+    expect(miss.prompt).toContain("hotspot-daily："); // 候选清单常驻
+    expect(miss.prompt).not.toContain("热点日报生成"); // 正文标题不进 prompt
+
+    const hit = buildSystemPrompt("今天市场热点有哪些？");
+    expect(hit.prompt).not.toContain("热点日报生成");
+    expect(hit.activeSkills).toEqual([]); // 不再有构建期命中概念
+  });
+});
+
 describe("状态面板", () => {
   it("三分命名空间齐全，且不回传技能正文", async () => {
     const status = await gatewayStatus();
@@ -121,6 +149,7 @@ describe("状态面板", () => {
       "hotspot-daily",
       "tech-indicators",
     ]);
+    expect(status.namespaces.skill.router).toBe("llm"); // 默认档（此时 SKILL_ROUTER 已被上文 afterEach 清除）
     expect(status.namespaces.mcp.servers[0].state).toBe("connected");
     expect(JSON.stringify(status)).not.toContain("硬性约束");
   });

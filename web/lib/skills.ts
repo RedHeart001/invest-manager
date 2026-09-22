@@ -11,6 +11,8 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { Lru } from "./lru";
+import type { LlmToolDef } from "./llm";
+import type { ToolResult } from "./tools";
 
 export type SkillMeta = {
   name: string;
@@ -176,10 +178,104 @@ export function selectSkills(message: string, all = loadSkills()): Skill[] {
   return matched.slice(0, maxActiveSkills());
 }
 
+// ---------- 技能路由（OPT-1 路线 C，2026-09-22 拍板，见 docs/FIX-LEDGER.md） ----------
+
+/** 技能路由模式：keyword=触发词注入（原行为）/ llm=主 LLM 经 load_skill 自主加载（默认）/ hybrid=关键词照注 + 工具补长尾 */
+export type SkillRouterMode = "keyword" | "llm" | "hybrid";
+
+export function skillRouterMode(): SkillRouterMode {
+  const v = process.env.SKILL_ROUTER?.trim().toLowerCase();
+  return v === "keyword" || v === "hybrid" || v === "llm" ? v : "llm";
+}
+
+export type SkillLoader = {
+  /** 发给 LLM 的工具定义；技能目录为空时为 null（不注册，模型无从误调） */
+  def: LlmToolDef | null;
+  /** 执行加载：未知名返回可用候选引导自愈；超上限拒绝；重复加载幂等返回正文 */
+  run(name: string): ToolResult;
+  /** 本请求实际加载成功的技能名（按首次加载顺序） */
+  loaded(): string[];
+};
+
+/**
+ * 每请求新建一个加载器（加载计数随请求生灭）。
+ * 刻意不进全局注册表/单例：并发请求的"已加载数"必须互相隔离（C17/C27 同类坑的变种）。
+ */
+export function createSkillLoader(all = loadSkills()): SkillLoader {
+  const loadedNames: string[] = [];
+  const cap = maxActiveSkills();
+  const names = () => all.map((s) => s.name).join(" / ");
+  const bodyOf = (s: Skill): { body: string; truncated: boolean } => {
+    const capChars = maxBodyChars();
+    return s.body.length > capChars
+      ? { body: `${s.body.slice(0, capChars)}\n…（技能正文超长已截断）`, truncated: true }
+      : { body: s.body, truncated: false };
+  };
+  const def: LlmToolDef | null =
+    all.length === 0
+      ? null
+      : {
+          type: "function",
+          function: {
+            name: "load_skill",
+            description: `按需加载技能的详细指引。可用技能：${names()}。当用户请求与某技能明显相关时，先调用本工具加载指引再回答；与技能无关时不要调用。`,
+            parameters: {
+              type: "object",
+              properties: {
+                name: {
+                  type: "string",
+                  description: "技能名，必须是可用技能之一",
+                  enum: all.map((s) => s.name),
+                },
+              },
+              required: ["name"],
+            },
+          },
+        };
+  return {
+    def,
+    run(name: string): ToolResult {
+      const skill = all.find((s) => s.name === name);
+      if (!skill) {
+        return { ok: false, summary: `技能不存在。可用技能：${names() || "（无）"}` };
+      }
+      if (loadedNames.includes(skill.name)) {
+        const { body } = bodyOf(skill);
+        return {
+          ok: true,
+          summary: `技能 ${skill.name} 本轮已加载过，正文随结果再次附上`,
+          data: { name: skill.name, body },
+        };
+      }
+      if (loadedNames.length >= cap) {
+        return {
+          ok: false,
+          summary: `本轮最多加载 ${cap} 个技能（已加载：${loadedNames.join(" / ")}），请基于已加载的指引继续`,
+        };
+      }
+      const { body, truncated } = bodyOf(skill);
+      loadedNames.push(skill.name);
+      return {
+        ok: true,
+        summary: `已加载技能指引：${skill.name}${truncated ? "（正文超长已截断）" : ""}`,
+        data: { name: skill.name, body, truncated },
+      };
+    },
+    loaded: () => [...loadedNames],
+  };
+}
+
 /** system prompt 中的技能元信息段（仅 name + description，不含正文） */
-export function skillsMetaPrompt(all = loadSkills()): string {
+export function skillsMetaPrompt(all = loadSkills(), mode: SkillRouterMode = "keyword"): string {
   if (all.length === 0) return "";
   const lines = all.map((s) => `- ${s.name}：${s.description}`).join("\n");
+  if (mode === "llm") {
+    // 路线 C（OPT-1）：正文不再自动注入，引导主 LLM 经 load_skill 工具按需拉取
+    return `\n可用技能（当用户请求与某技能明显相关时，先调用 load_skill 工具加载其详细指引，再基于指引回答；最多加载 ${maxActiveSkills()} 个；与技能无关时不要调用，也无需向用户解释机制）：\n${lines}`;
+  }
+  if (mode === "hybrid") {
+    return `\n可用技能（与当前消息关键词匹配的技能正文已直接注入；若还需其他技能的指引，可调用 load_skill 工具加载）：\n${lines}`;
+  }
   return `\n可用技能（命中触发词时会自动加载其详细指引，无需向用户解释机制）：\n${lines}`;
 }
 
@@ -208,6 +304,7 @@ export function skillsBodyPrompt(
 export function skillsStatus() {
   return {
     dir: skillsDir(),
+    router: skillRouterMode(),
     maxBodyChars: maxBodyChars(),
     maxActive: maxActiveSkills(),
     skills: loadSkills().map(({ name, description, triggers, tools, bodyChars, updatedAt }) => ({

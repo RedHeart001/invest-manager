@@ -87,8 +87,9 @@ async function chatMeta(message, sessionIds) {
   });
   const events = await readSse(res);
   const meta = events.find((e) => e.ev === "meta")?.data ?? null;
+  const done = events.find((e) => e.ev === "done")?.data ?? null;
   if (meta?.sessionId) sessionIds.push(meta.sessionId);
-  return { meta, events };
+  return { meta, done, events };
 }
 
 async function main() {
@@ -124,6 +125,11 @@ async function main() {
     );
     ok("技能正文 token 上限配置可见", ns.skill?.maxBodyChars > 0, `cap=${ns.skill?.maxBodyChars}`);
     ok("同时激活数上限配置可见", ns.skill?.maxActive > 0, `max=${ns.skill?.maxActive}`);
+    ok(
+      "技能路由模式可见（OPT-1：keyword/llm/hybrid）",
+      ["keyword", "llm", "hybrid"].includes(ns.skill?.router),
+      `router=${ns.skill?.router}`,
+    );
 
     ok("mcp 命名空间存在", Boolean(ns.mcp));
     const servers = ns.mcp?.servers ?? [];
@@ -143,23 +149,43 @@ async function main() {
   }
 
   // ---------- 2. 技能上下文经济 ----------
+  // OPT-1（2026-09-22）：路由模式分档。keyword 档保持确定性断言；llm/hybrid 档命中
+  // 与否由主 LLM 决定（行为评估移交 eval-skill-router.mjs），此处只断言结构。
   console.log("[2] 技能注入策略（元信息常驻 / 正文按需）");
+  const routerMode = status.namespaces?.skill?.router ?? "keyword";
+  console.log(`  路由模式：${routerMode}`);
   {
     const miss = await chatMeta("帮我算一下 1 加 1 等于几", sessionIds);
     ok("未命中技能：meta.skills 为空", Array.isArray(miss.meta?.skills) && miss.meta.skills.length === 0, JSON.stringify(miss.meta?.skills));
-    ok("meta.toolCount ≥ 10（9 内置 + MCP）", (miss.meta?.toolCount ?? 0) >= 10, `toolCount=${miss.meta?.toolCount}`);
+    ok(
+      routerMode === "keyword" ? "meta.toolCount ≥ 10（9 内置 + MCP）" : "meta.toolCount ≥ 11（9 内置 + MCP + load_skill）",
+      (miss.meta?.toolCount ?? 0) >= (routerMode === "keyword" ? 10 : 11),
+      `toolCount=${miss.meta?.toolCount}`,
+    );
+    ok(
+      "done.skills 为数组（实际激活汇报）",
+      Array.isArray(miss.done?.skills),
+      JSON.stringify(miss.done?.skills),
+    );
 
     const hot = await chatMeta("今天市场热点有哪些？", sessionIds);
-    ok("命中热点技能", (hot.meta?.skills ?? []).includes("hotspot-daily"), JSON.stringify(hot.meta?.skills));
-
     const fund = await chatMeta("110022 这只基金的季报怎么看", sessionIds);
-    ok("命中基金报告技能", (fund.meta?.skills ?? []).includes("fund-report-analysis"), JSON.stringify(fund.meta?.skills));
-
     const tech = await chatMeta("这票最近为什么涨", sessionIds);
-    ok("命中技术面技能", (tech.meta?.skills ?? []).includes("tech-indicators"), JSON.stringify(tech.meta?.skills));
-
     const multi = await chatMeta("热点日报 和 均线 还有 基金季报 一起看", sessionIds);
-    ok("同时激活数被限制（≤3）", (multi.meta?.skills ?? []).length <= 3, JSON.stringify(multi.meta?.skills));
+
+    if (routerMode === "keyword") {
+      ok("命中热点技能", (hot.meta?.skills ?? []).includes("hotspot-daily"), JSON.stringify(hot.meta?.skills));
+      ok("命中基金报告技能", (fund.meta?.skills ?? []).includes("fund-report-analysis"), JSON.stringify(fund.meta?.skills));
+      ok("命中技术面技能", (tech.meta?.skills ?? []).includes("tech-indicators"), JSON.stringify(tech.meta?.skills));
+      ok("同时激活数被限制（≤3）", (multi.meta?.skills ?? []).length <= 3, JSON.stringify(multi.meta?.skills));
+    } else {
+      // llm 档：构建期不再注入，meta.skills 恒为空；done.skills 由 loader 汇报实际加载
+      ok("llm/hybrid 档：meta.skills 恒为空（正文注入已废除）", (hot.meta?.skills ?? []).length === 0, JSON.stringify(hot.meta?.skills));
+      for (const [label, r] of [["热点", hot], ["基金", fund], ["技术面", tech]]) {
+        ok(`${label}消息：done.skills 结构正确（是否真加载由 LLM 决定）`, Array.isArray(r.done?.skills), JSON.stringify(r.done?.skills));
+      }
+      ok("done.skills 不超过激活上限", (multi.done?.skills ?? []).length <= 3, JSON.stringify(multi.done?.skills));
+    }
   }
 
   // ---------- 3. 页面回归 ----------
