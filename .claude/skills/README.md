@@ -30,6 +30,12 @@ npx skills add <repo> --skill <name> --copy
 
 装完核对：`git status` 只应新增 `.claude/skills/<name>/` 与 `skills-lock.json`；**出现 `.agents/` 就删掉**。
 
+> ⚠️ **实测（2026-09-22，humanizer-zh）**：漏掉 `--copy` 直接跑裸 `npx skills add <repo> -y` 会发生三件事——
+> ① 建 `.agents/skills/<name>/` 实体目录；② 把 `.claude/skills/<name>` 换成**指向 `.agents/` 的绝对路径软链**；
+> ③ 用上游 README 覆盖本地安装说明并塞入上游 `.gitignore`。**修正**：`rm <软链>` → `cp -R .agents/skills/<name> .claude/skills/` → `rm -rf .agents`，
+> 目录对齐 `typesafe-ai` 形态（只留 `SKILL.md` + `LICENSE`，说明放本登记表），核对 `SKILL.md` 内容与登记哈希一致后提交。
+> **教训：装技能前先读本节，别凭 CLI 默认行为行事。**
+
 ## 登记
 
 每个已装技能都要在下表登记，**来源与版本必须可核对**：

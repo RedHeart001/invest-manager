@@ -139,3 +139,5 @@ git diff --cached | grep -iE '(sk-|tvly-|ghp_|AKIA)[A-Za-z0-9_-]{10,}'     # 暂
   已因此踩过 dev/build 冲突导致页面只剩骨架的坑。
 - **修"失败负缓存 / 限流计数 / 熔断计数 / 复查窗口"类问题时必须附反向验证**
   （临时回退修复 → 确认断言精确失败 → 恢复），这是 C34 的验收要求。
+- **装第三方技能必须用 `npx skills add <repo> --copy`**——裸 `add` 默认建软链 + `.agents/`，违反技能目录纪律
+  （实体文件、无 `.agents/`）；装完核对 `git status` 与 `.claude/skills/README.md`。**执行前先读该 README。**
