@@ -82,6 +82,12 @@ git diff --cached | grep -iE '(sk-|tvly-|ghp_|AKIA)[A-Za-z0-9_-]{10,}'     # 暂
 
 ## 项目文档结构
 
+### 30 秒认识本项目（先读这段，再决定去查哪个文件）
+
+- **是什么**：个人投资理财辅助 Agent。四条原始需求——热点推送 / 智能搜索 / 产品详情页 / 金融分析 Agent；行情与主数据来自 akshare（东财/腾讯/新浪）、Tavily、yfinance 等免费源，全部走多源降级。
+- **怎么搭**：`web/` Next.js 15（App Router）+ React 19 + Prisma/SQLite —— 界面 + BFF，**唯一对外端口**，也是**唯一写库方**；`data-service/` FastAPI **无状态取数服务**（不碰库、不落盘，compose 网络内 `expose 8000` 不发布到宿主机，采集结果经 HTTP 回调 web 落库）；LLM 走 OpenAI 兼容端点（DeepSeek/GLM）。
+- **走到哪**：P0–P7 建设阶段全部完成，此后进入审查期（CR1–CR7）；**当前开放轮次 CR7**。逐项待办与计数只看 `docs/FIX-LEDGER.md` 的未闭环看板，本段不复述。
+
 **每个事实只有一个"家"**：写入时若别的文件已有该结论，**在原处更新**，别处只留指针——重复即失同步。
 
 ### 读：什么时候看哪个
