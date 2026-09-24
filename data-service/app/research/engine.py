@@ -121,6 +121,7 @@ def run_research(type_: str, code: str, name: str, on_progress=None) -> dict:
 
     # ---- 角色 1：技术分析师 ----
     progress("技术分析师分析中")
+    kline_available = payload["kline"].get("ok")
     r1 = _ask(
         budget,
         "你是技术分析师。基于阶段划分与最近行情数据，输出 JSON："
@@ -130,7 +131,14 @@ def run_research(type_: str, code: str, name: str, on_progress=None) -> dict:
         f"K线与阶段：{_compact_kline(payload['kline'])}",
     )
     if isinstance(r1, dict) and r1.get("view"):
-        analysts.append({"role": "技术分析师", "dataBased": True, **r1})
+        analysts.append(
+            {
+                "role": "技术分析师",
+                # CR7-1：无 K 线则技术面结论无数据支撑，不得进辩论/参与评级（与角色 2/3 对称记账）
+                "dataBased": bool(r1.get("dataBased", True)) and bool(kline_available),
+                **{k: v for k, v in r1.items() if k != "dataBased"},
+            }
+        )
 
     # ---- 角色 2：基本面分析师（A 方案：真实财务数据喂入） ----
     progress("基本面分析师分析中")
@@ -246,7 +254,9 @@ def run_research(type_: str, code: str, name: str, on_progress=None) -> dict:
             "role": a["role"],
             "view": a.get("view", "中性"),
             "points": _norm_points(a.get("points")),
-            "dataBased": bool(a.get("dataBased", True)),
+            # 缺字段一律按"无数据支撑"处理（fail-closed，CR7-1）：
+            # 缺省为 True 会让任何漏设该字段的角色静默获得评级资格。
+            "dataBased": bool(a.get("dataBased")),
         }
         for a in analysts
     ]

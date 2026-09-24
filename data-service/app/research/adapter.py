@@ -27,13 +27,16 @@ WEB_BASE_URL = os.environ.get("WEB_BASE_URL", "http://localhost:3000")
 TZ = ZoneInfo("Asia/Shanghai")
 
 
+# web /api/kline 的 normalizeRange 只认带连字符的 ISO 日期（`^\d{4}-\d{2}-\d{2}$`），
+# 紧凑 8 位会被判为"格式非法"并静默回落 90 天（CR7-2，契约见 CONSTRAINTS §B）。
+# 注意：akshare/cninfo 侧的日期参数仍须紧凑 8 位，不走本函数（见 ak_stock_disclosures）。
 def _iso_days_ago(days: int) -> str:
     dt = datetime.now(TZ) - timedelta(days=days)
-    return dt.strftime("%Y%m%d")
+    return dt.strftime("%Y-%m-%d")
 
 
 def _today_iso() -> str:
-    return datetime.now(TZ).strftime("%Y%m%d")
+    return datetime.now(TZ).strftime("%Y-%m-%d")
 
 
 # L3/O10：并发采集上限——看门狗超时后泄漏线程无法强杀（会活到上游恢复），
