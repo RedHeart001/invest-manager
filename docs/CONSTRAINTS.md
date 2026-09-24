@@ -9,6 +9,8 @@
 >
 > 轮次编号（C1–C34 分别来自哪一次审查）见 [CODE-REVIEW.md](CODE-REVIEW.md) 顶部的「轮次对照表」。
 
+> **速览**：改代码前必查本文件。§A 是 34 条不得回退的工程约束（C1–C34，按来源审查轮次分五批）；§B 是跨服务/跨语言契约坑（两侧各自解析的参数最易静默出错）；§C 是数据源与外部依赖的实测事实（转债 C-1 / 依赖定版 C-2 / 港股 C-3 / 主备源矩阵 C-4）；§D 是部署与容器化约束。
+
 ## A. 工程约束（C1–C34，不得回退）
 
 ### 第一批（C1–C17，来自 CR1 / CR2 / 缺陷修复）
@@ -24,8 +26,8 @@
 | **C7** | **akshare 调用统一看门狗**：所有 provider 内 akshare 调用经 `_em_ak_request` / `_ak_request` 包装（上游挂死时按时返回降级，不永久占住线程池 worker） | `data-service/app/utils/timeout.py` |
 | **C8** | **研报完成推送带会话归属**：启动时登记发起会话（`watchResearch`），完成时①落库到发起会话②广播携带 `sessionIds`，前端按当前会话过滤 | `web/lib/research.ts` |
 | **C9** | **浏览器只与 web 通信**：禁止前端直连 data-service（P7 容器化后 data-service 不发布端口）；经 `POST /api/hotspots/run` 等 BFF 代理 | 各 `web/app/api/**/route.ts` |
-| **C10** | **ingest 结果必须可观测**：research 落库回调失败写回任务状态（`ingestOk`/`ingestNote`），禁止"任务显示成功但研报未落库" | `web/lib/research.ts` |
-| **C11** | **K 线增量缓存防重复回源**：头部缺口回源失败同样进入失败窗口（30 分钟）；并发写入唯一约束冲突（P2002）按"已写入"处理 | `web/lib/kline.ts` |
+| **C10** | **ingest 结果必须可观测**：research 落库回调失败写回任务状态（`ingestOk`/`ingestNote`），禁止"任务显示成功但研报未落库" | `data-service/app/research/tasks.py:156-166`（**写回侧在此，非 web 侧**——2026-09-24 核对：`ingestOk`/`ingestNote` 在 `web/` 零命中）；消费侧读 `web/lib/research.ts` 的 `ok`/`note` 字段 |
+| **C11** | **K 线增量缓存防重复回源**：头部缺口回源失败同样进入失败窗口（`RECHECK_MS` = 30 分钟，`kline.ts:47`）；并发写入的重复行现由 **`INSERT OR IGNORE`** 吸收（`:184`，注释在 `:158` 明写"无需 catch P2002"）——**机制已换，不再是"P2002 按已写入处理"**；P2002 判定现仅存在于 `web/lib/hotspots.ts:44,219`（热点去重路径） | `web/lib/kline.ts:47,157-185,262` |
 | **C12** | **快照刷新失败必须显式**：整批无可用报价计入 `failedBatches`，禁止"0 更新 0 失败"伪装成功 | `web/lib/market-snapshot.ts` |
 | **C13** | **界面细节**：热点时间用北京时间（Intl timeZone）；SSE updater 内禁止副作用；ECharts 卸载必须 dispose；搜索 loading 收尾须确认请求未过期；browse 模式 sort/page 从 URL 还原；详情页五路取数并行 | 各前端页面 |
 | **C14** | **安全基线**：外部抓取链接仅放行 `http(s)`；`/api/health` 不回显异常细节；`/api/tools/status` 不回显服务端路径且探测结果缓存 30s；MCP 工具名截断时附加哈希防碰撞 | `web/lib/*`、`web/app/api/health` |
@@ -84,11 +86,11 @@
 |---|---|---|
 | **日期格式（web 侧）** | `/api/kline` 的 `normalizeRange`（`web/lib/kline.ts`）**只接受 ISO 带连字符** `/^\d{4}-\d{2}-\d{2}$/` | 不匹配即**静默回落默认值**（`start=today-90`、`end=today`），既不报错也不写 note |
 | **日期格式（akshare 侧）** | akshare 入参要**紧凑 8 位** `YYYYMMDD`（如 `ak_stock_disclosures`） | 两个契约方向相反，改代码时极易误伤另一个 |
-| **已发生的实例** | `data-service/app/research/adapter.py` 的 `_iso_days_ago`/`_today_iso` 曾用 `strftime("%Y%m%d")` 回读 web `/api/kline` → 被静默回落 → **研报的 K 线/阶段维度永远是 90 日口径**，`days` 参数整个是装饰品，「研报与详情页归因同源」在窗口长度上并不成立 | CR7-2（P1，未修）。**两侧都有数据返回，集成测试不会失败**——与 V1 同族 |
+| **已发生的实例** | `data-service/app/research/adapter.py` 的 `_iso_days_ago`/`_today_iso` 曾用 `strftime("%Y%m%d")` 回读 web `/api/kline` → 被静默回落 → **研报的 K 线/阶段维度永远是 90 日口径**，`days` 参数整个是装饰品，「研报与详情页归因同源」在窗口长度上并不成立 | CR7-2（修复状态见 [FIX-LEDGER.md](FIX-LEDGER.md)）。**两侧都有数据返回，集成测试不会失败**——与 V1 同族 |
 | **Prisma DateTime 在 SQLite 的存储** | Prisma 存的是 **Unix 毫秒整数**（实测 `typeof(date)='integer'`） | 原生 `INSERT` 若传 ISO 字符串，该行与 Prisma 生成的 `date >= ? / <= ?`（数字比较）**不匹配** → 带日期范围的查询**静默漏行**。V1 实测污染 3 行，导致 K 线图少一根、缓存天数虚高、R13 交叉验证失败。**规则：原生写入必须传 `dayStart(d).getTime()`** |
 | **北京时间口径** | web 侧用北京时间建/查 `(type,code,date)`；data-service 侧曾全部用**本地时区** `date.today()` | TZ≠Asia/Shanghai 时，北京时间 00:00–08:00 区间会出现"回调带 D-1 → D 行永久 running + D-1 重复行"与每日限额错位。**规则：data-service 一律用 `app/utils/timeutil.py` 的 `beijing_*()`，禁用 `date.today()`**（CR-06） |
 | **`/api/kline` 的 `phases` 字段** | 研报与详情页归因同源的契约（P5 落地定稿新增） | 改动 `/api/kline` 响应结构时须同步 `research/adapter.py` |
-| **provider 的 `currency` 字段** | provider 早已返回（hk=HKD / us=USD / sina-bond=CNY），但 `web/lib/data-service.ts` 的 `Quote` 类型**没有该字段**，全 web 侧 `grep currency` 零命中 | 港股在列表与详情页显示成无单位数字（`100` 实为 100 港币）。CR7-4（未修） |
+| **provider 的 `currency` 字段** | provider 早已返回（hk=HKD / us=USD / sina-bond=CNY），但 `web/lib/data-service.ts` 的 `Quote` 类型**没有该字段**，全 web 侧 `grep currency` 零命中 | 港股在列表与详情页显示成无单位数字（`100` 实为 100 港币）。CR7-4（修复状态见 [FIX-LEDGER.md](FIX-LEDGER.md)） |
 
 **新增跨语言/跨服务参数的通用规则**：凡是跨进程传递、且两侧各自解析的参数（日期、代码前缀、枚举值），**必须在两侧都写断言**——一侧写错而另一侧静默回落，是本项目已发生两次的错误模式（V1、CR7-2）。
 

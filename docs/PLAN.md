@@ -4,6 +4,9 @@
 > 任务执行进度记入 [PROGRESS.md](PROGRESS.md)；"不得回退"的约束与数据源事实见 [CONSTRAINTS.md](CONSTRAINTS.md)；
 > 代码审查发现见 [CODE-REVIEW.md](CODE-REVIEW.md)，修复状态见 [FIX-LEDGER.md](FIX-LEDGER.md)。
 
+> **速览**：本文件回答"要做什么、怎么做"。原始需求 4 条（热点推送 / 智能搜索 / 产品详情页 / 金融分析 Agent），补充需求 R5–R17；设计按模块 M1–M8 组织；P0–P7 建设阶段已全部完成（进度状态与验收分数见 [PROGRESS.md](PROGRESS.md)，不在本文件重复）；已定稿的决策集中在文末「决策记录」。
+> **编号口径**：R=需求条目，M=设计模块，P=实施阶段，C=不得回退的约束（正文在 [CONSTRAINTS.md](CONSTRAINTS.md)），CRn=第 n 轮代码审查（发现在 [CODE-REVIEW.md](CODE-REVIEW.md)），G=需求交付缺口，OPT=优化候选（在 [FIX-LEDGER.md](FIX-LEDGER.md)）。
+
 ## Context
 
 从零构建一个个人投资理财辅助 Agent 应用。**原始需求（保持不变）**：
@@ -136,7 +139,7 @@
 - **时间区间：预设档位（1D/1W/1M/3M/1Y）+ 自定义起止日期选择器**（回应"指定时间内"）
 - **多标的叠加对比**：详情页可加对比标的，归一化收益率曲线同图展示（"变化情况"需要参照系）
 - 数据：日 K 走 `KlineDaily` 增量缓存，分钟级实时数据走内存缓存
-- **"深度分析"按钮**：触发 L2 工具 → 轮询 `ResearchReport.status` → 渲染研报视图（评级、四位分析师观点、多空辩论摘要、风控结论）
+- **"深度分析"按钮**：触发 L2 工具 → 轮询 `ResearchReport.status` → 渲染研报视图（评级、**三位分析师观点**（技术 / 基本面 / 新闻情绪）、多空辩论摘要、风控结论）——角色链共 5 步：3 分析师 → 辩论 → 研究经理（`data-service/app/research/engine.py:122-217`，五步顺序：角色 1→5）
 - 债券范围界定：MVP = 可转债（行情全）+ 国债收益率曲线；信用债个券数据源受限，页面上明确标注
 - **页面六区结构（2026-09-12 定稿，自上而下、一屏一答）**：
   1. **身份区**：名称/代码/类型标签 + 一句话特点画像——**规则模板生成**（如"跟踪中证新能源指数的大型 ETF，费率 0.5%"），不用 LLM，零延迟、可单测、无幻觉风险
@@ -199,7 +202,7 @@
 
 ### M6 OpenBB 数据 provider（支撑 M2/M3/M5）
 
-- OpenBB Platform SDK 封装为 `openbb_provider`：美股行情/K线/基本面、加密行情、宏观指标（FRED）
+- `data-service/app/providers/openbb_provider.py` 封装为**美股 provider**（后端 yfinance）：已实现 `get_quote` / `get_quotes` / `get_kline` / `get_news`，`register_chain(["us"])` 挂入主备链。**未实现（登记为缺口，2026-09-24 核对）**：美股**基本面**、**宏观指标（FRED）**——原设计要求这两项，代码里不存在（全 `data-service/app` 无 `fred`/`macro`/基本面取数）；加密行情由独立的 `crypto_provider.py`（CoinGecko）承担，不经本 provider。
 - 字段映射到与 AkShare 相同的内部 schema，上层（搜索/图表/TradingAgents）无感知
 - vendor 可插拔：yfinance 免费档起步，可选配 Alpha Vantage/FMP key 增强
 
@@ -255,7 +258,7 @@
 
 **M7 已知优化点（非阻塞，低优先，2026-09-13 体检记录）**
 
-1. **技能触发词为子串匹配**，存在误命中可能（如"日报""季报"出现在无关语境也会激活）；当前影响可控（正文注入上限 2400 字符），后续可加词边界匹配或更特化的触发词。**2026-09-20 复核：仍未修复**，`web/lib/skills.ts:175` 依旧为 `text.includes(t.toLowerCase())`。**2026-09-22 已拍板并落地**：走「路线 C」——注册内置工具 `load_skill` 由主 LLM 自主加载技能正文，废除子串匹配路由（`SKILL_ROUTER` 三档开关，`keyword` 档保留作 env 回滚）；TypeSafe/Jev（境外 SaaS）与 Laya（自托管）两条候选路线评估后均未采纳。评估证据与实施要点见 [FIX-LEDGER.md](FIX-LEDGER.md) OPT-1（当日实施并验收达标：加载率 100% / 误加载率 0%，commit `10745ff`）。**
+1. **技能触发词为子串匹配**，存在误命中可能（如"日报""季报"出现在无关语境也会激活）；影响面受正文注入上限约束（`SKILL_MAX_BODY_CHARS`）。**结论（2026-09-22 已闭环）**：改为主 LLM 经内置工具 `load_skill` 自主拉取技能正文，子串匹配仅作为 `SKILL_ROUTER=keyword` 回滚档保留。三路线评估理由、验收数据与逐文件明细见 [FIX-LEDGER.md](FIX-LEDGER.md)「OPT-1」与 [history/2026-09-22-opt1-路线C-技能路由改造.md](history/2026-09-22-opt1-路线C-技能路由改造.md)。
 2. **状态面板探测超时边界**：探测模式下若某 server 挂起，接口最长阻塞一个 `timeoutMs`（默认 20s）；后续可加探测专用短超时。**2026-09-20 复核：未见修复**
 3. ~~**进程内缓存无上限**：技能缓存、provider 的 `_news_cache` / `_fund_report_cache` 等为无界 Map~~ —— **已闭环（2026-09-19）**：`data-service/app/utils/lru.py` 落地，`akshare_provider` 的 `_news_cache`（`Lru(512)`）/ `_fund_report_cache`（`Lru(256)`）与 `sina_provider._cache` 均已换用
 
@@ -287,18 +290,18 @@
 
 ## 实施阶段
 
-P0–P7 **全部完成**（基线提交 `b22671f`，2026-09-13）。
+P0–P7 **全部完成**（基线提交 `b22671f`，2026-09-13）。**各阶段的进度状态与验收分数见 [PROGRESS.md](PROGRESS.md) 状态总览，本文件不重复维护。**
 
-| 阶段 | 内容（对应模块） | 状态 |
-|---|---|---|
-| P0 脚手架 | Next.js + TS + Tailwind + Prisma/SQLite 初始化；FastAPI data-service 骨架 + AkShare provider 打通 | ✅ |
-| P1 产品主数据 + 搜索 | M2：全量同步、FTS5、搜索 API 与页面 | ✅ |
-| P2 详情页 | M3：行情接口 + ECharts 各图表 | ✅ |
-| P3 热点 pipeline | M1：搜索 API + LLM 摘要 + dashboard | ✅ |
-| P4 统一 Agent | M4：function calling + L1 工具 + 流式 UI + 会话持久化（工具注册表按 Tool Gateway 结构实现，为 M7 留接口） | ✅ |
-| P5 Harness 整合 | M5/M6：OpenBB provider → vendor_adapter → 异步研报 → L2 工具接入 + 详情页研报视图 | ✅ |
-| P6 扩展机制 | M7：Skills 加载器 + 首批技能 → MCP client 接入第三方 server → fastmcp 暴露行情 API | ✅ |
-| P7 Docker 化 | 双服务 Dockerfile + docker-compose + `.env.example` | ✅ |
+| 阶段 | 内容（对应模块） |
+|---|---|
+| P0 脚手架 | Next.js + TS + Tailwind + Prisma/SQLite 初始化；FastAPI data-service 骨架 + AkShare provider 打通 |
+| P1 产品主数据 + 搜索 | M2：全量同步、FTS5、搜索 API 与页面 |
+| P2 详情页 | M3：行情接口 + ECharts 各图表 |
+| P3 热点 pipeline | M1：搜索 API + LLM 摘要 + dashboard |
+| P4 统一 Agent | M4：function calling + L1 工具 + 流式 UI + 会话持久化（工具注册表按 Tool Gateway 结构实现，为 M7 留接口） |
+| P5 Harness 整合 | M5/M6：OpenBB provider → vendor_adapter → 异步研报 → L2 工具接入 + 详情页研报视图 |
+| P6 扩展机制 | M7：Skills 加载器 + 首批技能 → MCP client 接入第三方 server → fastmcp 暴露行情 API |
+| P7 Docker 化 | 双服务 Dockerfile + docker-compose + `.env.example` |
 
 > **P7 的构建/部署细节与"不得回退"约束**见 [CONSTRAINTS.md §D](CONSTRAINTS.md)；三轮补强的完整评估记录见 [history/2026-09-14-ops-容器化记录.md](history/2026-09-14-ops-容器化记录.md)。
 
@@ -342,6 +345,7 @@ WEB_API_BASE=http://localhost:3000   # MCP search_products 回调 web BFF 的地
 MCP_HTTP_HOST=127.0.0.1              # MCP HTTP 仅绑本机
 MCP_HTTP_PORT=8765
 RESEARCH_MAX_COLLECT_THREADS=4       # 研报采集并发线程上限（utils/timeout.py 信号量）
+RESEARCH_COLLECT_ACQUIRE_TIMEOUT=60  # 采集名额等待上限（秒，research/adapter.py）；信号量被挂起线程占满时超时降级，不永久阻塞
 ```
 
 > 完整模板见 `web/.env.example`（P6 已补全为全量清单）。
@@ -404,7 +408,7 @@ RESEARCH_MAX_COLLECT_THREADS=4       # 研报采集并发线程上限（utils/ti
 | **G6** | `hk` 类型无 provider | **取数侧实现 + 补备源**；消费侧部分闭环 ⚠️ | ① `data-service/app/providers/hk_provider.py`（东财直连 + **多 host 降级**，非 akshare 封装）；② **腾讯港股备源**（扩展 `tencent_provider`：`_hk_symbol`/`_symbol_for` + `register_chain(["hk"], …, position=1)`）；③ web 侧 `SYNC_TYPES`、搜索 Tab、行情富集、快照白名单纳入 hk。**消费侧仍有断链**（CR7-4） |
 | **G7** | 写接口无鉴权 | **部分实现** ⚠️ | B4 已加 Origin/Referer 校验（拦浏览器跨站简单表单）；**完整身份鉴权留待上云前**补齐 |
 
-**G6 追加记录（2026-09-20，本地连通性排查后）**：本地 `POST /api/sync?type=hk` 首次失败（`RemoteDisconnected`），排查确认**根因非"港股被封"，而是 akshare `stock_hk_spot_em` 硬编码的 `72.push2` 节点不可达**（同族 `push2delay` / `7.push2` 返回 200 真实数据）。据此重写 `hk_provider` 为直连 + 多 host 降级，并补腾讯备源。**故 hk 实际为「东财多 host 主源 + 腾讯备源」双层防线**，而非单点。详细约束见 [CONSTRAINTS.md §C-3](CONSTRAINTS.md)。
+**G6 追加记录（2026-09-20）**：排查确认 akshare `stock_hk_spot_em` **硬编码的 `72.push2` 节点不可达**（同族 `push2delay` / `7.push2` 返回 200 真实数据）——根因非"港股被封"。据此重写 `hk_provider` 为直连 + 多 host 降级并补腾讯备源，hk 形成「东财多 host 主源 + 腾讯备源」双层防线。详细约束见 [CONSTRAINTS.md §C-3](CONSTRAINTS.md)。
 
 ### 其他已定稿决策
 

@@ -1,13 +1,15 @@
 # 修复账本（FIX-LEDGER）
 
 > **职责**：记录**每一项发现修了没有、怎么验的**。未闭环项置顶，一眼可见。
-> 另设「待评估的优化候选」（非缺陷的改进想法，编号 `OPT-n`）与「待拍板决策」两节。
+> 另设「优化候选登记」（非缺陷的改进想法，编号 `OPT-n`）与「待拍板决策」两节。
 > 审查发现原文见 [CODE-REVIEW.md](CODE-REVIEW.md)；被压缩掉的过程材料见 [history/](history/)。
 >
 > **维护规则**：
-> ① 看板用**稳定编号 + 一行状态**，不藏进 prose；关闭时同步回写 [PLAN.md](PLAN.md) 对应需求条目的三态标记。
+> ① 看板用**稳定编号 + 一行状态**，不藏进 prose；状态只在本看板维护——关闭时若 [PLAN.md](PLAN.md) 有对应条目，同步更新该条目的结论一行。
 > ② 已闭环轮次的正文**只压缩、不重写**——防止在"重述"中引入新错误。
 > ③ 修"失败负缓存 / 限流计数 / 熔断计数 / 复查窗口"类问题时必须附**反向验证**（C34）。
+
+> **速览**：想知道"现在该做什么"看这里。**当前未闭环 15 项** = CR7 的 13 项（**11 未修 + CR7-2/CR7-14 部分闭环**；CR7-1 已于 2026-09-24 修复）+ G7 鉴权 + C31 Docker 验证（看板列 19 行 = 15 未闭环 + 1 已修 + 3 别名行；`G3`/`G6 消费侧`/`C31 关联` 为别名，状态指回主行、不在本行复述）；其中 **5 项等主人拍板**（见下「待你拍板」）。优化候选 OPT-1 已落地（2026-09-22 技能路由改 `load_skill`）。发现原文在 [CODE-REVIEW.md](CODE-REVIEW.md)，本文件不管"发现了什么"，只管"修没修、怎么验、下一步做什么"。
 
 ---
 
@@ -15,8 +17,8 @@
 
 | 编号 | 事项 | 严重度 | 状态 | 前置 / 卡点 |
 |---|---|---|---|---|
-| **CR7-1** | 技术分析师 `dataBased` 恒真 → 无 K 线仍进辩论并参与评级 | P1 | ⬜ 未修 | 无（建议先做） |
-| **CR7-2** | 研报回读 `/api/kline` 日期格式不匹配 → `days` 参数静默失效 | P1 | ⬜ 未修 | A2-② 需你拍板（见下） |
+| **CR7-1** | 技术分析师 `dataBased` 恒真 → 无 K 线仍进辩论并参与评级 | P1 | ✅ 已修（2026-09-24，A1） | 未提交；测试 `tests/test_cr7_research.py` |
+| **CR7-2** | 研报回读 `/api/kline` 日期格式不匹配 → `days` 参数静默失效 | P1 | 🟡 A2-① 已修／A2-② 待拍板 | A2-② 需你拍板（见下） |
 | **CR7-3** | R13/G3 交付成「零调用方端点」 | P2 | ⬜ 未修 | **需你定调**：①详情页按需核对 / ②仅 Agent / ③改判不接入 |
 | **CR7-4** | 港股消费侧三处断链（工具枚举 / 身份画像 / 币种） | P2 | ⬜ 未修 | B2c 文案需你拍板 |
 | **CR7-5** | ChatUI 180s 静默截断，`terminated` 是死守卫 | P2 | ⬜ 未修 | 无 |
@@ -29,11 +31,11 @@
 | **CR7-12** | `timeout.py` 的 `_abandoned` 计数窄竞态 | P3 | ⬜ 未修 | 无 |
 | **CR7-13** | `hk_provider` 分页无上限 / MCP `list_products("hk")` 无超时 | P3 | ⬜ 未修 | 无 |
 | **CR7-14** | 文档/注释漂移 | P3 | 🟡 部分闭环 | ①③ 已处置；② 待办 |
-| **G3（CR6 遗留）** | R13 端点零调用方 | — | ⬜ 未闭环 | 同 CR7-3，**同一件事** |
-| **G6 消费侧（CR6 遗留）** | 港股取数侧已闭环，消费侧仍断链 | — | 🟡 部分闭环 | 同 CR7-4，**同一件事** |
+| **G3（CR6 遗留）** | R13 端点零调用方 | — | → 见 CR7-3 | 同一件事，状态不在本行复述 |
+| **G6 消费侧（CR6 遗留）** | 港股取数侧已闭环，消费侧仍断链 | — | → 见 CR7-4 | 同一件事，状态不在本行复述 |
 | **G7（CR6 遗留）** | 写接口完整身份鉴权 | — | ⬜ 未闭环 | **上云 / `WEB_PORT` 对外前必补**；当前单机无暴露面 |
 | **C31 验证** | Dockerfile 进程降权（`setpriv`）的镜像构建/运行验证 | — | ⏳ 未验证 | 主人指示暂不推进 Docker；启用前必须先验证容器内 uid、两容器 healthy、`compose exec` 备份正常 |
-| **C31 关联** | 任何 Docker 相关改动 | — | ⏸ 暂缓 | 同上 |
+| **C31 关联** | 任何 Docker 相关改动 | — | → 见 C31 验证 | 同一闸口（主人指示暂缓），状态不在本行复述 |
 
 ### ⚠️ 待你拍板的 5 项（CR7 批次 B/C 的前置）
 
@@ -43,37 +45,16 @@
 4. **CR7-10 / C4**：`/sync/run` 是否值得异步化（当前仅运维手动用）？
 5. **批次范围**：是否只做 A + D4-①②，把 B/C 留到下一轮？
 
-### 🧪 待评估的优化候选（非缺陷，未拍板）
+### 🧪 优化候选登记（OPT-n）
 
 > 与上面的**缺陷**看板分开：这里放"**可以更好**"的想法，不是"**坏了**"的问题。
 > 每条必须写明**来源**与**采用前要查证什么**；**未查证完不升级为 PLAN 的设计**。
 
-| 编号 | 候选 | 针对 | 状态 | 卡点 |
+| 编号 | 候选 | 针对 | 状态 | 备注 |
 |---|---|---|---|---|
-| **OPT-1** | 用**类型化判断原语**替代技能触发词子串匹配——不写死子串，而把"这句话属于哪个技能"作为一次**结构化判断**交给模型，代码只消费结果 | M7 优化点 1（[PLAN.md](PLAN.md)），`web/lib/skills.ts:175` | ✅ **已落地**（2026-09-22，`SKILL_ROUTER=llm` 默认档上线，commit `10745ff`） | 评估证据与实施要点见下；逐文件明细见 [history](history/2026-09-22-opt1-路线C-技能路由改造.md) |
+| **OPT-1** | 用**类型化判断原语**替代技能触发词子串匹配——不写死子串，而把"这句话属于哪个技能"作为一次**结构化判断**交给模型，代码只消费结果 | M7 优化点 1（[PLAN.md](PLAN.md)），`web/lib/skills.ts:175` | ✅ **已落地**（2026-09-22，`SKILL_ROUTER=llm` 默认档上线，commit `10745ff`） | 结论摘要见下；评估证据与逐文件明细见 [history](history/2026-09-22-opt1-路线C-技能路由改造.md) |
 
-**OPT-1 来源**（2026-09-21 登记）：第三方技能 [`typesafe-ai`](../.claude/skills/typesafe-ai/SKILL.md)——TypeSafe System One / Jev，`Choice`/`Noul`/`Score` 三原语。其主张 "**select instead of generate**" 与 "**route and fill known arguments**" 与本优化点同构。
-
-**OPT-1 评估与拍板（2026-09-22）**——三条路线查证结论：
-
-1. **TypeSafe Jev（SaaS）→ 作废**。登记时自设的三条卡点两条不成立：①唯一形态是境外托管 API（`api.typesafe.ai`，Bearer key，Cloudflare 托管），聊天内容须出境、按 CONSTRAINTS §C 走代理；②新增凭据 + SDK + SaaS 可用性依赖，违反「白名单 + 不自动安装」口径（`web/mcp.json`）。另有登记时未预见的硬伤：官方明示英文为主、CJK 效果不保证，而本负载是纯中文；且调用点在每条消息 SSE 流开始前的同步路径（`route.ts` → `buildSystemPrompt`），境外 RTT 直接打进 TTFT。成本本身可忽略（$0.042/Mtok 输入、输出免费）。
-2. **Laya（[github.com/NandhaKishorM/laya](https://github.com/NandhaKishorM/laya)，自托管）→ 未采纳，留作备选**。与 Jev 同构三原语（choice/score/noul）但本地推理：Apache-2.0、无凭据零外呼、模型卡明确支持 zh（mmBERT-base 322M，T4 约 33ms/问），翻盘了 SaaS 的卡点。未采纳原因：Python/torch 依赖与 web（Node）侧同步调用点架构错配；权重 + torch 显著撑大 P7 容器镜像；单人作者、基准自报、成熟度未验证。
-3. **路线 C · 主 LLM 工具化加载 → ✅ 拍板采用**。技能 meta（name+description）本已常驻 system prompt，注册内置工具 `load_skill(name)` 由主模型自主拉取正文——"候选在代码、选择交给模型、代码消费结果"。用现有 LLM，零新依赖、零数据出境。
-
-**实施要点（2026-09-22 与主人确认）**：
-
-- **每请求闭包** `createSkillLoader()`（`def`/`run`/`loaded`），加载计数随请求生灭——不进全局注册表，避开 C17/C27 类单例并发坑；技能目录为空时 `def=null` 不注册
-- **失败即引导**：未知名返回可用候选列表让模型下一轮自愈；`name` 白名单校验（C33）；正文截断复用 `maxBodyChars`（2400）
-- **`SKILL_ROUTER` 三档开关**：`keyword`（现状原样保留）/ `llm`（**默认**）/ `hybrid`——改 env 即回滚
-- **已知代价**：技能相关提问 +1 次 LLM 往返（决定→加载→作答）；`MAX_TOOL_ROUNDS` 维持 4（轮次耗尽有强制总结兜底，已有测试）
-- **测试改造**：`test-p6.mjs` 的 meta.skills 确定性命中断言改到 keyword 档跑（llm 档只断言工具列表含 `load_skill`）；`meta.skills` 移到 `done` 事件汇报实际加载（前端只读 sessionId，无感）；新增 `eval-skill-router.mjs`（真实 LLM、手动跑、不进 verify-all）
-- **验收门槛**：明确命中消息加载率 ≥90%、明确无关消息误加载率 ≤10%；不达标退 `hybrid` 档
-
-**OPT-1 执行记录（2026-09-22，当日实施并验收）**：
-
-- 实施 commit：`10745ff`（9 文件：skills/gateway/route/ChatUI/.env.example + 三套测试改造 + 新增 eval 脚本）；逐文件明细见 [history/2026-09-22-opt1-路线C-技能路由改造.md](history/2026-09-22-opt1-路线C-技能路由改造.md)
-- 验证：`tsc --noEmit` 0 错 ｜ `vitest` **148/148**（24 文件，基线 140）｜ `test-p6.mjs` llm 档实跑 **24/24** ｜ `eval-skill-router.mjs` 真实 LLM：**加载率 6/6=100%（≥90%✅）、误加载率 0/5=0%（≤10%✅）→ 达标，无需退 hybrid**
-- 回滚方式：`web/.env` 设 `SKILL_ROUTER=keyword` 重启即回原行为
+**OPT-1 结论摘要（2026-09-22）**：三条路线评估——TypeSafe Jev（境外 SaaS：聊天内容出境 + 新凭据/SDK 依赖 + 官方明示 CJK 不保证 + TTFT 同步路径硬伤）作废；Laya（自托管、支持 zh）因 Python/torch 与 web（Node）侧同步调用点架构错配、镜像重量、成熟度未验证，未采纳留作备选；**拍板走路线 C**——技能 meta 常驻 system prompt，注册内置工具 `load_skill` 由主 LLM 自主拉取正文（现有 LLM、零新依赖），`SKILL_ROUTER` 三档开关（keyword 保留作 env 回滚）。当日实施并验收：`vitest` **148/148**、`test-p6` llm 档 **24/24**、真实 LLM 行为评估**加载率 100%（≥90%）/ 误加载率 0%（≤10%）→ 达标，无需退 hybrid**。
 
 ---
 
@@ -104,15 +85,19 @@
   1. 新增 `kline_available = payload["kline"].get("ok")`（与 `:137` `fund_available`、`:161` `news_available` 同构）；
   2. append 改为 **spread 在前、门控字段在后**：`analysts.append({**r1, "role": "技术分析师", "view": r1["view"], "dataBased": bool(r1.get("dataBased", True)) and kline_available})`——顺带修掉"`**r1` 在后会覆盖硬编码值"的顺序问题；
   3. `:249` 归一化默认值 `a.get("dataBased", True)` → `bool(a.get("dataBased"))`（**fail-closed**：现有三处角色都显式赋值，行为不变；只防未来新增角色漏赋值时默认"有数据"）。
-- **验证**：新增离线测试 `data-service/tests/test_cr7_engine_databased.py` 3 项——① kline 不可用 → 技术分析师不进 `debate_input.analysts` 且出现在「缺口说明」；② kline 可用 → 正常进；③ 模型自返 `dataBased:false` 时不被翻真。反向验证：临时改回 `True` → ①精确失败。
+- **验证**：新增离线测试 ~~`data-service/tests/test_cr7_engine_databased.py`~~（实际落名 `test_cr7_research.py`，见下实施记录）3 项——① kline 不可用 → 技术分析师不进 `debate_input.analysts` 且出现在「缺口说明」；② kline 可用 → 正常进；③ 模型自返 `dataBased:false` 时不被翻真。反向验证：临时改回 `True` → ①精确失败。
 - **风险**：低（纯判定，不改 LLM 调用次数与预算）。
+- **实施（2026-09-24，未提交）**：与计划有一处形态差异——append 采用**与角色 2/3 同构**的 spread-排除式（`"dataBased": bool(r1.get("dataBased", True)) and bool(kline_available)` + `**{k: v for k, v in r1.items() if k != "dataBased"}`），同样消除"`**r1` 在后覆盖门控"的顺序问题；`:258` 归一化改 fail-closed（缺 `dataBased` 一律视为无据）。测试落在与 A2 合并的 `data-service/tests/test_cr7_research.py`（CR7-1 侧 12 项断言）。**反向验证**以成对断言实现：有 K 线必判 `True`（证明门控不是恒假桩）、模型自报 `false` 不被翻真、模型自报 `true` 不越过缺口；"临时改回 `True` 再跑"的实证被执行权限拦截，未执行 ⏳。
+- **验证证据**：`test_cr7_research` 22/22；回归无破坏——`test_cr6_lru` 18 / `test_cr6_pipeline` 10 / `test_cr6_timeutil` 6 / `test_g3_crosscheck` 8 全绿，`vitest` 148/148（web 侧未改动），`compileall app` 0 错。
+- **跨语言契约实测（09-24）**：从 `web/lib/kline.ts:91` 原样抽出正则 `^\d{4}-\d{2}-\d{2}$`，对 `collect_kline_with_phases("stock","600519")` 实发的参数做对账 → `start=2026-05-27`、`end=2026-09-24`、跨度 **120 天**、web 侧接受、`ok=True`。另核 `MAX_RANGE_DAYS = 366×5 = 1830`（`kline.ts:44`）→ 120 天远低于上限，**修复不会把"静默回落"变成"range too large 报错"**。
 
 **A2 · 研报回读 `/api/kline` 的日期契约**（`CR7-2`，P1）🔁
 
 - **A2-①（必做，低风险）**：`data-service/app/research/adapter.py:30-36` 的 `_iso_days_ago` / `_today_iso` 由 `strftime("%Y%m%d")` 改为 `"%Y-%m-%d"`（web `normalizeRange` 的契约）。**注意勿误改** `ak_stock_disclosures`（`:304-305`）——akshare 入参确实要紧凑 8 位；在两个函数上各加一行注释标明"web 契约=带连字符 / akshare 契约=8 位"。
 - **A2-②（建议，需确认）**：`web/lib/kline.ts:86-99` `normalizeRange` 区分「参数缺失」（回落默认）与「格式非法」（返回 `{error}`）。行为变更：`/api/kline?start=20260101` 由静默回落变 400。现有调用方（`ProductCharts`、`page.tsx`、修后的 `adapter`）都传 ISO，不受影响。
-- **验证**：web 侧扩 `kline.test.ts`（非法格式 → error；缺失 → 回落）；ds 侧断言 `collect_kline_with_phases` 发出的 `start` 含 `-`（monkeypatch `requests.get` 捕获 params）。反向验证：改回 `"%Y%m%d"` → ds 断言失败。
+- **验证**：~~web 侧扩 `kline.test.ts`（非法格式 → error；缺失 → 回落）~~（属 A2-②，本轮未做）；ds 侧断言 `collect_kline_with_phases` 发出的 `start` 含 `-`（monkeypatch `requests.get` 捕获 params）。反向验证：改回 `"%Y%m%d"` → ds 断言失败。
 - **风险**：A2-① 低；A2-② 中（改公共校验语义，须过 test-p2 38 项回归）。
+- **实施（2026-09-24，未提交）**：**A2-① 已落**——`adapter.py:30-38` 两个函数改 `"%Y-%m-%d"`，定义上方补 3 行契约注释（web 侧要连字符 / akshare 侧要 8 位）；`ak_stock_disclosures` 的 `:304-305` 保持紧凑格式未动。断言在 `test_cr7_research.py`（CR7-2 侧 10 项）：`start`/`end` 匹配 web 的 `^\d{4}-\d{2}-\d{2}$`、**显式断言不再是紧凑 8 位**（回退即失败）、`days=120/30` 跨度真实生效（旧缺陷下两者都被回落成 90 天、无从区分）、`end` 为北京时区当日、cninfo 侧仍为 8 位（防后续"统一日期格式"误改）。**A2-② 未做**（改公共校验语义，仍等拍板）。
 
 **A3 · ChatUI 180s 中断必须可感知、有出口**（`CR7-5`，P2，R17）
 
@@ -173,7 +158,7 @@
 
 **C5 · GET 取数端点 code 校验前移**（`CR7-6`，P2，R15）
 
-- **做法**：抽 `web/lib/validate.ts` 的 `isValidCode()`（正则沿用 `^[\w.-]{1,20}$`，与 `watchlist`/`research/start` 统一），在 `api/kline/route.ts`、`api/quote/route.ts` 于**调用 data-service 之前** 400（当前只判非空 → 任意串都会消耗一发东财令牌）。同时给 `type` 加白名单。
+- **做法**：**新建**共享 code 校验（2026-09-24 核对：当前**不存在** `web/lib/validate.ts`，也**没有** `isValidCode()`；正则 `CODE_SET = /^[\w.-]{1,20}$/` 现分别硬写在 `api/research/start/route.ts:7` 与 `api/watchlist/route.ts:13` 两处）——提为单一来源后，在 `api/kline/route.ts`、`api/quote/route.ts` 于**调用 data-service 之前** 400（当前只判非空 → 任意串都会消耗一发东财令牌）。同时给 `type` 加白名单。
 - **验证**：`validate.test.ts` + 两个路由的边界断言（非法 code 不产生 dsGet 调用——用注入/spy 或断言响应码）。
 - **风险**：低（需确认无现存调用方传带前缀代码，如 `sh600519`）。
 
@@ -236,7 +221,46 @@
 | **验收** | 双服务全量集成 + 冒烟 + 缺陷修复（V1/V2） | ✅ 完成 | tsc 0 错 / vitest **140/140** / 集成 7 套件全绿 / 冒烟 7/8 |
 | **G6 补强** | 港股连通性排障 + 多 host 降级 + 分页 + 腾讯备源 | ✅ 完成 | `test_g6_hk` **28/28**（+3 反向验证）/ ds 离线全绿 |
 
+### 处置结果总览（CR-01..22 + G1–G6）
+
+> 图例：✅ 已修复并验证 / 🔵 评估后保留（附理由）/ ⚪ 已显式裁剪 / ⏳ 待本地验证
+
+| 编号 | 严重度 | 结论 | 处置位置 | 验证 |
+|---|---|---|---|---|
+| CR-01 | P1 | ✅ | `web/lib/chat-history.ts`（新增）+ `api/chat/route.ts` + `api/chat/sessions/route.ts` | `chat-history.test.ts` 9 项 |
+| CR-02 | P1 | ✅ | `web/lib/llm.ts` | 集成 test-p4 |
+| CR-03 | P1 | ✅ | `web/lib/research.ts` | — |
+| CR-04 | P1 | ✅ | `web/lib/prisma.ts` | `prisma.test.ts` 5 项 |
+| CR-05 | P2 | ✅ | `web/lib/kline.ts` | `kline-headtail.test.ts` 2 项 |
+| CR-06 | P2 | ✅ | `data-service/app/utils/timeutil.py`（新增）+ tasks/adapter/pipeline/scheduler | `test_cr6_timeutil.py` 6 项 |
+| CR-07 | P2 | ✅ | `api/sync/route.ts` + `api/market/refresh/route.ts` | — |
+| CR-08 | P2 | ✅ | `web/lib/request-origin.ts`（新增）+ 三端点 | `request-origin.test.ts` 8 项 |
+| CR-09 | P3 | ✅ | `web/lib/market-snapshot.ts` | `market-snapshot.test.ts` 5 项 |
+| CR-10 | P3 | ✅ | `web/lib/events.ts` + `product/[type]/[code]/page.tsx` | `events.test.ts` +4 项 |
+| CR-11 | P3 | ✅ | `schema.prisma` + 迁移 + `web/lib/hotspots.ts` | 迁移已应用 |
+| CR-12 | P3 | ✅ | `web/lib/mcp.ts` | 集成 test-p6 |
+| CR-13 | P3 | ✅ | `web/lib/mcp.ts` | 集成 test-p6 |
+| CR-14 | P3 | ✅ | `api/research/start/route.ts` | — |
+| CR-15 | P3 | ✅/🔵 | 见 `history/` 归档「CR-15 逐项」 | 混合 |
+| CR-16 | P2 | ✅ | `data-service/app/hotspot/pipeline.py` | `test_cr6_pipeline.py` 10 项 |
+| CR-17 | P3 | ✅ | `data-service/app/providers/akshare_provider.py` | `test_p2_m8.py` |
+| CR-18 | P3 | ✅ | `data-service/app/providers/sina_bond_provider.py` | — |
+| CR-19 | P2 | ✅ | `data-service/app/providers/akshare_provider.py` | `test_p2_m8.py` |
+| CR-20 | P3 | 🔵 | 评估后保留（有意双层设计，风险已由 CR-06 消除） | — |
+| CR-21 | P3 | 🔵 | 运维风险（非缺陷，已有 note 标注） | — |
+| CR-22 | P3 | ✅ | `data-service/app/utils/timeout.py` + `main.py` | `test_p2_m8.py` |
+| G1 | — | ⚪ | 显式裁剪（PLAN M1 条目划除 + 决策记录） | — |
+| G2 | — | ✅/⏳ | `data-service/app/sync_scheduler.py`（新增）+ `main.py` | 端点实测 |
+| G3 | — | ✅ | `providers/chain.py` + `/quote/verified` | `test_g3_crosscheck.py` 8 项 |
+| G4 | — | ✅ | `web/lib/llm.ts#chatJson` + `search.ts#llmFallback` | `search-fallback.test.ts` 4 项 |
+| G5 | — | ✅ | `api/watchlist/route.ts`（新增）+ `WatchButton.tsx`（新增） | `watchlist/route.test.ts` 6 项 |
+| G6 | — | ✅ | `data-service/app/providers/hk_provider.py`（重写）+ `tencent_provider.py`（腾讯备源） | `test_g6_hk.py` 28 项 + 3 反向验证 |
+
+> ⚠️ **本表 G3/G6 的 ✅ 已被 CR7 修正**：CR7-3 指出 G3 端点**零调用方**（已复核确认）、CR7-4 指出 G6 消费侧三处断链。最终状态见上方未闭环看板。
+
 ### 决策项落地（用户确认）
+
+> 决策原文见 [PLAN.md](PLAN.md)「决策记录」（G1–G7 决策的唯一来源）；此处只记落地证据。
 
 | 决策项 | 用户选择 | 落地 |
 |---|---|---|
@@ -248,13 +272,49 @@
 | C7 每日限额双侧判断（CR-20） | **评估后保留现状** | web 查库（持久兜底）+ ds 内存 `_daily_done`（快速判断）是**有意的双层设计**；主要风险（日期口径错位）已由 C1 消除 |
 | CR-15 其余项中评估后不改的 | 保留 | `research-target` 6 位数字误判（仅在意图词命中后调用，收紧会破坏合法识别）；`search` 单字符候选偏斜（`orderBy code asc` 已保证确定性）；`sync` 行 type 取自 payload（provider 契约保证同类型）；进程内单飞多副本（当前单容器部署不触发） |
 
-### 验收中新发现并修复的 2 个缺陷（计划外，集成才暴露）
+### 可优化项（9 项结论）
 
-| 编号 | 结论 | 处理 |
+| # | 项 | 处置 |
 |---|---|---|
-| **V1**（高） | `upsertCandles` 原生 INSERT 日期格式与 Prisma 不一致 → `KlineDaily` 日期范围查询漏行 | 修复 + `kline-date-format.test.ts` + 反向验证；test-p2 37/38 → **38/38** |
-| **V2**（中） | G2 自动同步用降级备源缩小主数据（转债 1052→329） | 加「降级缩水保护」+ `sync-shrink.test.ts` + 反向验证；test-p1 19/20 → **20/20** |
-| **V3**（高） | 港股 provider 三处实现缺陷（akshare 硬编码 CDN 节点 / 列表分页缺失 / 行情误用列表接口）+ BFF 同步超时不足 | `hk_provider.py` 重写 + 腾讯备源；详见 [CODE-REVIEW.md](CODE-REVIEW.md) V3 |
+| 1 | `gatherCandidates` FTS→IN 补全可合并为单查询 | 🔵 保留（当前正确，收益有限） |
+| 2 | `callMcpTool` 可缓存 tool-name → binding 映射 | ✅ 已按 `mcp_<server>_` 前缀定位目标 server（见 CR-13） |
+| 3 | `mcp.ts` 配置可缓存（按 mtime 失效） | 🔵 保留（配置小） |
+| 4 | `rebuildFts` 可评估按 type 增量维护 | 🔵 保留（34k 行可接受） |
+| 5 | `kline.ts` 批量 upsert 替代逐行 create | ✅ 已实现（分块 `INSERT OR IGNORE`） |
+| 6 | 研报采集泄漏线程阈值告警 | ✅ 已实现（`abandoned_count()` + `/health` 暴露，见 CR-22） |
+| 7 | `sync.ts`/`market-snapshot.ts` 的 EM 限速常量抽公共配置 | 🔵 保留（重复度低） |
+| 8 | ChatUI 研报推送可评估独立成 `/api/events/stream` | 🔵 保留（现状可用） |
+| 9 | `DELETE` 等路径的异常吞并应改为区分错误码 | ✅ 已实现（见 CR-15） |
+
+### 验收中新发现并修复的缺陷（计划外，单测覆盖不到）
+
+#### V1（高）· KlineDaily 原生写入的日期格式与 Prisma 不一致 → 日期范围查询静默漏行
+
+- **发现于**：test-p2 的 R13 交叉验证断言失败（`kline=1266.98` vs `quote.price=1257.12`，偏差 0.784%）。
+- **根因**：为优化逐行写（CR-15 项），`upsertCandles` 改为原生 `INSERT OR IGNORE` 时**日期参数传了 ISO 字符串**；而 Prisma 对 SQLite DateTime 存的是 **Unix 毫秒整数**（实测 `typeof(date)='integer'`）。文本行与 Prisma 生成的 `date >= ? / <= ?`（数字比较）不匹配 → 这些行在**带日期范围的查询中被静默漏掉**（实测污染 3 行）。
+- **影响**：K 线数据"写了但读不到"，详情页少一根 K 线、缓存天数虚高、R13 交叉验证失败。**属静默数据不一致**（最危险的一类）。
+- **修复**：`web/lib/kline.ts` 改传 `dayStart(c.date).getTime()`；当时另有一次性数据修复脚本 `web/scripts/fix-kline-date.mjs`——**2026-09-24 核对：该脚本当时未入库、现已不在仓库**（`web/scripts/` 下同类脚本仅存 `fix-fts.mjs`），故其数据修复动作不可复现；回归由 `web/lib/kline-date-format.test.ts` + `kline-headtail.test.ts` 守护。一次性脚本用完即删属预期，此处只登记"复现路径已断"，`docs/history/2026-09-18-cr6-批次ABCD执行明细.md` 末段所述"未提交故丢失"的归因已由 FIX-LEDGER ① 更正（CR6 代码已入库，是该脚本本身未入库）。
+- **回归防线**：`web/lib/kline-date-format.test.ts`；**反向验证**：临时回退为 `toISOString()` → 断言精确失败 → 恢复后通过。
+- **效果**：test-p2 37/38 → **38/38**。
+
+#### V2（中）· G2 自动同步会用降级备源"缩小"主数据
+
+- **发现于**：test-p1 失败（`bond=329 < 500`），而此前全量为 1052。
+- **根因**：G2 新增的每日同步在凌晨自动执行过一次（`/sync/status` runs=1），当时东财限流 → 转债列表降级到**新浪 cov_spot（约 320 只）**；而全量替换语义（先删后插）会用这 329 条**覆盖**原有 1052 条 → **主数据静默劣化**。这是 G2 落地后与 R15 降级的**交互副作用**。
+- **修复**：`web/lib/sync.ts` 在空载荷保护（C1）之外增加**降级缩水保护**——新载荷 < 现有条数 70% 时保留旧数据并显式报错，等主源恢复后再全量更新。
+- **回归防线**：`web/lib/sync-shrink.test.ts`（4 项）+ 反向验证。
+- **效果**：test-p1 19/20 → **20/20**。
+
+#### V3（高）· 港股 provider 三处实现缺陷（2026-09-20 用户本地验证驱动发现）
+
+> 由用户本地 `POST /api/sync?type=hk` 失败驱动排查，属**集成/真实环境**才暴露的问题。详细约束见 [CONSTRAINTS.md §C-3](CONSTRAINTS.md)。
+
+- **V3-a 依赖 akshare 硬编码 CDN 节点**：`hk_provider` 初版复用 akshare `stock_hk_spot_em`，而其**硬编码 `72.push2.eastmoney.com`**——该节点在用户网络不可达（`RemoteDisconnected`），同族 `push2delay`/`7.push2` 却返回 200 真实数据。**等于绕过了本项目已有的多 host 降级能力**。→ 改为直连东财 + 多 host 按序降级。
+- **V3-b 列表分页缺失**：东财港股 `clist/get` **忽略大分页参数**（`pz=100/1000/10000` 均只返回 100 条），港股 `total≈4707` → 初版单请求**只拿到 100 条**，`00700` 腾讯控股根本不在其中。→ 按 `total` 分页遍历（实测取满 4707 只）。
+- **V3-c 行情路径误用列表接口（性能红线）**：初版 `get_quote` 复用列表快照 → **查单个港股需拉全量 4700 条、耗时约 4 分钟**。→ 快/慢路径分离：单股 `stock/get`、批量 `ulist.np`（各 1 次请求）、全量列表 `clist/get` **仅每日同步调用**；并由单测 `test_quote_does_not_trigger_list_paging` **锁为红线**。
+- **修复**：`hk_provider.py` 重写；**新增腾讯港股备源**（`tencent_provider` 的 `_hk_symbol`/`_symbol_for` + `register_chain(["hk"], …, position=1)`）。
+- **回归防线**：`test_g6_hk.py` 9 → **28 项**；**3 处反向验证**（削弱多 host、移除类型分派、行情改用列表接口）均精确失败。
+- **V3-d（核对中新发现）**：`web/lib/sync.ts` 拉取 `/products` 的超时为 180s，而港股列表分页实测约 236s → **港股同步必然超时**。→ 超时放宽至 600s。
 
 ### 最终验证（全绿）
 
@@ -268,7 +328,7 @@
 
 ### ⚠️ 收尾状态
 
-**CR6 的全部改动尚未 git 提交**（工作树 ~75 个未提交路径）。集成套件依赖双服务启动（非 CI 自动）。
+CR6 全部改动已随项目结构调整提交 `2efda87`（2026-09-20）入库——**代码与测试均在库内**，当时未单独提交是因与文档迁移同批。集成套件依赖双服务启动（非 CI 自动）。
 
 ---
 
@@ -278,7 +338,7 @@
 |---|---|---|---|
 | **CR1** | C1–C17 全部修复并固化为约束；O 系列 12 项经用户批准后全部执行完成（B → M → L 三批） | `b22671f`、`f5656d7` | 各批 tsc 0 错 + vitest/集成套件全绿；O 系列执行明细见 [history/2026-09-13-cr1-全项目审查与O系列明细.md](history/2026-09-13-cr1-全项目审查与O系列明细.md) |
 | **CR2** | 12 项真实缺陷（含 1 项 P0 死锁）全修；新增 C18–C23 | `3bd73a1` | 当日日志见 [PROGRESS.md](PROGRESS.md) 09-13 |
-| **CR3** | 8 项缺陷全修（含 1 项回归 + 1 项不完整修复） | `d6ac165` | ⏳ 无文档记载，待从 `git show d6ac165` 重建，见 [history/2026-09-14-cr3-第三轮重建.md](history/2026-09-14-cr3-第三轮重建.md) |
+| **CR3** | 8 项缺陷全修（含 1 项回归 + 1 项不完整修复） | `d6ac165` | 已于 2026-09-20 从 `git show d6ac165` 重建，见 [history/2026-09-14-cr3-第三轮重建.md](history/2026-09-14-cr3-第三轮重建.md) |
 | **CR4** | P1×5 + P2×12 + P3×25 全部处理并验证；固化为 C26–C33。**唯一未闭环：C31 的 Docker 验证** | `4905095` | 日志见 [PROGRESS.md](PROGRESS.md) 09-15/09-16 |
 | **CR5** | P1×2 + P2×1 + 缺口×3 + P3×6；A+B 批 8 项实施并验证（含反向验证 + 全量回归）；固化为 C34。**暂不处理**：CR5-P4 与 CR5-D1/D2/D3 | `4905095` | 日志见 [PROGRESS.md](PROGRESS.md) 09-17 |
 
