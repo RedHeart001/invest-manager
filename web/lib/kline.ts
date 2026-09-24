@@ -87,8 +87,20 @@ export function normalizeRange(
   start?: string | null,
   end?: string | null,
 ): { start: string; end: string } | { error: string } {
+  // CR7-2/A2-②（2026-09-24 拍板）：区分「缺参」（回落默认）与「格式非法」（报错）。
+  // 此前非法格式（如紧凑 8 位 20260101）被静默当 null 回落 90 天——正是 CR7-2
+  // 的缺陷模式（调用方以为传了窗口，实际拿到的是默认值）。缺参回落保留：
+  // 现有调用方（ProductCharts / page.tsx / research adapter）全部显式传参或全缺，
+  // 行为不变；只有"传了但格式错"才 400。
   const iso = (s: string | null | undefined) =>
     s && /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : null;
+  // 空串视同缺参（URLSearchParams 的 `?start=` 返回 ""，语义同"没传"）
+  if (start && iso(start) === null) {
+    return { error: `invalid start format (expect YYYY-MM-DD): ${start}` };
+  }
+  if (end && iso(end) === null) {
+    return { error: `invalid end format (expect YYYY-MM-DD): ${end}` };
+  }
   const s = iso(start) ?? isoAddDays(todayIso(), -90);
   const e = iso(end) ?? todayIso();
   if (dayStart(s) > dayStart(e)) return { error: "start must be <= end" };

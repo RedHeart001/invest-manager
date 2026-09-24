@@ -8,10 +8,19 @@ import { listDigests } from "./hotspots";
 import { detectPhases } from "./phases";
 import { getLatestReport, startResearch } from "./research";
 import { searchProducts } from "./search";
+import { priceWithCurrency } from "./currency";
 import type { LlmToolDef } from "./llm";
 import { beijingToday, beijingShiftDays } from "./time";
 
 export type ToolResult = { ok: boolean; summary: string; data?: unknown };
+
+// CR7-4/B2a（2026-09-24）：产品类型单一来源。此前四处 `enum` 各写各的——
+// hk 全缺、us 只在两处，Agent 的 schema 层根本无法寻址港股（4707 只标的
+// "腾讯控股多少钱"问不出）。须核对 test-p4 19 项（红线只锁工具名不锁 enum）。
+export const PRODUCT_TYPE_ENUM = ["stock", "fund", "bond", "crypto", "hk", "us"] as const;
+
+// 研报类工具的子集（engine 只支持 A股/美股，见 data-service research 契约）
+export const RESEARCH_TYPE_ENUM = ["stock", "us"] as const;
 
 const JSON_SCHEMA = {
   type: "object",
@@ -32,7 +41,7 @@ export const L1_TOOLS: LlmToolDef[] = [
           q: { type: "string", description: "搜索关键词，如 贵州茅台、600519、gzmt" },
           type: {
             type: "string",
-            enum: ["stock", "fund", "bond", "crypto"],
+            enum: [...PRODUCT_TYPE_ENUM],
             description: "可选，限定产品类型",
           },
           limit: { type: "number", description: "可选，返回条数（默认 8，最大 10）" },
@@ -51,7 +60,7 @@ export const L1_TOOLS: LlmToolDef[] = [
         properties: {
           type: {
             type: "string",
-            enum: ["stock", "fund", "bond", "crypto"],
+            enum: [...PRODUCT_TYPE_ENUM],
             description: "产品类型",
           },
           code: { type: "string", description: "产品代码，如 600519" },
@@ -70,7 +79,7 @@ export const L1_TOOLS: LlmToolDef[] = [
         properties: {
           type: {
             type: "string",
-            enum: ["stock", "fund", "bond", "crypto"],
+            enum: [...PRODUCT_TYPE_ENUM],
             description: "产品类型",
           },
           code: { type: "string", description: "产品代码" },
@@ -113,7 +122,7 @@ export const L1_TOOLS: LlmToolDef[] = [
         properties: {
           type: {
             type: "string",
-            enum: ["stock", "fund", "bond", "crypto", "us"],
+            enum: [...PRODUCT_TYPE_ENUM],
             description: "产品类型",
           },
           code: { type: "string", description: "产品代码" },
@@ -153,7 +162,7 @@ export const L2_TOOLS: LlmToolDef[] = [
         properties: {
           type: {
             type: "string",
-            enum: ["stock", "us"],
+            enum: [...RESEARCH_TYPE_ENUM],
             description: "市场类型（stock=A股，us=美股）",
           },
           code: { type: "string", description: "标的代码，如 600519 或 AAPL" },
@@ -172,7 +181,7 @@ export const L2_TOOLS: LlmToolDef[] = [
         properties: {
           type: {
             type: "string",
-            enum: ["stock", "us"],
+            enum: [...RESEARCH_TYPE_ENUM],
             description: "市场类型（stock=A股，us=美股）",
           },
           code: { type: "string", description: "标的代码" },
@@ -226,15 +235,21 @@ async function toolSearchProducts(args: {
 async function toolGetQuote(args: { type: string; code: string }): Promise<ToolResult> {
   const q = await dsGet<Record<string, unknown>>("/quote", { type: args.type, code: args.code }, 20_000);
   const price = numOrNull(q.price);
+  // CR7-4/B2c：非 CNY 报价带币种单位（HKD→港币 / USD→美元），LLM 回答与 UI 同口径
+  const priceSummary =
+    price != null
+      ? priceWithCurrency(
+          `${q.name ?? args.code} 现价 ${price}`,
+          typeof q.currency === "string" ? q.currency : null,
+        )
+      : `${q.name ?? args.code} 暂无可用报价（外部源未返回价格）`;
   return {
     ok: price != null,
-    summary:
-      price != null
-        ? `${q.name ?? args.code} 现价 ${price}`
-        : `${q.name ?? args.code} 暂无可用报价（外部源未返回价格）`,
+    summary: priceSummary,
     data: {
       name: q.name ?? null,
       price,
+      currency: typeof q.currency === "string" ? q.currency : null,
       changePct: numOrNull(q.changePct),
       open: numOrNull(q.open),
       high: numOrNull(q.high),

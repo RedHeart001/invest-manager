@@ -118,7 +118,9 @@ def collect_market(type_: str, code: str) -> dict:
     return {"ok": False, "note": "；".join(errors)[:200]}
 
 
-def collect_kline_with_phases(type_: str, code: str, days: int = 120) -> dict:
+def collect_kline_with_phases(type_: str, code: str, days: int = 182) -> dict:
+    # 182 = 详情页 ProductCharts 6M 预设（`web/app/product/[type]/[code]/ProductCharts.tsx`，
+    # days: 182）——研报回读窗口与页面可见区间一致（CR7-2/A2-③，2026-09-24 拍板）。
     """K 线 + 阶段划分（HTTP 回读 web /api/kline，阶段与详情页同源）。"""
     (body, err) = _run_with_timeout(
         lambda: requests.get(

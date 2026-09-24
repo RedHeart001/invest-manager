@@ -78,6 +78,26 @@ export function buildProfile(
   } else if (product.type === "crypto") {
     parts.push("加密货币");
     if (quote?.marketCapRank != null) parts.push(`市值排名第 ${quote.marketCapRank}`);
+  } else if (product.type === "hk") {
+    // CR7-4/B2b（2026-09-24）：港股身份画像——此前 4707 只港股恒为"暂无画像数据"
+    parts.push("港股");
+    if (quote?.currency === "HKD") parts.push("计价：港币");
+    const cap = fmtCap(quote?.marketCap);
+    if (cap) parts.push(`总市值 ${cap}`);
+    const pe = fmtNum(quote?.peTtm);
+    if (pe) parts.push(`PE(TTM) ${pe}`);
+    const pb = fmtNum(quote?.pb);
+    if (pb) parts.push(`PB ${pb}`);
+  } else if (product.type === "us") {
+    // CR7-4/B2b：美股身份画像（此前同样落到降级文案）
+    parts.push("美股");
+    if (quote?.currency === "USD") parts.push("计价：美元");
+    const cap = fmtCap(quote?.marketCap);
+    if (cap) parts.push(`总市值 ${cap}`);
+    const pe = fmtNum(quote?.peTtm);
+    if (pe) parts.push(`PE(TTM) ${pe}`);
+    const pb = fmtNum(quote?.pb);
+    if (pb) parts.push(`PB ${pb}`);
   }
 
   const out = [...new Set(parts.filter(Boolean))].join(" · ");

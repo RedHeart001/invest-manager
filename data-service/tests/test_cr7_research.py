@@ -251,6 +251,45 @@ def test_kline_days_window_actually_applied() -> None:
     check("CR7-2：不同 days 产出不同窗口（未被静默回落）", span_120 != span_30, f"{span_120} vs {span_30}")
 
 
+def test_kline_default_window_is_182_days() -> None:
+    """CR7-2/A2-③（2026-09-24 拍板）：默认回读窗口 = 182 天，对齐详情页 6M 预设。
+
+    反向验证：commit 13be2cf 曾把 message 写成 182 但代码仍是 120——此断言
+    在 days=120 时精确失败，防止再次"记录与代码漂移"。
+    """
+    p = _capture_kline_request_and_default()["params"]
+    d0 = datetime.strptime(p["start"], "%Y-%m-%d")
+    d1 = datetime.strptime(p["end"], "%Y-%m-%d")
+    span = (d1 - d0).days
+    check("CR7-2：默认回读窗口为 182 天（对齐 6M）", span == 182, str(span))
+
+
+def _capture_kline_request_and_default() -> dict:
+    """不传 days，走真实默认值（区别于 _capture_kline_request 的显式传参）。"""
+    orig_requests = ad.requests
+    captured: dict = {}
+
+    class _Resp:
+        status_code = 200
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return {"candles": [], "phases": [], "source": "akshare"}
+
+    def _get(url, params=None, **kw):
+        captured["params"] = dict(params or {})
+        return _Resp()
+
+    ad.requests = types.SimpleNamespace(get=_get)
+    try:
+        ad.collect_kline_with_phases("stock", "600519")
+    finally:
+        ad.requests = orig_requests
+    return captured
+
+
 def test_kline_dates_are_beijing_time() -> None:
     """日期口径必须是北京时间（C-06/§B：跨时区部署不得偏移）。"""
     p = _capture_kline_request(10)["params"]
@@ -298,6 +337,7 @@ if __name__ == "__main__":
     test_model_false_is_not_flipped_to_true()
     test_kline_read_back_uses_iso_hyphen_dates()
     test_kline_days_window_actually_applied()
+    test_kline_default_window_is_182_days()
     test_kline_dates_are_beijing_time()
     test_akshare_side_keeps_compact_dates()
     fails = [x for x in results if not x[1]]

@@ -5,6 +5,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 
 import { ResultListSkeleton } from "@/app/components/Skeleton";
 import { getCachedSearch, getLastSearch, setCachedSearch } from "@/lib/search-cache";
+import { priceWithCurrency } from "@/lib/currency";
 import type { SearchResult } from "@/lib/search";
 
 const TABS = [
@@ -312,7 +313,8 @@ export default function SearchClient() {
                   ) : r.price != null ? (
                     <>
                       <div className="tabular-nums">
-                        {r.price.toFixed(r.type === "fund" ? 4 : 2)}
+                        {/* CR7-4/B2c：非 CNY 品种带币种单位 */}
+                        {priceWithCurrency(r.price.toFixed(r.type === "fund" ? 4 : 2), r.currency)}
                       </div>
                       {r.changePct != null && (
                         <div

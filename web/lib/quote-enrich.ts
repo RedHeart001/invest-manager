@@ -10,6 +10,8 @@ export type QuoteLike = {
   price: number | null;
   changePct: number | null;
   source?: string;
+  /** CR7-4/B2c：非 CNY 品种带币种（HKD/USD），供展示层加单位 */
+  currency?: string | null;
 };
 
 const ENRICH_TYPES = new Set(["stock", "fund", "bond", "crypto", "hk", "us"]);

@@ -3,10 +3,12 @@ import type { EChartsOption } from "echarts";
 
 import Breadcrumbs from "@/app/components/Breadcrumbs";
 import EChart from "@/app/components/EChart";
+import VerifyQuoteButton from "@/app/components/VerifyQuoteButton";
 import WatchButton from "@/app/components/WatchButton";
 import ProductCharts from "./ProductCharts";
 import ResearchPanel from "./ResearchPanel";
 import { dsGet, type Quote } from "@/lib/data-service";
+import { priceWithCurrency } from "@/lib/currency";
 import { fetchEvents, narrowByDates, pickEventDates } from "@/lib/events";
 import { getKlineRange, normalizeRange, type KlineResult } from "@/lib/kline";
 import { detectPhases } from "@/lib/phases";
@@ -275,7 +277,8 @@ export default async function ProductPage({
           <>
             <div className="flex flex-wrap items-baseline gap-4">
               <span className="text-4xl font-bold tabular-nums">
-                {fmtPrice(quote.price, valueDecimals)}
+                {/* CR7-4/B2c：非 CNY 报价带币种单位（HKD→港币 / USD→美元） */}
+                {priceWithCurrency(fmtPrice(quote.price, valueDecimals), quote.currency)}
               </span>
               {changePct != null && (
                 <span
@@ -291,6 +294,10 @@ export default async function ProductPage({
                 来源：{quote.source}
                 {quote.timestamp ? ` · ${quote.timestamp}` : ""}
               </span>
+            </div>
+            {/* CR7-3/B1：R13 双源交叉验证的按需入口（方案 ①，2026-09-24 拍板） */}
+            <div className="mt-3">
+              <VerifyQuoteButton type={type} code={code} />
             </div>
             {stats.length > 0 && (
               <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-6">

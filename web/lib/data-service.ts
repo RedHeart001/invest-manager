@@ -103,6 +103,8 @@ export type Quote = {
   pb?: number | null;
   turnover?: number | null;
   marketCapRank?: number | null;
+  /** CR7-4/B2c：provider 侧早已返回（hk=HKD / us=USD / 转债=CNY），此前 TS 契约漏了 */
+  currency?: string | null;
   source?: string;
   timestamp?: string | null;
 };

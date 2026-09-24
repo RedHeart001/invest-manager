@@ -6,6 +6,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { classifyStreamExit } from "@/lib/chat-stream-exit";
 
 type ChatItem = {
   id: number;
@@ -230,6 +231,9 @@ export default function ChatUI() {
         const decoder = new TextDecoder();
         let buffer = "";
         let assistantStarted = false;
+        // CR7-5：done 事件到达时置位（此前 `terminated` 是只读不写的死守卫）。
+        // 退出循环后按 (gotDone, expired) 判定三形态：完成 / 180s 中断 / 异常退出。
+        let gotDone = false;
 
         const handleEvent = (event: string, dataRaw: string) => {
           let data: Record<string, unknown> = {};
@@ -299,6 +303,7 @@ export default function ChatUI() {
             setStatusText(null);
             setError(String(data.message ?? "发生错误"));
           } else if (event === "done") {
+            gotDone = true;
             setStatusText(null);
             void loadSessions();
           }
@@ -319,9 +324,9 @@ export default function ChatUI() {
           return null;
         };
 
-        let terminated = false;
+        // 退出循环后按 (gotDone, expired) 判定三形态：完成 / 180s 中断 / 异常退出。
         const deadline = Date.now() + 180_000;
-        while (Date.now() < deadline && !terminated) {
+        while (Date.now() < deadline && !gotDone) {
           const rr = await readChunk();
           if (rr) {
             const { value, done } = rr;
@@ -342,11 +347,18 @@ export default function ChatUI() {
             handleEvent(ev, dataRaw);
           }
         }
-        // 超时退出循环时释放流连接（2026-09-13 code review：否则连接滞留至服务端超时）
+        const exitKind = classifyStreamExit({ gotDone, expired: Date.now() >= deadline });
+        // 超时/异常退出时释放流连接（2026-09-13 code review：否则连接滞留至服务端超时）
         try {
           reader.cancel();
         } catch {
           // 已关闭
+        }
+        if (exitKind === "interrupted") {
+          // R17：中断必须可感知且有出口——保留已渲染内容，给出重发入口
+          setError("回答在 180s 处中断，本条可能不完整——可直接重新发送");
+        } else if (exitKind === "abnormal") {
+          setError("连接中断，回答可能不完整——可直接重新发送");
         }
       } catch (e) {
         setError(e instanceof Error ? e.message : "发送失败");

@@ -18,6 +18,8 @@ export type SearchResult = {
   price?: number | null;
   changePct?: number | null;
   quoteSource?: string;
+  /** CR7-4/B2c：非 CNY 品种带币种（HKD/USD），列表展示加单位 */
+  currency?: string | null;
 };
 
 const CANDIDATE_LIMIT = 300;
@@ -211,6 +213,7 @@ async function enrichWithQuotes(results: SearchResult[]): Promise<void> {
       r.price = quote.price;
       r.changePct = quote.changePct;
       r.quoteSource = quote.source;
+      r.currency = quote.currency ?? null;
     }
   }
 }

@@ -73,4 +73,33 @@ describe("buildProfile（规则模板画像）", () => {
     } as QuoteEnriched);
     expect(text).toBe("加密货币 · 市值排名第 1");
   });
+
+  it("CR7-4/B2b：港股画像非空且带币种与估值", () => {
+    const text = buildProfile(product({ type: "hk", exchange: "HK" }), {
+      type: "hk",
+      code: "00700",
+      price: 419,
+      currency: "HKD",
+      marketCap: 3.9e12,
+      peTtm: 22.5,
+      pb: 4.1,
+    } as QuoteEnriched);
+    expect(text).toContain("港股");
+    expect(text).toContain("计价：港币");
+    expect(text).toContain("总市值 3.90 万亿");
+    expect(text).toContain("PE(TTM) 22.50");
+    expect(text).not.toBe("暂无画像数据（字段缺失）");
+  });
+
+  it("CR7-4/B2b：美股画像非空（yfinance 无估值字段时逐项降级）", () => {
+    const text = buildProfile(product({ type: "us", exchange: "NASDAQ" }), {
+      type: "us",
+      code: "AAPL",
+      price: 189.5,
+      currency: "USD",
+    } as QuoteEnriched);
+    expect(text).toContain("美股");
+    expect(text).toContain("计价：美元");
+    expect(text).not.toBe("暂无画像数据（字段缺失）");
+  });
 });
