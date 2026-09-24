@@ -28,7 +28,7 @@
 | R10 | **外部数据源不可达时必须优雅降级**（标注来源/留空），不阻塞其余功能 | P1 | provider 降级 + `inconclusive` 标注 |
 | R11 | **变化归因两阶段策略**：P2 详情页做算法阶段划分（时长/幅度）+ 大波动日事件标注（一律标"可能相关"，不做因果断言）；完整多因素归因归 P5 深度研报 | P2 设计定稿 | 详情页 ③④ 区 |
 | R12 | **海外数据源自动降级**：海外源（Tavily/OpenBB/CoinGecko）经用户本地代理优先尝试；不可达时自动切换国内源（东财/新浪）并在界面与产出中显式标注降级状态。<br>**⚠️ 2026-09-24 CR8-1 反转（仅财经新闻类）**：新闻源改为**国内源为主**、Tavily 降为回退，多源按数据丰富度排序后逐个回退；降级标注改为**按分类在页头标注一次**（不再逐卡重复），板块名映射未命中**不再对用户显示**。行情/加密类仍按原海外优先口径 | P3–P5 评估定稿；新闻源序 2026-09-24 修订 | 各 provider 降级链 + 前端分类标注（⬜ 待实施 CR8-1） |
-| R13 | **多源数据对比验证**：关键行情指标（收盘价、净值等）在数据源允许时做双源交叉验证，差异超阈值时显式标注来源与偏差，不做静默取舍；各数据源可用性验证推迟到对应阶段落地时进行 | 规划期补充 | **已实现，未接入消费链**（2026-09-19）：`/quote/verified` 端点 + `providers/chain.py` 的 `verify_metric`（按需，不叠加普通 /quote）+ 测试断言。⚠️ 端点当前**零调用方**（见 CR7-3） |
+| R13 | **多源数据对比验证**：关键行情指标（收盘价、净值等）在数据源允许时做双源交叉验证，差异超阈值时显式标注来源与偏差，不做静默取舍；各数据源可用性验证推迟到对应阶段落地时进行 | 规划期补充 | **能力已实现，接入方案已拍板（2026-09-24）⬜ 待实施**：`/quote/verified` 端点 + `providers/chain.py` 的 `verify_metric`（按需，不叠加普通 /quote）+ 测试断言；接入走详情页「双源核对」按钮 + BFF `GET /api/quote?verify=1`（CR7-3/B1 方案 ①，见 [FIX-LEDGER.md](FIX-LEDGER.md)） |
 | R14 | **分类浏览**：搜索页选中类型标签即浏览该类全部产品（无需关键词），支持按涨幅/名称/代码排序与分页；全局排序基于行情快照列（同步/刷新任务写入），列表展示仍为实时富集 | P2 | `/api/search` 浏览分支 + `lib/browse.ts` + `lib/market-snapshot.ts` |
 | R15 | **多源自动降级 + 请求频率控制**：同类数据源主备链（主源失败/熔断 → 自动切备源，响应标注来源与降级状态）；按"源族"令牌桶限速（东财多域名共享额度，因封禁为 IP 级）+ 连续失败熔断冷却；**目标是用户侧永不空白**，无可用备源时显式缺口说明 | P2 收尾（2026-09-12 批准） | provider 主备链 + `app/utils/limiter.py` + 腾讯/新浪备源 provider |
 | R16 | **异常/失败终态必须如实呈现**：服务端失败必须以失败形态呈现，**不得回落为"成功/中性"等假象**（如研报失败不得渲染成"已完成·中性评级"）；降级与数据缺口一律显式标注，不粉饰 | CR5 审查（2026-09-17） | 各前端消费点（`ChatUI` 研报推送、`ResearchPanel` 等） |
@@ -423,7 +423,7 @@ RESEARCH_COLLECT_ACQUIRE_TIMEOUT=60  # 采集名额等待上限（秒，research
 |---|---|---|---|
 | **G1** | M1 webhook 推送（企业微信/邮件）未实现 | **显式裁剪** | 站内 dashboard + SSE 实时推送已覆盖核心需求；webhook 与"本地单机"定位不匹配。**需求条目已在上文 M1 划除**；未来如需，重新立项 |
 | **G2** | 产品主数据无自动同步 | **实现**（已闭环） | `data-service/app/sync_scheduler.py` + `/sync/status`、`/sync/run`；默认每日 02:00（北京时间），含启动补跑 |
-| **G3** | R13 双源交叉验证未落地 | **实现端点，未接入消费链** ⚠️ | `providers/chain.py#verify_metric` + `/quote/verified`（按需端点，不叠加普通 /quote，避免放大外部请求）；差异超阈值在 `note` 显式标注。**但端点当前零调用方**（CR7-3），R13 的"已交付"判定待重新拍板 |
+| **G3** | R13 双源交叉验证未落地 | **方案已拍板（2026-09-24）：详情页按需核对（B1 方案 ①）** ⬜ 待实施 | `providers/chain.py#verify_metric` + `/quote/verified`（按需端点，不叠加普通 /quote，避免放大外部请求）；接入 = 详情页现状区「双源核对」按钮 → BFF `GET /api/quote?verify=1` → `/quote/verified`，偏差在 `note` 显式标注（R16：备源不可用时如实展示，不静默）。实施与验收见 [FIX-LEDGER.md](FIX-LEDGER.md) 批次 B |
 | **G4** | M2 FTS 无结果时 LLM 兜底召回未实现 | **实现** | `lib/search.ts#llmFallback` + `lib/llm.ts#chatJson`；LLM 未配置/失败时静默降级 |
 | **G5** | Watchlist 只读不通写 | **实现** | `/api/watchlist`（GET/POST/DELETE）+ `app/components/WatchButton.tsx`（详情页） |
 | **G6** | `hk` 类型无 provider | **取数侧实现 + 补备源**；消费侧部分闭环 ⚠️ | ① `data-service/app/providers/hk_provider.py`（东财直连 + **多 host 降级**，非 akshare 封装）；② **腾讯港股备源**（扩展 `tencent_provider`：`_hk_symbol`/`_symbol_for` + `register_chain(["hk"], …, position=1)`）；③ web 侧 `SYNC_TYPES`、搜索 Tab、行情富集、快照白名单纳入 hk。**消费侧仍有断链**（CR7-4） |
