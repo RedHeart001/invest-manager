@@ -258,7 +258,12 @@ def hotspots_status():
 
 @app.post("/sync/run")
 def sync_run(trigger: str = Query("manual-ui", description="触发来源标注")):
-    """手动触发产品主数据同步（G2：BFF 侧另有 /api/sync 直连入口，此为调度侧）。"""
+    """手动触发产品主数据同步（G2：BFF 侧另有 /api/sync 直连入口，此为调度侧）。
+
+    C4（CR7-10，2026-09-25）：异步化——认领后立即返回 `{accepted: true}`，
+    同步由后台线程执行（15min+ 级）；进度见 `GET /sync/status`。
+    已在跑时返回 `{accepted: false, note: ...}`（原 skipped 语义并入 accepted）。
+    """
     return sync_scheduler.run_now(trigger=trigger)
 
 

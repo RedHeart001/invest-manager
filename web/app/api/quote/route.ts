@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
+import { CODE_SET, QUOTE_TYPES } from "@/lib/validate";
+
 const DATA_SERVICE_URL =
   process.env.DATA_SERVICE_URL ?? "http://localhost:8000";
 
@@ -7,8 +9,12 @@ const DATA_SERVICE_URL =
 export async function GET(req: NextRequest) {
   const type = req.nextUrl.searchParams.get("type") ?? "stock";
   const code = req.nextUrl.searchParams.get("code");
-  if (!code) {
-    return NextResponse.json({ error: "code is required" }, { status: 400 });
+  // CR7-6/C5（2026-09-25）：code/type 白名单前移（同 /api/kline，防任意串耗东财额度）
+  if (!QUOTE_TYPES.includes(type as (typeof QUOTE_TYPES)[number])) {
+    return NextResponse.json({ error: `unsupported type: ${type}` }, { status: 400 });
+  }
+  if (!code || !CODE_SET.test(code)) {
+    return NextResponse.json({ error: "invalid code" }, { status: 400 });
   }
 
   try {

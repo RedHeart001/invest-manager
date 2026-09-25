@@ -341,7 +341,88 @@ def test_fund_nav_failure_negative_cache() -> None:
         akp._ak_request = orig
 
 
-# ---------- CR-22：看门狗放弃线程计数 ----------
+def test_fund_nav_empty_table_and_missing_columns() -> None:
+    """C2（CR7-8，2026-09-25）：空表/列缺失必须显式降级，不得"成功但空"。
+
+    此前：① `_fund_nav_table` 拿到空 df 照样写缓存 30min（"成功但空"），
+    期间**所有**场外基金静默无净值；② `_fund_nav_quotes` 定位不到净值列时
+    `return {}` 无 note 无冷却。修复后两者都抛 ProviderError 进失败窗口。
+    """
+    import pandas as pd
+
+    import app.providers.akshare_provider as akp
+
+    provider = akp.AkshareProvider()
+    # 复位实例缓存（该 provider 实例可能与其它测试共享模块级单例）
+    provider._fund_nav = None
+    provider._fund_nav_ts = 0.0
+    provider._fund_nav_fail_ts = 0.0
+
+    orig = akp._ak_request
+
+    # ① 空 df → 抛 ProviderError 且记失败冷却
+    akp._ak_request = lambda *a, **k: pd.DataFrame()
+    try:
+        raised = False
+        try:
+            provider._fund_nav_table()
+        except ProviderError as e:
+            raised = "empty" in str(e)
+        check("C2🔁：空表如实抛错（不写成功缓存）", raised)
+        check(
+            "C2🔁：空表计入失败冷却",
+            provider._fund_nav_fail_ts > 0,
+            str(provider._fund_nav_fail_ts),
+        )
+        # 冷却期内再次调用不发外部请求
+        calls = {"n": 0}
+
+        def _count(*a, **k):
+            calls["n"] += 1
+            return pd.DataFrame()
+
+        akp._ak_request = _count
+        try:
+            provider._fund_nav_table()
+            check("C2🔁：空表冷却期内不再请求", False, "未抛错")
+        except ProviderError:
+            check("C2🔁：空表冷却期内不再请求", calls["n"] == 0, str(calls))
+    finally:
+        akp._ak_request = orig
+        provider._fund_nav = None
+        provider._fund_nav_ts = 0.0
+        provider._fund_nav_fail_ts = 0.0
+
+    # ② 列缺失（上游改列名）→ _fund_nav_quotes 抛 ProviderError 而非 return {}
+    ok_df = pd.DataFrame(
+        {
+            "基金代码": ["012414"],
+            "基金简称": ["测试基金"],
+            "2026-09-24-单位净值": [1.2345],
+            "日增长率": [0.12],
+        }
+    )
+    provider._fund_nav = ok_df
+    provider._fund_nav_ts = time.time() + 10**9  # 缓存命中，跳过外部请求
+    try:
+        quotes = provider._fund_nav_quotes(["012414"])
+        check("C2🔁：列齐全时正常产出", quotes.get("012414", {}).get("price") == 1.2345, str(quotes)[:80])
+
+        bad_df = ok_df.rename(columns={"2026-09-24-单位净值": "单位净值"})  # 去掉日期前缀
+        provider._fund_nav = bad_df
+        raised = False
+        msg = ""
+        try:
+            provider._fund_nav_quotes(["012414"])
+        except ProviderError as e:
+            raised = True
+            msg = str(e)
+        check("C2🔁：净值列缺失 → ProviderError（不再 return {}）", raised, msg[:120])
+        check("C2🔁：错误说明含列名诊断", "columns missing" in msg and "日增长率" in msg, msg[:160])
+    finally:
+        provider._fund_nav = None
+        provider._fund_nav_ts = 0.0
+        provider._fund_nav_fail_ts = 0.0
 
 
 def test_abandoned_watchdog_count() -> None:
@@ -368,6 +449,7 @@ if __name__ == "__main__":
     test_crypto_failure_negative_cache()
     test_kline_null_ohlc_filtered()
     test_fund_nav_failure_negative_cache()
+    test_fund_nav_empty_table_and_missing_columns()
     test_abandoned_watchdog_count()
     fails = [x for x in results if not x[1]]
     print(f"\n===== {len(results) - len(fails)}/{len(results)} 通过 =====")

@@ -9,8 +9,10 @@ import { prisma } from "@/lib/prisma";
 // 约束：type/code 走白名单与字符集校验（与 research/start 同口径），
 // name 用于展示（前端已带，缺失时回退 code）。
 
-const TYPES = ["stock", "fund", "bond", "crypto", "hk", "us"];
-const CODE_SET = /^[\w.-]{1,20}$/;
+// C5（2026-09-25）：改用 lib/validate.ts 单一来源（原字面量硬写删除）
+import { CODE_SET, QUOTE_TYPES } from "@/lib/validate";
+
+const TYPES = QUOTE_TYPES;
 
 export async function GET() {
   try {
@@ -35,7 +37,7 @@ export async function POST(req: NextRequest) {
   const type = String(body.type ?? "").trim();
   const code = String(body.code ?? "").trim();
   const name = String(body.name ?? code).trim().slice(0, 100);
-  if (!TYPES.includes(type)) {
+  if (!TYPES.includes(type as (typeof TYPES)[number])) {
     return NextResponse.json({ error: "illegal type" }, { status: 400 });
   }
   if (!CODE_SET.test(code)) {
@@ -60,7 +62,7 @@ export async function POST(req: NextRequest) {
 export async function DELETE(req: NextRequest) {
   const type = req.nextUrl.searchParams.get("type") ?? "";
   const code = req.nextUrl.searchParams.get("code") ?? "";
-  if (!TYPES.includes(type) || !CODE_SET.test(code)) {
+  if (!TYPES.includes(type as (typeof TYPES)[number]) || !CODE_SET.test(code)) {
     return NextResponse.json({ error: "illegal type/code" }, { status: 400 });
   }
   try {

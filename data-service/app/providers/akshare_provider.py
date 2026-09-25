@@ -348,9 +348,19 @@ class AkshareProvider(BaseProvider):
         import akshare as ak
 
         try:
-            self._fund_nav = _ak_request(ak.fund_open_fund_daily_em, 60.0, "ak.fund_open_fund_daily_em")
+            df = _ak_request(ak.fund_open_fund_daily_em, 60.0, "ak.fund_open_fund_daily_em")
+            # C2（CR7-8，2026-09-25）：空表视同失败——此前"不抛异常就写缓存"，
+            # 上游返回空 df 会把"成功但空"缓存 30min，让**所有**场外基金静默失去净值
+            # （与 C11 kline 空响应口径一致：空 = 上游契约破坏，必须显式降级）。
+            if df is None or len(df) == 0:
+                self._fund_nav_fail_ts = time.time()
+                raise ProviderError("fund nav table empty (upstream contract broken)")
+            self._fund_nav = df
             self._fund_nav_ts = now
             self._fund_nav_fail_ts = 0.0
+        except ProviderError:
+            # C2：空表路径已在上面记了 fail_ts，这里原样上抛（不重复记账）
+            raise
         except Exception as e:  # noqa: BLE001 接口变动/网络
             # CR-19：失败路径必须与成功路径对称记账（否则守卫恒假 = 死代码）
             self._fund_nav_fail_ts = time.time()
@@ -359,14 +369,17 @@ class AkshareProvider(BaseProvider):
 
     def _fund_nav_quotes(self, codes: list[str]) -> dict[str, dict]:
         df = self._fund_nav_table()
-        if df is None or len(df) == 0:
-            return {}
-        # 列名含日期前缀（如 "2026-09-10-单位净值"），按后缀定位
+        # C2：空表已在 _fund_nav_table 内抛 ProviderError，此处 df 必非空——
+        # 但列缺失（上游改列名）同样是契约破坏，必须显式降级而非 return {}
+        # （此前静默返回 {} 会让全部场外基金无 note 地失去净值）。
         nav_col = next(
             (c for c in df.columns if str(c).endswith("-单位净值")), None
         )
         if nav_col is None or "日增长率" not in df.columns:
-            return {}
+            raise ProviderError(
+                f"fund nav table columns missing (upstream renamed?): "
+                f"has 单位净值-suffix={nav_col is not None}, has 日增长率={'日增长率' in df.columns}"
+            )
 
         want = set(codes)
         out: dict[str, dict] = {}

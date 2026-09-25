@@ -87,12 +87,25 @@ def _execute(trigger: str) -> dict:
 
 
 def run_now(trigger: str = "manual") -> dict:
-    """手动/补跑触发（同步执行；已有任务在跑则跳过）。"""
+    """手动/补跑触发（C4/CR7-10 异步化，2026-09-25 拍板）。
+
+    此前在请求线程内同步跑完整个同步（15min+ 级），HTTP 请求全程挂着；
+    照 `hotspot/scheduler.request_run` 模板改：认领 running 后由后台线程
+    执行，立即返回 `{accepted}`。线程启动失败须回滚 running（CR4 同类修复：
+    否则永久卡 True，后续手动触发全部 skipped）。
+    进度观测：`GET /sync/status`（running 字段 + 最近一次 results）。
+    """
     with _lock:
         if _state["running"]:
-            return {"skipped": True, "note": "daily sync already running"}
+            return {"accepted": False, "note": "daily sync already running"}
         _state["running"] = True
-    return _execute(trigger)
+    try:
+        threading.Thread(target=_execute, args=(trigger,), name="sync-manual", daemon=True).start()
+    except Exception:  # noqa: BLE001 CR4：线程启动失败要回滚 running，否则永久卡 True
+        with _lock:
+            _state["running"] = False
+        raise
+    return {"accepted": True, "note": "已提交后台执行，进度见 /sync/status"}
 
 
 def _catch_up_if_needed() -> None:

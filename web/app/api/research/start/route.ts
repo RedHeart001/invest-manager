@@ -1,10 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { startResearch } from "@/lib/research";
+import { CODE_SET, QUOTE_TYPES } from "@/lib/validate";
 
 // CR4（P3）：研报支持的类型白名单 + code 字符集约束
-const TYPES = ["stock", "fund", "bond", "crypto", "hk", "us"];
-const CODE_SET = /^[\w.-]{1,20}$/;
+// C5（2026-09-25）：改用 lib/validate.ts 单一来源（原字面量硬写删除）
+const TYPES = QUOTE_TYPES;
 
 // 提交深度研究任务（P5 / M5）：详情页按钮与聊天 L2 工具共用入口
 export async function POST(req: NextRequest) {
@@ -26,7 +27,7 @@ export async function POST(req: NextRequest) {
   if (!CODE_SET.test(code)) {
     return NextResponse.json({ error: "illegal code" }, { status: 400 });
   }
-  if (!TYPES.includes(type)) {
+  if (!TYPES.includes(type as (typeof TYPES)[number])) {
     return NextResponse.json({ error: "illegal type" }, { status: 400 });
   }
   if (!code) {
