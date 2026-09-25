@@ -4,7 +4,9 @@ import { refreshAll, refreshSnapshot } from "@/lib/market-snapshot";
 import { checkRequestOrigin } from "@/lib/request-origin";
 
 // CR-07（本轮 code review）：全类型快照刷新走东财批量通道（含 1.5s/批节流），
-// stock 约 2.9 万只 → 单类型即数分钟。显式声明 maxDuration。
+// fund 27811 只 → 单类型即数分钟。显式声明 maxDuration。
+// （C3-②/CR7-9 勘误 2026-09-25：原注释"stock 约 2.9 万只"把量级安错了类型——
+// 实测 fund 27916 / stock 5913 / bond 1059 / crypto 250。）
 export const maxDuration = 800;
 
 // 行情快照刷新（R14）：把各类型最新价/涨跌幅写入 Product 快照列。

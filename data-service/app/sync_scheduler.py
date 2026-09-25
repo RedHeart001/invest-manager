@@ -63,6 +63,8 @@ def _execute(trigger: str) -> dict:
 
     started = time.time()
     result: dict
+    # C3（CR7-9，2026-09-25）：C0 实测全 5 类型 9.6~13 分钟 → 1800s（30min）保留
+    # 约 2.3 倍余量，维持不变。
     try:
         r = requests.post(f"{_web_base()}/api/sync", timeout=1800)
         if r.status_code >= 300:
@@ -72,6 +74,20 @@ def _execute(trigger: str) -> dict:
             body = r.json() or {}
             result = {"ok": True, "tookMs": body.get("tookMs"), "results": body.get("results")}
             log.info("daily sync done: %s", result)
+    except requests.exceptions.ReadTimeout as e:
+        # C3-③（CR7-9，2026-09-25）：**读超时 ≠ 同步失败**——web 侧仍在后台执行
+        # （ds 只是不再等结果），且 lastDate 已在下方置位不再重跑。此前把这种情况
+        # 记成 error 会与"实际已成功的同步"矛盾（状态失真）。改为中性标注：
+        # ok=True + note 说明 + error 字段保留原始异常供排查。
+        result = {
+            "ok": True,
+            "note": (
+                "回调读超时（同步可能仍在 web 侧完成，请查 /api/sync 结果或 "
+                "Product.updatedAt）——本条非失败标记"
+            ),
+            "error": f"{type(e).__name__}: {e}",
+        }
+        log.warning("daily sync callback read timeout (sync may still complete on web side): %s", e)
     except Exception as e:  # noqa: BLE001 调度不因单次失败而中断
         result = {"error": f"{type(e).__name__}: {e}"}
         log.warning("daily sync failed: %s", e)
@@ -109,7 +125,18 @@ def run_now(trigger: str = "manual") -> dict:
 
 
 def _catch_up_if_needed() -> None:
-    """重启后若已过当日调度时刻且当日未同步 → 补跑一次。"""
+    """重启后若已过当日调度时刻且当日未同步 → 补跑一次。
+
+    C1（CR7-7，2026-09-25）：与热点补跑（hotspot/scheduler._catch_up_if_needed，
+    sleep 5s 先起跑）共用东财令牌桶——同步的分页批量会长时间占满 min_interval=5s，
+    pipeline 的 `_EM.acquire(timeout=15)` 拿不到名额即抛 cooling down，
+    HOTSPOT_PIPELINE_TIMEOUT_S=300 预算被等待吃光 → 当日热点 degraded。
+    C0 实测（2026-09-25）当场实证：stock 熔断 → hk 4ms 被拒（同源族连坐）。
+
+    处置：**同步让位热点**——热点 pipeline 在跑或尚未产出当日 digest 时等待；
+    热点结束后（或当日已有产出）再跑同步。轮询上限 10 分钟：热点侧自身有
+    300s 预算 + 单飞，超上限按超时放弃本轮补跑（下个调度周期 02:00 再试）。
+    """
     time.sleep(8)  # 等 web 就绪（web 侧迁移/启动）
     hour, minute = _sync_hour_minute()
     now = datetime.now(TZ)
@@ -119,6 +146,35 @@ def _catch_up_if_needed() -> None:
     if _state.get("lastDate") == beijing_today():
         log.info("sync catch-up skipped: already synced today")
         return
+
+    # C1：让位热点——热点在跑/当日未产出 → 等它结束（每 10s 查一次，上限 10 分钟）
+    from .hotspot import scheduler as hotspot_scheduler
+
+    waited = 0.0
+    while waited < 600.0:
+        if not hotspot_scheduler._state["running"]:
+            try:
+                import requests
+
+                web = os.environ.get("WEB_BASE_URL", "http://localhost:3000")
+                r = requests.get(f"{web}/api/hotspots/ingest", params={"date": beijing_today()}, timeout=10)
+                count = int((r.json() or {}).get("count", 0)) if r.ok else 0
+                if count > 0:
+                    log.info("sync catch-up: hotspot digest exists (%s rows), proceeding", count)
+                    break
+            except Exception as e:  # noqa: BLE001 web 未启动等 → 视为可继续（同步不依赖 web 状态查询）
+                log.warning("sync catch-up hotspot check failed: %s", e)
+                break
+            # 未在跑且当日无产出 → 热点补跑即将/正在由其自身线程触发，继续等
+            log.info("sync catch-up: waiting for hotspot pipeline (%.0fs)...", waited)
+        else:
+            log.info("sync catch-up: hotspot pipeline running (%.0fs)...", waited)
+        time.sleep(10)
+        waited += 10.0
+    else:
+        log.warning("sync catch-up: waited 600s for hotspot, giving up this round (retry at next schedule)")
+        return
+
     # 无法确知"当日是否已同步"（同步状态在 web 侧，未持久化）→ 保守补跑一次：
     # 单飞 + 空载荷保护（C1）已能兜住重复同步的安全性。
     log.info("sync catch-up: running daily sync now")
