@@ -61,6 +61,8 @@ export default function ProductCharts({
   const [custom, setCustom] = useState({ start: "", end: "" });
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // C6b（2026-09-25）：分钟线失败回落 3M 时的降级标注（R16：降级必须显式）
+  const [fallbackNote, setFallbackNote] = useState<string | null>(null);
   const [compareInput, setCompareInput] = useState("");
   const [compare, setCompare] = useState<{ code: string; candles: Candle[] } | null>(null);
   const [chartReady, setChartReady] = useState(false);
@@ -81,6 +83,7 @@ export default function ProductCharts({
       interval: "1m" | "1d";
       compareCode?: string;
       rangeKey?: string;
+      fallbackNote?: string | null;
     }) => {
       // 新请求 aborts 旧请求；序号守卫丢弃过期响应
       abortRef.current?.abort();
@@ -91,6 +94,9 @@ export default function ProductCharts({
 
       setPending(true);
       setError(null);
+      // C6b：新一次**用户主动**加载（rangeKey 非 fallback 触发）清掉上一轮的回落标注；
+      // 回落调用自身传入 fallbackNote，不会被这里清掉（清完再设）。
+      if (params.fallbackNote === undefined) setFallbackNote(null);
       try {
         const q = new URLSearchParams({ type, code, interval: params.interval });
         if (params.interval === "1d") {
@@ -112,6 +118,8 @@ export default function ProductCharts({
                 ? "3M"
                 : "custom"),
         );
+        // C6b：回落成功后设置标注（先于 pending 收尾，避免闪空）
+        if (params.fallbackNote) setFallbackNote(params.fallbackNote);
         setPhases(data.interval === "1d" ? detectPhases(data.candles) : []);
         if (params.compareCode) {
           const cq = new URLSearchParams({
@@ -135,6 +143,19 @@ export default function ProductCharts({
         }
       } catch (e) {
         if (controller.signal.aborted || isStale()) return; // abort 不算错误
+        // C6b（2026-09-25）：分钟线单源无备源（东财抖动/熔断即挂）——1D 档失败时
+        // 自动回落 3M 日 K 并显式标注（R15 用户侧永不空白 + R16 降级可感知）。
+        // 回落调用 interval 已是 "1d"，不会再进本分支，无循环风险。
+        if (params.interval === "1m" && !params.fallbackNote) {
+          void load({
+            start: shiftDays(beijingToday(), -90),
+            end: beijingToday(),
+            interval: "1d",
+            rangeKey: "3M",
+            fallbackNote: "分钟线暂不可用，已显示近 3 个月日线",
+          });
+          return;
+        }
         setError(e instanceof Error ? e.message : "加载失败");
       } finally {
         if (!isStale()) setPending(false);
@@ -467,6 +488,11 @@ export default function ProductCharts({
 
         <div className="mt-2 flex flex-wrap items-center justify-between gap-1 text-xs text-zinc-400">
           <span>
+            {fallbackNote && (
+              <span className="mr-2 text-amber-600" data-testid="fallback-note">
+                {fallbackNote}
+              </span>
+            )}
             数据来源：{kline.source}
             {kline.valueOnly ? "（该品种仅收盘值序列）" : ""}
             {kline.interval === "1d" && kline.cachedDays > 0 && kline.fetchedDays > 0

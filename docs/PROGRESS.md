@@ -32,6 +32,11 @@
 
 ## 进度日志
 
+### 2026-09-25 — C6 分钟线降级链当日立项并闭环（批次 C 首项）✅
+
+verify-all 校验暴露"分钟线单源无备源"缺口后当日拍板（C6a+C6b）并实施：**C6a** 腾讯分钟线备源（实施前实测钉死接口形态，发现并处理关键口径差——腾讯分时量/额为**累计**而东财主源为**每分钟增量**，实现内 diff 对齐；场外基金空数据 → ProviderError 不静默；注册链复用既有 position=1）；**C6b** 详情页 1D 档失败自动回落 3M 日 K 并琥珀色标注降级（R15 永不空白 + R16 可感知）。
+验证：新增 `test_tencent_minute.py` 18/18（含 chain 降级端到端）；真实网络对账 vol sum 31245 vs 东财 31240（差 5 手竞价归集，可接受）；tsc 0 错 / vitest 164/164 / compileall 0 错 / cr7_research 23·g6_hk 28 无回归。明细见 [FIX-LEDGER.md](FIX-LEDGER.md)「C6 · 分钟线降级链」。
+
 ### 2026-09-25 — CR7 批次 A 收尾 + B 全量实施并验收（6 项闭环）✅ · 批次 C 留下一轮
 
 按 09-24 拍板范围实施：**A2-②** `normalizeRange` 非法格式改报错（不再静默回落 90 天）；**A2-③** 回读默认窗口 120→182 天（补 `13be2cf` 未落码的拍板）；**A1 反向验证（C34）实证补跑**——临时回退门控 → 7 项断言精确失败 → 恢复全绿；**A3** ChatUI 死守卫改 `gotDone` + `classifyStreamExit` 三形态，中断/异常退出均 setError 给重发出口（R17）；**CR7-14-④** providers 注册语义注释对齐（`get_provider("us")` KeyError 已实证）；**B1** R13 双源核对落详情页（`VerifyQuoteButton` + BFF `/api/quote/verify`，带 CODE_SET/type 白名单）；**B2a/b/c** 港股消费侧三处断链接通（`PRODUCT_TYPE_ENUM` 单一来源 / profile 补 hk·us 分支 / `priceWithCurrency` 币种单位「419.00 港币」三处接入）。

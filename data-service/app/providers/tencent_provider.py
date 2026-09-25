@@ -1,8 +1,10 @@
-"""腾讯备源（R15/M8）：覆盖 A股 / 场内基金 的实时行情与日 K。
+"""腾讯备源（R15/M8）：覆盖 A股 / 场内基金 / 港股 的实时行情、日 K 与分钟线。
 
 - 行情：`qt.gtimg.cn/q=<sym>`（一次可批量多个，逗号分隔）
 - 日 K：`web.ifzq.gtimg.cn/appstock/app/fqkline/get`（前复权 qfq）
-- 不覆盖：可转债（实测返回空）、场外基金（无）、加密
+- 分钟线：`ifzq.gtimg.cn/appstock/app/minute/query`（当日分时，C6a 2026-09-25；
+  **累计量/额必须 diff 成增量**再返回——东财主源口径为每分钟增量）
+- 不覆盖：可转债日 K（实测返回空）、场外基金（无）、加密
 """
 
 import os
@@ -135,8 +137,12 @@ class TencentProvider(BaseProvider):
         end: str | None = None,
         interval: str = "1d",
     ) -> dict:
+        # C6a（2026-09-25）：分钟线备源——此前分钟线仅东财单源，端点抖动/熔断时
+        # 1D 档位必挂（2026-09-25 verify-all p2 inconclusive 的根因）。
+        if interval == "1m":
+            return self._minute_kline(type_, code)
         if interval != "1d":
-            raise ProviderNotSupported("tencent minute kline not implemented")
+            raise ProviderNotSupported(f"tencent kline interval not supported: {interval}")
         sym = _symbol_for(type_, code)
         if sym is None:
             raise ProviderNotSupported(f"tencent does not support code: {code}")
@@ -199,6 +205,77 @@ class TencentProvider(BaseProvider):
             "type": type_,
             "code": code,
             "interval": "1d",
+            "source": self.source,
+            "candles": candles,
+        }
+
+    # ---------- 分钟线（C6a，2026-09-25） ----------
+
+    def _minute_kline(self, type_: str, code: str) -> dict:
+        """当日 1 分钟分时（C6a 备源）。仅 stock/fund(场内)/bond(转债)/hk——us 走 yfinance 另议。
+
+        接口 `ifzq.gtimg.cn/appstock/app/minute/query`（2026-09-25 实测形态）：
+        - `data.<sym>.data.data`：["0930 1250.01 183 22875182.71", ...]（时间 HHMM、价、**累计**量（手）、**累计**额（元））
+        - `data.<sym>.data.date`：分时归属日 YYYYMMDD
+        - `data.<sym>.qt.<sym>`：行情数组，[1]=名称 [3]=现价 [4]=昨收 [30]=时间
+
+        **口径对齐（关键）**：东财主源 klt=1 的 f56 是**每分钟增量**（实测 sum≈全天总量），
+        腾讯是**累计**——必须 diff 成增量再返回，否则 1D 图量柱与主源形态完全不同。
+        首行（0930 竞价）原样保留；腾讯 0931 行含竞价外的第一分钟，diff 后总量与东财对账一致。
+        分时仅单价 → OHLC 四值同价（与"分时"语义一致，isUsableCandle 可过）。
+        """
+        sym = _symbol_for(type_, code)
+        if sym is None:
+            raise ProviderNotSupported(f"tencent does not support code: {code}")
+
+        r = requests.get(
+            "https://ifzq.gtimg.cn/appstock/app/minute/query",
+            params={"code": sym},
+            timeout=REQ_TIMEOUT,
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+        r.raise_for_status()
+        payload = ((r.json() or {}).get("data") or {}).get(sym) or {}
+        rows = ((payload.get("data") or {}).get("data")) or []
+        day = str((payload.get("data") or {}).get("date") or "")
+        if not rows or len(day) != 8:
+            raise ProviderError(f"tencent minute empty: {code}")
+
+        parsed: list[tuple[str, float, float, float]] = []
+        for s in rows:
+            parts = s.split()
+            if len(parts) < 3:
+                continue
+            t, price, cum_vol = parts[0], _num(parts[1]), _num(parts[2])
+            cum_amt = _num(parts[3]) if len(parts) > 3 else None
+            if price is None or cum_vol is None:
+                continue
+            hhmm = t[:4].zfill(4)
+            parsed.append((f"{day[:4]}-{day[4:6]}-{day[6:8]} {hhmm[:2]}:{hhmm[2:]}", price, cum_vol, cum_amt or 0.0))
+        if not parsed:
+            raise ProviderError(f"tencent minute unparsable: {code}")
+
+        candles = []
+        prev_vol = 0.0
+        for i, (dt, price, cum_vol, cum_amt) in enumerate(parsed):
+            # 累计 → 增量（首行原样；负值 = 上游数据异常，截 0 防御）
+            vol = max(cum_vol - prev_vol, 0.0)
+            prev_vol = cum_vol
+            candles.append(
+                {
+                    "date": dt,
+                    "open": price,
+                    "close": price,
+                    "high": price,
+                    "low": price,
+                    "volume": vol,
+                    "amount": max(cum_amt - (parsed[i - 1][3] if i > 0 else 0.0), 0.0),
+                }
+            )
+        return {
+            "type": type_,
+            "code": code,
+            "interval": "1m",
             "source": self.source,
             "candles": candles,
         }

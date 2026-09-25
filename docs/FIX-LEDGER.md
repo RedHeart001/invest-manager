@@ -111,6 +111,15 @@
 
 > **2026-09-25 校验插曲（对批次 C 的输入）**：本次 verify-all 串行跑 7 套件把东财源族令牌桶打满并触发熔断（p2 独占 121s），叠加"分钟线无备源"造成 p2 唯一失败。这实证了 CR7-7（源族额度敏感）的日常风险——已由主人拍板立项为 **C6**（见批次 C 计划），C0 实测时顺带验证。
 
+### C6 · 分钟线降级链（✅ 已实施，2026-09-25 当日闭环）
+
+- **C6a 腾讯分钟线备源**（`tencent_provider.py` 新增 `_minute_kline`，约 70 行）：
+  - **实施前实测钉死响应形态**（账本计划的三个前置全部完成）：① 接口 `ifzq.gtimg.cn/appstock/app/minute/query`，行格式 `HHMM 价 累计量(手) 累计额(元)`、日期在 `data.<sym>.data.date`；② **量口径为累计**（末行 31245 ≈ 全天总量）vs 东财主源**每分钟增量**（实测 240 根 sum=31240）→ 实现内 diff 成增量 + amount 同口径 diff（首行原样，负值截 0 防御）；③ 分时仅单价 → OHLC 四值同价。
+  - 场外基金（012414 实测返回单行占位 `"  0"`）→ 解析为空 → `ProviderError`（不静默半成品）；us 显式 `ProviderNotSupported`；转债 `11x` 前缀映射 `sh` 正确。
+  - **注册链无需改动**：`register_chain(position=1)` 已就绪，`chain_call` 自动获得备源能力；降级时 note 写"主源不可用，已降级至 tencent"。
+- **C6b 1D 档失败自动回落 3M**（`ProductCharts.tsx`，约 15 行）：`load()` 的 catch 中 `interval === "1m"` 且非回落调用时，自动改拉 3M 日 K 并 `fallbackNote`（"分钟线暂不可用，已显示近 3 个月日线"）琥珀色标注在数据来源行（`data-testid="fallback-note"`）；用户主动换档清除标注；回落调用 interval 已是 1d 无循环风险；abort/竞态守卫沿用 CR4 既有机制。
+- **验证证据**：新增 `test_tencent_minute.py` **18/18**（累计→增量 diff / 总量守恒 / 日期 HH:MM 形态 / amount 同口径 / chain 降级端到端 + note / us 拒绝 / 场外基金空数据 / 空 rows、缺 date 拒绝）；**实测对账**：真实请求腾讯接口 267 根、vol sum=31245 与东财全天 31240 对账差 5 手（竞价归集差异，可接受）；ds 实测 `interval=1m` 主源恢复后走 akshare 240 根；`tsc` 0 错、vitest 164/164、`compileall` 0 错、`test_cr7_research` 23/23、`test_g6_hk` 28/28 无回归。**p2「1D 分钟线」断言可在下次 verify-all 复验**（东财恢复时主源绿；东财熔断时备源绿）。
+
 > **依据**：[CODE-REVIEW.md](CODE-REVIEW.md) 的 14 项发现（`CR7-1…CR7-14`）。
 > **原则**（与 CR6 一致）：最小改动、按风险排序、每项可独立验证、不改需求功能——需要改**需求口径**的项单列为决策项，不夹带进代码改动。
 > **验证门槛（每批完成后）**：`npx tsc --noEmit` 0 错 + `npx vitest run` 全绿 + 受影响集成套件全绿（`node web/scripts/verify-all.mjs`）；data-service 侧改动加跑对应离线测试。**开发期不跑 `npm run build`。**
@@ -216,7 +225,7 @@
 - **验证**：`validate.test.ts` + 两个路由的边界断言（非法 code 不产生 dsGet 调用——用注入/spy 或断言响应码）。
 - **风险**：低（需确认无现存调用方传带前缀代码，如 `sh600519`）。
 
-**C6 · 分钟线降级链补齐**（2026-09-25 新增；来源 = 当日 verify-all 校验 p2「1D 分钟线」inconclusive 插事，主人拍板进批次 C）
+**C6 · 分钟线降级链补齐**（2026-09-25 新增；来源 = 当日 verify-all 校验 p2「1D 分钟线」inconclusive 插事，主人拍板进批次 C；**✅ 当日已实施完毕**，实施记录见上方「C6 · 分钟线降级链」节）
 
 > **背景与证据**：2026-09-25 集成校验中，东财分钟线端点对本机持续 `RemoteDisconnected`（同源族日 K 走腾讯备源正常）→ 分钟线**单源无备源**（`tencent_provider.py:139` 显式 `ProviderNotSupported("tencent minute kline not implemented")`）→ 1D 档位必挂。UI 侧 `ProductCharts` 对 1D 加载失败只显示"暂无行情数据"，**不自动回落 3M**——用户看到的是空图而非次优档位，与 R15「用户侧永不空白」目标相悖。分钟线路径自 P2 交付起未变，与 CR7 批次 A/B 改动无关。
 
