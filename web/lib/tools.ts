@@ -200,7 +200,8 @@ const round2 = (v: number | null | undefined) =>
 
 /** 行情字段转换（代码审查修复）：Number(null)===0 会把"缺价"上报成 0 元，
  *  LLM 会据此回答"现价 0 元"。缺失一律保持 null。 */
-const numOrNull = (v: unknown): number | null => {
+// D1（CR7-11）导出以供单测：C4 唯一防线——缺价必须为 null 不得上报 0 元
+export const numOrNull = (v: unknown): number | null => {
   if (v == null || v === "") return null;
   const n = Number(v);
   return Number.isFinite(n) ? Math.round(n * 100) / 100 : null;

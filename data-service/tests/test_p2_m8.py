@@ -441,6 +441,33 @@ def test_abandoned_watchdog_count() -> None:
     check("CR-22：正常完成不计入", v2 == "ok" and e2 is None and to.abandoned_count() == before + 1)
 
 
+def test_abandoned_count_race_narrow_window() -> None:
+    """D2（CR7-12，2026-09-25）：窄窗口竞态——超时放弃后线程立刻自然结束。
+
+    此前时序：主线程 join 超时 → 锁外置 box["_abandoned"]=True → 拿锁 +1；
+    runner 恰在"置标志前"走到 finally 读标志（无值）→ 不递减 → 计数虚高 +1。
+    修复后置标志/递减同锁互斥，且主线程拿锁后二次确认 is_alive()。
+    压测 N 次"超时阈值极贴边"的调用（fn 快速完成但 join 更快到期），
+    断言计数最终精确回落——修复前此断言会偶发虚高。
+    """
+    import time as _t
+
+    from app.utils import timeout as to
+
+    before = to.abandoned_count()
+    # fn 立即完成，join 用极短超时——制造"主线程判超时 vs 线程实际已完成"的贴边窗口
+    for i in range(50):
+        to.run_with_timeout(lambda: i, 0.0005, f"race-{i}")
+    # 等 runner 们全部走完 finally
+    _t.sleep(0.5)
+    after = to.abandoned_count()
+    check(
+        "D2🔁：贴边竞态 50 次后计数精确（无虚增）",
+        after == before,
+        f"before={before} after={after}（虚增 {after - before}）",
+    )
+
+
 if __name__ == "__main__":
     test_limiter()
     test_symbol_mapping()
@@ -451,6 +478,7 @@ if __name__ == "__main__":
     test_fund_nav_failure_negative_cache()
     test_fund_nav_empty_table_and_missing_columns()
     test_abandoned_watchdog_count()
+    test_abandoned_count_race_narrow_window()
     fails = [x for x in results if not x[1]]
     print(f"\n===== {len(results) - len(fails)}/{len(results)} 通过 =====")
     if fails:

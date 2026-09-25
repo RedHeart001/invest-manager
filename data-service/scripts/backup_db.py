@@ -44,7 +44,14 @@ def backup(source: str, outdir: str) -> str:
         dst = sqlite3.connect(dest)
         try:
             with dst:
-                src.backup(dst)
+                # D1（CR7-11，2026-09-25）：损坏源（非 SQLite 文件/加密库）在此抛
+                # sqlite3.DatabaseError——此前未捕获会以裸 traceback 崩溃且**残留
+                # 空壳产物**（--list 时不可区分）。与 integrity 失败同路径清理。
+                try:
+                    src.backup(dst)
+                except sqlite3.DatabaseError as e:
+                    print(f"[backup] 源库读取失败（损坏/非 SQLite）：{e}", file=sys.stderr)
+                    return ""
             integrity = dst.execute("PRAGMA integrity_check").fetchone()
         finally:
             dst.close()

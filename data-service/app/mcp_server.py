@@ -35,6 +35,9 @@ WEB_API_BASE = (
 ).rstrip("/")
 MCP_HTTP_HOST = os.environ.get("MCP_HTTP_HOST", "127.0.0.1")
 MCP_HTTP_PORT = int(os.environ.get("MCP_HTTP_PORT", "8765"))
+# D3（CR7-13）：list_products 看门狗阈值——外部 MCP 客户端不应感知"卡死"。
+# 环境变量可覆盖（测试注入短超时用）。
+MCP_LIST_TIMEOUT_S = float(os.environ.get("MCP_LIST_TIMEOUT_S", "120"))
 
 try:
     from fastmcp import FastMCP
@@ -90,8 +93,22 @@ def get_kline(
 @mcp.tool
 def list_products(type: str = "stock", limit: int = 50) -> dict:
     """列出某类产品（产品代码/名称/拼音），默认返回前 50 条（全量约 3.4 万条，勿全量拉取）。"""
+    from .utils.timeout import run_with_timeout
+
     provider = get_list_provider(type)
-    items = provider.list_products(type)
+    # D3（CR7-13，2026-09-25）：list_products 无内在超时（hk 直连分页可达数十发
+    # 请求）——外部 MCP 客户端视角此前是"无响应卡死 4 分钟"。用看门狗包裹，
+    # 超时按 ProviderError 降级语义返回（不挂死客户端）。
+    value, err = run_with_timeout(lambda: provider.list_products(type), MCP_LIST_TIMEOUT_S, f"mcp.list_products({type})")
+    if err is not None:
+        return {
+            "type": type,
+            "count": 0,
+            "products": [],
+            "degraded": True,
+            "note": f"产品列表获取失败（{err.__class__.__name__}: {err}）",
+        }
+    items = value or []
     return {"type": type, "count": len(items), "products": items[: max(1, min(limit, 200))]}
 
 

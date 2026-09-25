@@ -283,6 +283,12 @@ class HkProvider(BaseProvider):
         if total and len(diff) < total:
             page_size = len(diff) or 100
             pages = (total + page_size - 1) // page_size
+            # D3（CR7-13，2026-09-25）：分页上限——对照 akshare_provider 的
+            # min(pages, 100)。上游 total 异常（被刷/接口变更）时若无上限，
+            # range(2, pages+1) 会以每页一发东财请求长时间捶打源族（R15）。
+            if pages > 100:
+                log.warning("hk list pages=%d exceeds cap, truncating to 100", pages)
+                pages = 100
             collected = {str(x.get("f12")): x for x in diff}
             for pn in range(2, pages + 1):
                 page = self._em_json(

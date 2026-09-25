@@ -55,26 +55,44 @@ def run_with_timeout(
         except BaseException as e:  # noqa: BLE001 —— 原样交回调用方判定
             box["error"] = e
         finally:
-            # 只在"曾被放弃（超时）"的线程结束时递减；正常结束的线程不计入
-            if box.get("_abandoned"):
-                with _abandoned_lock:
+            # D2：标志读取与递减在同一把锁内——与主线程的"置标志 + 计数"互斥。
+            # 此前主线程锁外先写标志、runner 无锁读 → runner 在主线程置标志前
+            # 恰好走到 finally 就不会递减（计数只增不减）。
+            with _abandoned_lock:
+                if box.get("_abandoned"):
                     _abandoned = max(0, _abandoned - 1)
 
     t = threading.Thread(target=_runner, name=name, daemon=True)
     t.start()
     t.join(seconds)
     if t.is_alive():
-        box["_abandoned"] = True
+        # D2（CR7-12，2026-09-25）：置标志与计数必须在同一把锁内，并与 runner 的
+        # finally 递减互斥——此前 `box["_abandoned"] = True` 在锁外先写、runner
+        # 恰在两步之间读走 finally → 只加不减（计数虚高）。现在持锁置标志：
+        # runner 的 finally 同样持锁读改，两个顺序都正确——
+        #   a) 主线程先拿锁：标志已置 + 计数 +1，runner 后续递减；
+        #   b) runner 先拿锁：标志未置 → 不递减（它本来就不该递减），主线程
+        #      随后 +1 但二次确认 is_alive()——若已结束则不虚增。
         with _abandoned_lock:
-            _abandoned += 1
-            count = _abandoned
-        if count >= ABANDONED_WARN_THRESHOLD:
-            log.warning(
-                "watchdog abandoned threads = %d (>= %d)：上游疑似持续挂起，请排查数据源",
-                count,
-                ABANDONED_WARN_THRESHOLD,
-            )
-        return None, TimeoutError(f"{name} 超时（>{seconds}s），已放弃等待并降级")
+            if not t.is_alive():
+                # 拿到锁的瞬间线程已自然结束：不计数（避免 +1 后无人递减）
+                pass
+            else:
+                box["_abandoned"] = True
+                _abandoned += 1
+                count = _abandoned
+        if t.is_alive():
+            if count >= ABANDONED_WARN_THRESHOLD:
+                log.warning(
+                    "watchdog abandoned threads = %d (>= %d)：上游疑似持续挂起，请排查数据源",
+                    count,
+                    ABANDONED_WARN_THRESHOLD,
+                )
+            return None, TimeoutError(f"{name} 超时（>{seconds}s），已放弃等待并降级")
+        # 极窄窗口（持锁判定存活 → 释放锁后线程结束）：按正常结束处理
+        if "error" in box:
+            return None, box["error"]
+        return box.get("value"), None
     if "error" in box:
         return None, box["error"]
     return box.get("value"), None
