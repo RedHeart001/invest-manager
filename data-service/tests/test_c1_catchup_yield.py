@@ -83,19 +83,37 @@ def _fast_sleep(counts: dict):
     return orig, _sleep
 
 
-def _run_case(fake: _FakeHotspot, on_poll=None, forbid_web_query: bool = False) -> dict:
+def _run_case(fake: _FakeHotspot, on_poll=None, forbid_web_query: bool = False,
+              at_hour: int = 9, at_minute: int = 0) -> dict:
     """跑一次 _catch_up_if_needed，返回 {ran, polls}。
 
     forbid_web_query=True 时把 requests 钉成"一旦被调用就抛"，用来证明 CR9-22
     的那条查询确实被删掉了（而不是留着但走了另一条分支）。
+
+    **时刻必须钉住（CR9-35，09-27 00:4x 实测）**：`_catch_up_if_needed` 开头有一道
+    "未到当日调度时刻（默认 02:00）就直接 return"的门。本套件此前用它不存在的假设跑
+    ——在 00:00–01:59 之间跑，11 个用例里 8 个被这道门静默吞掉（实测 3/11，全是
+    `{n:0, polls:0}`）。默认钉到当天 09:00（已过调度点），需要走"未到点"分支的用例
+    显式传 `at_hour/at_minute`。
     """
     ran = {"n": 0}
     counts = {"polls": 0, "on_poll": on_poll}
     restore_hs = _install_hotspot(fake)
     orig_run_now = ss.run_now
     orig_time = _time.sleep
+    orig_dt = ss.datetime
     builtins_import = __import__("builtins").__import__
 
+    class _PinnedDatetime:
+        """只替 `datetime.now(TZ)`（模块内仅此一处用途），日期仍取真实北京今日。"""
+
+        @staticmethod
+        def now(tz=None):
+            return orig_dt.now(tz or ss.TZ).replace(
+                hour=at_hour, minute=at_minute, second=0, microsecond=0
+            )
+
+    ss.datetime = _PinnedDatetime  # type: ignore[misc]
     ss.run_now = lambda trigger="manual": (ran.__setitem__("n", ran["n"] + 1),  # type: ignore[assignment]
                                            ran.__setitem__("trigger", trigger),
                                            {"accepted": True})[2]
@@ -116,6 +134,7 @@ def _run_case(fake: _FakeHotspot, on_poll=None, forbid_web_query: bool = False) 
     finally:
         _time.sleep = orig_sleep  # type: ignore[assignment]
         ss.run_now = orig_run_now  # type: ignore[assignment]
+        ss.datetime = orig_dt  # type: ignore[misc]
         if forbid_web_query:
             import builtins
 
@@ -210,6 +229,29 @@ def test_cr9_22_stale_resolved_from_previous_day() -> None:
               ss.CATCHUP_YIELD_MAX_WAIT_S / ss.CATCHUP_POLL_INTERVAL_S), str(r))
 
 
+def test_cr9_35_before_schedule_gate_skips_without_polling() -> None:
+    """⑨ CR9-35：未到当日调度时刻（默认 02:00）→ 立即跳过，不轮询也不同步。
+
+    这条分支此前**没有任何用例覆盖**：整套 _catch_up_if_needed 测试都在真实墙上时钟
+    上跑，00:00–01:59 之间执行时全部用例被这道门吞掉（09-27 00:4x 实测 3/11、
+    失败详情一律 `{n:0, polls:0}`）。补上分支覆盖 + 把时刻钉住，两件事一起做。
+    """
+    fake = _FakeHotspot(running=False, resolved=beijing_today())
+    r = _run_case(fake, at_hour=1, at_minute=30)
+    check("CR9-35⑨：未到调度时刻 → 立即跳过（不同步、零轮询）",
+          r["n"] == 0 and r["polls"] == 0, str(r))
+    # 反向对照：同一时刻若已过调度点（SYNC_HOUR=0），必须照常走到同步
+    os.environ["SYNC_HOUR"] = "0"
+    os.environ["SYNC_MINUTE"] = "0"
+    try:
+        r2 = _run_case(fake, at_hour=1, at_minute=30)
+        check("CR9-35⑨🔁：调度时刻改 00:00 后同一时刻立即同步（证明判定读的是调度点）",
+              r2["n"] == 1 and r2["polls"] == 0, str(r2))
+    finally:
+        os.environ.pop("SYNC_HOUR", None)
+        os.environ.pop("SYNC_MINUTE", None)
+
+
 def main() -> int:
     test_yields_while_hotspot_running()
     test_proceeds_when_hotspot_resolved_with_output()
@@ -219,6 +261,7 @@ def main() -> int:
     test_cr9_4_hotspot_finished_with_zero_rows()
     test_cr9_4_never_resolved_still_syncs_at_cap()
     test_cr9_22_stale_resolved_from_previous_day()
+    test_cr9_35_before_schedule_gate_skips_without_polling()
     passed = sum(1 for _n, ok, _d in results if ok)
     fails = [x for x in results if not x[1]]
     for name, _ok, detail in fails:

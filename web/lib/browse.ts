@@ -22,8 +22,6 @@ export type BrowseItem = {
   /** CR9-6：非 CNY 品种（港股/美股）必须带币种，否则分类浏览显示成无单位数字 */
   currency?: string | null;
   quoteSource?: string;
-  /** true = 展示的是快照值（实时行情不可用时） */
-  stale: boolean;
 };
 
 export type BrowseResult = {
@@ -104,7 +102,6 @@ export async function browseProducts(opts: {
 
   const items: BrowseItem[] = rows.map((r) => {
     const q = quoteMap.get(`${r.type}:${r.code}`);
-    const stale = !q;
     return {
       type: r.type,
       code: r.code,
@@ -115,7 +112,6 @@ export async function browseProducts(opts: {
       changePct: q?.changePct ?? r.lastChangePct ?? null,
       currency: q?.currency ?? null, // CR9-6：实时币种透传；快照回退无币种时留空（CNY 语义下不显示后缀）
       quoteSource: q?.source,
-      stale,
     };
   });
 

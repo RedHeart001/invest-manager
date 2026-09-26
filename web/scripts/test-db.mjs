@@ -87,6 +87,35 @@ try {
   // 注意：不得使用无 where 的 chatMessage.deleteMany({})——那会清空开发库中
   // **全部真实会话消息**（2026-09-13 code review 发现的不可逆数据丢失风险）。
   // 级联删除已由上面的断言验证，无需额外清理。
+
+  // 6. 主数据类型完整率（CR9-26①）：hk/crypto 长期 0 行却从未被任何门禁看见，
+  // 根因是 groupBy **压根不返回零行类型**——"静默"就是这个机制。故先按六类补零，
+  // 再断两件可失败的事：① 补零后的分类型合计 == 全表行数（出现未声明的第七类即红）；
+  // ② 已有主数据的类型不得跌回 0 行（同步写坏/误清库的兜底观测）。
+  {
+    const ALL_TYPES = ["stock", "fund", "bond", "hk", "us", "crypto"];
+    const grouped = await p.product.groupBy({ by: ["type"], _count: { _all: true } });
+    const counts = Object.fromEntries(ALL_TYPES.map((t) => [t, 0]));
+    for (const g of grouped) counts[g.type] = g._count._all;
+    const total = await p.product.count();
+    const sum = ALL_TYPES.reduce((a, t) => a + counts[t], 0);
+    const present = ALL_TYPES.filter((t) => counts[t] > 0);
+    const missing = ALL_TYPES.filter((t) => counts[t] === 0);
+    check(
+      "主数据按类型合计与全表行数吻合（无未声明类型被静默）",
+      sum === total,
+      `sum=${sum} total=${total} grouped=${JSON.stringify(grouped)}`,
+    );
+    check(
+      "已有主数据的类型未跌回 0 行（stock/fund/bond/us）",
+      ["stock", "fund", "bond", "us"].every((t) => counts[t] > 0),
+      `counts=${JSON.stringify(counts)}`,
+    );
+    console.log(
+      `  主数据类型完整率 ${present.length}/6｜${ALL_TYPES.map((t) => `${t}=${counts[t]}`).join(" ")}` +
+        (missing.length ? `｜缺口：${missing.join(",")}（可达性属 CR9-26，未静默）` : ""),
+    );
+  }
 } finally {
   await p.$disconnect();
 }

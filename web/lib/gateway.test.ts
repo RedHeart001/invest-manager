@@ -109,6 +109,37 @@ describe("命名空间分派", () => {
     expect(r2.ok).toBe(false);
     expect(r2.summary).toContain("all sources failed");
   });
+
+  it("CR9-10：非法 type/code 在出网前被拒（闸门生效且零次 socket 请求）", async () => {
+    let calls = 0;
+    globalThis.fetch = (() => {
+      calls += 1;
+      return Promise.resolve({
+        ok: false,
+        status: 502,
+        json: () => Promise.resolve({ detail: "spy" }),
+      } as unknown as Response);
+    }) as unknown as typeof fetch;
+
+    // 探针自检：计数器先证明"能记录到合法调用"，否则下面的 0 次不成立（CR9-14 教训）
+    await executeAgentTool("get_quote", { type: "stock", code: "600519" });
+    expect(calls).toBe(1);
+
+    for (const bad of [
+      { type: "股票x", code: "600519" }, // type 不在白名单
+      { type: "stock", code: "../etc/passwd" }, // code 含斜杠
+      { type: "stock", code: "" }, // code 缺失
+    ]) {
+      const r = await executeAgentTool("get_quote", bad);
+      expect(r.ok).toBe(false);
+      expect(r.summary).toContain("入参不合法");
+    }
+    // 只带 code 的基金工具此前完全无判，同受闸门约束
+    const r3 = await executeAgentTool("get_fund_holdings", { code: "贵州茅台" });
+    expect(r3.ok).toBe(false);
+    expect(r3.summary).toContain("invalid code");
+    expect(calls).toBe(1); // 四条非法入参一次都没出网
+  });
 });
 
 describe("技能注入（keyword 档：显式固定，保持确定性断言）", () => {

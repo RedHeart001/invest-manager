@@ -31,7 +31,10 @@ describe("normalizeRange（CR7-2/A2-②：非法格式必须报错，不得静�
     if ("error" in r) expect(r.error).toContain("invalid start");
   });
 
-  it("end 非法 → error（点名 end）", () => {
+  // 入参写的是斜杠分隔的 2026 年 6 月 30 日（不是连字符）——形态非法的另一种常见写法。
+  // CR9-32 曾把这条判为"复现不出却恒绿"的死用例：探针里我重打的日期是连字符版，
+  // 与文件里的字面量字节不同（0x2f vs 0x2d），故探针不报错。已撤回该结论。
+  it("end 斜杠分隔（形态非法）→ error（点名 end）", () => {
     const r = normalizeRange(null, "2026/06/30");
     expect("error" in r).toBe(true);
     if ("error" in r) expect(r.error).toContain("invalid end");

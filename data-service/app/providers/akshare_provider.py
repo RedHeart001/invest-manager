@@ -82,9 +82,11 @@ EM_LIMITER = get_limiter(
 def _em_request(fn):
     """东财按需请求统一入口：限速排队 + 成功/失败回报（连续失败触发熔断）。"""
     if not EM_LIMITER.acquire():
-        raise ProviderError(
-            "eastmoney cooling down (rate-limited); fallback to backup source"
-        )
+        # CR9-26①（2026-09-26）：原文案尾巴是 "; fallback to backup source"，但**本函数不
+        # 知道调用方是谁**——列表类（hk/crypto）按设计没有备源，这句话在那些路径上必然说谎
+        # （09-26 14:38 那轮同步的 hk error 就是实证）。降级与否由 chain_call 在备源**真的
+        # 成功**时如实标注（chain.py:31-35），这里只陈述自己确定的事实。
+        raise ProviderError("eastmoney cooling down (rate-limited)")
     try:
         result = fn()
         EM_LIMITER.on_success()

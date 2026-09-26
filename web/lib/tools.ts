@@ -9,6 +9,7 @@ import { detectPhases } from "./phases";
 import { getLatestReport, startResearch } from "./research";
 import { searchProducts } from "./search";
 import { priceWithCurrency } from "./currency";
+import { CODE_SET, QUOTE_TYPES, checkSubject } from "./validate";
 import type { LlmToolDef } from "./llm";
 import { beijingToday, beijingShiftDays } from "./time";
 
@@ -17,10 +18,45 @@ export type ToolResult = { ok: boolean; summary: string; data?: unknown };
 // CR7-4/B2a（2026-09-24）：产品类型单一来源。此前四处 `enum` 各写各的——
 // hk 全缺、us 只在两处，Agent 的 schema 层根本无法寻址港股（4707 只标的
 // "腾讯控股多少钱"问不出）。须核对 test-p4 19 项（红线只锁工具名不锁 enum）。
-export const PRODUCT_TYPE_ENUM = ["stock", "fund", "bond", "crypto", "hk", "us"] as const;
+// CR9-10：白名单本身也归 `lib/validate`（与 /api/quote 等路由同一来源），此处只保留
+// LLM schema 用的别名——两份六元素数组曾各自演化，正是 B2a 要治的形态。
+export const PRODUCT_TYPE_ENUM = QUOTE_TYPES;
 
 // 研报类工具的子集（engine 只支持 A股/美股，见 data-service research 契约）
 export const RESEARCH_TYPE_ENUM = ["stock", "us"] as const;
+
+// CR9-10（2026-09-26 拍板：接线，不裁剪）：LLM 给的 type/code 此前直送 data-service，
+// 而 /api/quote、/api/kline 早就按 CR7-6/C5 把白名单前移了。同 C33 口径：**出网前判**，
+// 非法串不耗东财额度（rate_per_min=12）。research 两工具另受各自 enum + startResearch
+// 的引擎支持面约束，这里只补 ds 侧的通用闸门。
+const SUBJECT_TOOLS = new Set([
+  "get_quote",
+  "get_kline",
+  "get_phase_analysis",
+  "deep_research",
+  "get_research_report",
+]);
+const CODE_ONLY_TOOLS = new Set(["get_fund_holdings", "get_fund_report"]);
+
+type ToolArgsGuard = { args: Record<string, unknown> } | { err: string };
+
+function guardToolArgs(name: string, args: Record<string, unknown>): ToolArgsGuard {
+  if (SUBJECT_TOOLS.has(name)) {
+    const v = checkSubject(
+      typeof args.type === "string" ? args.type : null,
+      typeof args.code === "string" ? args.code : null,
+    );
+    return "error" in v ? { err: v.error } : { args: { ...args, ...v } };
+  }
+  if (CODE_ONLY_TOOLS.has(name)) {
+    const c = String(args.code ?? "").trim();
+    if (!CODE_SET.test(c)) {
+      return { err: `invalid code: ${c.replace(/\s+/g, " ").slice(0, 40) || "(空)"}` };
+    }
+    return { args: { ...args, code: c } };
+  }
+  return { args };
+}
 
 const JSON_SCHEMA = {
   type: "object",
@@ -425,26 +461,28 @@ export async function executeTool(
   name: string,
   args: Record<string, unknown>,
 ): Promise<ToolResult> {
+  const g = guardToolArgs(name, args);
+  if ("err" in g) return { ok: false, summary: `入参不合法：${g.err}` };
   try {
     switch (name) {
       case "search_products":
-        return await toolSearchProducts(args as { q: string; type?: string; limit?: number });
+        return await toolSearchProducts(g.args as { q: string; type?: string; limit?: number });
       case "get_quote":
-        return await toolGetQuote(args as { type: string; code: string });
+        return await toolGetQuote(g.args as { type: string; code: string });
       case "get_kline":
-        return await toolGetKline(args as { type: string; code: string; days?: number });
+        return await toolGetKline(g.args as { type: string; code: string; days?: number });
       case "get_hotspots":
         return await toolGetHotspots();
       case "get_fund_holdings":
-        return await toolGetFundHoldings(args as { code: string });
+        return await toolGetFundHoldings(g.args as { code: string });
       case "get_fund_report":
-        return await toolGetFundReport(args as { code: string });
+        return await toolGetFundReport(g.args as { code: string });
       case "get_phase_analysis":
-        return await toolGetPhaseAnalysis(args as { type: string; code: string; days?: number });
+        return await toolGetPhaseAnalysis(g.args as { type: string; code: string; days?: number });
       case "deep_research":
-        return await toolDeepResearch(args as { type?: string; code: string });
+        return await toolDeepResearch(g.args as { type?: string; code: string });
       case "get_research_report":
-        return await toolGetResearchReport(args as { type?: string; code: string });
+        return await toolGetResearchReport(g.args as { type?: string; code: string });
       default:
         return { ok: false, summary: `未知工具：${name}` };
     }

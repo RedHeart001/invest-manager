@@ -124,7 +124,9 @@ def test_minute_via_provider_chain() -> None:
     orig_requests = tp.requests
 
     def _fail_em(fn):
-        raise ap.ProviderError("eastmoney cooling down (rate-limited); fallback to backup source")
+        # 与 _em_request 现行文案一致（CR9-26①：谎称的 "; fallback to backup source" 已去掉，
+        # 降级结论由下面的 chain_call 在备源**真的成功**时写出）。
+        raise ap.ProviderError("eastmoney cooling down (rate-limited)")
 
     class _Resp:
         status_code = 200

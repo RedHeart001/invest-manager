@@ -282,6 +282,22 @@ async function main() {
         evFund.body.note.length > 0,
       `note=${evFund.body.note}`,
     );
+    // CR9-10（2026-09-26 接线）：type/code 走 lib/validate 单一来源，非法入参出网前 400，
+    // 不得进 fetchEvents→dsGet("/news")（东财 rate_per_min=12）。反向对照用上面两条 200 用例。
+    {
+      const badCode = await getJson(`${BASE}/api/events?type=stock&code=..%2Fetc`);
+      ok(
+        "事件接口：非法 code → 400 且点名 invalid code（CR9-10）",
+        badCode.status === 400 && String(badCode.body.error ?? "").includes("invalid code"),
+        `status=${badCode.status} body=${JSON.stringify(badCode.body).slice(0, 90)}`,
+      );
+      const badType = await getJson(`${BASE}/api/events?type=nope&code=600519`);
+      ok(
+        "事件接口：非法 type → 400 且点名 unsupported type（CR9-10）",
+        badType.status === 400 && String(badType.body.error ?? "").includes("unsupported type"),
+        `status=${badType.status} body=${JSON.stringify(badType.body).slice(0, 90)}`,
+      );
+    }
   }
 
   // ---------- 7. 加密标的（R12：可达；不可达时 R10 降级 200+note 或明确错误码） ----------

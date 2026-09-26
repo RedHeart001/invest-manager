@@ -17,6 +17,7 @@ import math
 import os
 import re
 import time
+from typing import Any
 from zoneinfo import ZoneInfo
 from datetime import datetime
 
@@ -57,7 +58,8 @@ BOARD_STOCKS_PER_TOPIC = 6
 
 _EM = get_limiter("eastmoney")
 _BOARD_CACHE_TTL = 6 * 3600
-_board_cache: dict[str, tuple[float, list[tuple[str, str]]]] = {}
+# names → [(板块名, 来源)]；codes → {板块名: {来源: "BKxxxx"}}（CR9-3a，同一时间戳同进同退）
+_board_cache: dict[str, tuple[float, Any]] = {}
 
 
 # ---------------- 1. 新闻抓取（R12 双源） ----------------
@@ -240,16 +242,23 @@ def _pick_col(df, *candidates: str):
     return df.iloc[:, 0]
 
 
+# CR9-3(a)：东财板块代码形态（BK + 数字）。名单表里混着 "-"、空串和别的源族的编码，
+# 只有这个形态能喂给 *_cons_em 走短路，其余一律按名称回退。
+_BK_RE = re.compile(r"BK\d{3,8}$", re.IGNORECASE)
+
+
 def _board_names() -> list[tuple[str, str]]:
     """返回 [(板块名, 来源)]：EM 概念+行业 → 新浪行业+概念 → THS 概念。
 
     与成分映射源保持一致性：东财不可用时优先用新浪名单（映射同源，命中即可得成分）。
+    顺带把 名称→板块代码 记进 `_board_cache["codes"]`（CR9-3(a)，见 `_board_code`）。
     """
     cached = _board_cache.get("names")
     if cached and time.time() - cached[0] < _BOARD_CACHE_TTL:
         return cached[1]
 
     boards: list[tuple[str, str]] = []
+    codes: dict[str, dict[str, str]] = {}
     import akshare as ak
 
     if _EM.acquire(timeout=15):
@@ -259,10 +268,16 @@ def _board_names() -> list[tuple[str, str]]:
                 (ak.stock_board_industry_name_em, "em-industry"),
             ):
                 df = _ak_guarded(fn, 45.0, "board-name-list")
-                series = _pick_col(df, "板块名称", "name")
-                boards.extend(
-                    (str(x).strip(), tag) for x in series.dropna().tolist() if str(x).strip()
-                )
+                name_col = _pick_col(df, "板块名称", "name").tolist()
+                code_col = _pick_col(df, "板块代码", "code").tolist()
+                for raw_name, raw_code in zip(name_col, code_col):
+                    n = str(raw_name).strip()
+                    if not n or n.lower() == "nan":
+                        continue
+                    boards.append((n, tag))
+                    c = str(raw_code).strip()
+                    if _BK_RE.fullmatch(c):
+                        codes.setdefault(n, {})[tag] = c.upper()
             _EM.on_success()
         except Exception as e:  # noqa: BLE001
             _EM.on_failure()
@@ -285,8 +300,31 @@ def _board_names() -> list[tuple[str, str]]:
             log.warning("ths board names failed: %s", e)
 
     if boards:
-        _board_cache["names"] = (time.time(), boards)
+        now = time.time()
+        _board_cache["names"] = (now, boards)
+        # 东财不可用时 codes 为空 dict —— 映射自动按名称回退（原行为）
+        _board_cache["codes"] = (now, codes)
     return boards
+
+
+def _board_code(board: str, source: str) -> str | None:
+    """板块名 → 该东财源（em-concept / em-industry）下的 BK 板块代码；取不到返回 None。
+
+    **CR9-3(a)（2026-09-26 拍板深度 (a)）——省下的是百次级扇出**：
+    `stock_board_*_cons_em(symbol=名称)` 会先重拉整张板块映射表。09-27 00:1x 在 requests
+    层计数实证：传名称 **9 个东财请求**（`fs=m:90+t:3`，横跨 push2 全家族），传 BK 代码
+    **1 个请求**（`fs=b:BKxxxx`）。一次 pipeline 最多 10 次映射、每次概念+行业两条 ⇒ 名义
+    10 次 `acquire` 实际可发 180 次 HTTP——这正是 CR7-7"stock 熔断连坐 hk"的真正来源，
+    也是 C29"按逻辑请求计次"口径与真实额度的量级差。
+    名单未缓存/非东财源/代码形态不符时按名称请求，行为与改动前一致。
+    """
+    entry = _board_cache.get("codes")
+    if not entry or time.time() - entry[0] >= _BOARD_CACHE_TTL:
+        _board_names()  # 名单与代码同批取回；6h TTL ⇒ warming 每天个位数
+        entry = _board_cache.get("codes")
+    if not entry:
+        return None
+    return entry[1].get(board, {}).get(source)
 
 
 def _keyword_board_names() -> list[str]:
@@ -500,8 +538,10 @@ def map_board_products(board: str, limit: int = BOARD_STOCKS_PER_TOPIC) -> dict:
             (ak.stock_board_concept_cons_em, "em-concept"),
             (ak.stock_board_industry_cons_em, "em-industry"),
         ):
+            # CR9-3(a)：知道 BK 代码就按代码请求（1 个 HTTP），否则按名称（实测 9 个）。
+            sym = _board_code(board, tag) or board
             try:
-                df = _ak_guarded(lambda: fn(symbol=board), 45.0, "board-constituents")
+                df = _ak_guarded(lambda: fn(symbol=sym), 45.0, "board-constituents")
                 if df is None or len(df) == 0:
                     continue
                 code_series = _pick_col(df, "代码", "code")
@@ -515,7 +555,7 @@ def map_board_products(board: str, limit: int = BOARD_STOCKS_PER_TOPIC) -> dict:
                     return {"stocks": stocks, "source": tag, "note": None}
             except Exception as e:  # noqa: BLE001
                 _EM.on_failure()
-                log.warning("board cons failed (%s %s): %s", tag, board, e)
+                log.warning("board cons failed (%s %s→%s): %s", tag, board, sym, e)
                 break  # 熔断已触发，转新浪备源
 
     sina = _sina_board_products(board, limit)

@@ -203,9 +203,10 @@ def test_error_message_names_subject_when_rate_limited() -> None:
     """CR9-30（2026-09-26）：限速/熔断态下错误文案必须仍点名标的。
 
     实测两次（今天 16:4x 与 17:5x）把 test_p0 变成红：东财冷却时逐源理由是
-    "eastmoney cooling down (rate-limited); fallback to backup source"——这句话
-    **与入参无关**，于是 detail 里再没有 999999，"是环境噪声还是真回归"无法判定。
-    修法在端点边界补主语（type/code），本用例把该契约钉住。
+    "eastmoney cooling down (rate-limited)"（CR9-26① 之前尾巴上还挂着谎称的
+    "; fallback to backup source"）——这句话**与入参无关**，于是 detail 里再没有
+    999999，"是环境噪声还是真回归"无法判定。修法在端点边界补主语（type/code），
+    本用例把该契约钉住。
     """
     from fastapi import HTTPException
 
@@ -223,6 +224,12 @@ def test_error_message_names_subject_when_rate_limited() -> None:
             check("CR9-30🔁：限速态 → 502", e.status_code == 502, str(e.status_code))
             check("CR9-30🔁：detail 点名标的（type/code）", "stock/999999" in detail, detail[:160])
             check("CR9-30🔁：逐源理由原文保留（不吞诊断）", "cooling down" in detail, detail[:160])
+            # CR9-26①：限速发生在"哪一源、有没有备源"之外，文案不许替结果下结论
+            check(
+                "CR9-26①：限速文案不谎称已降级（R16）",
+                "fallback" not in detail and "已降级" not in detail,
+                detail[:160],
+            )
     finally:
         akp.EM_LIMITER.acquire = orig_acquire
 

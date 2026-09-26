@@ -172,6 +172,7 @@
   - `ak.stock_board_concept_name_em` 内部走 `fetch_paginated_data`（site-packages `akshare/stock/stock_board_concept_em.py:47`），约 900 个板块 ÷ `pz=100` ≈ **9 页请求**；
   - `ak.stock_board_concept_cons_em(名称)` 更甚——若 `symbol` 不是 `^BK\d+`，**先重拉整张板块映射表**（再 ~9 请求，`:421-426`），然后分页取成分（`:440`）。我们的调用点 `hotspot/pipeline.py:258`、`:500` 传的正是**名称**。
   - ⇒ **1 次 `acquire` ≈ 10–20 个真实东财请求**；一次热点 pipeline 是百次级。
+- **09-27 直接复测 + 已处置的那一半（CR9-3(a)）**：不读库源码、改在 **requests 层计数**（monkeypatch `HTTPAdapter.send`）实证同一件事——`stock_board_concept_cons_em(symbol="光伏设备")` 发 **9 个** 请求（全打在 `fs=m:90+t:3` 的整表分页上），`symbol="BK0446"` 只发 **1 个**（`fs=b:BK0446` 直取成分）。⇒ `hotspot/pipeline.py` 现把 **板块名→BK 代码**随名单一起缓存（`_board_code()`，6h TTL），`map_board_products()` 有代码就传代码：**映射这一路的冗余整表重拉已消除**；概念/行业**分源记账**，代码形态不符或名单未缓存时自动按名称回退（`test_cr6_pipeline` 有 🔁 用例钉这条回退）。**没变的是计次口径**：`acquire` 仍按逻辑请求计，1 次 acquire 里剩下的多页/多 host 扇出仍属 (b)（未拍板）。
 - **为什么重要**：这与 `limiter.py:3-6` 自己记录的实测事实（"连续 2+ 请求即触发惩罚，惩罚覆盖其全部域名"）直接矛盾，是长期熔断、以及 C0 实测"stock 熔断连坐 hk"的**真正来源**（不是"同步和热点抢 10 个令牌"这么简单）。
 - **口径规则**：任何"额度是否打满"的测量必须数**真实 HTTP 请求**，不得用 `acquire` 次数或 akshare 调用次数代替——按 acquire 计会得出"额度没满"的假结论（CR8 批次二/OPT-2 的前置实测 ② 尤其注意）。
 - **两个连带坑**：① `get_limiter(name, **kwargs)` 是**首调用创建即固定**（`limiter.py:118-121`），而 `pipeline.py:58` 无参先创建 ⇒ `akshare_provider.py:70-78` 的显式调参**不生效**（当前默认值恰好相同故无症状）——**要调东财桶参数，先修这一条**（CR9-18）；② 修法优先"缓存 名称→`BKxxxxx` 并传 BK 代码"（akshare 对 `^BK\d+` 短路，直接省掉 ~9 个冗余请求），而不是先动桶参数（CR9-3）。
