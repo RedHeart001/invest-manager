@@ -78,7 +78,7 @@ def _execute(trigger: str) -> dict:
             body = r.json() or {}
             results = body.get("results") or []
             failed = [str(x.get("type")) for x in results if isinstance(x, dict) and x.get("error")]
-            # CR9-5（重述）：web 侧返回的是真 ok（`results.every(r => !r.error)`），
+            # CR9-28：web 侧返回的是真 ok（`results.every(r => !r.error)`），
             # 此前这里硬写 `ok: True` → 5 类里 4 类失败也被记成"同步成功"
             # （09-26 实测：lastResult.ok=true，而 stock/bond/crypto/hk 全带 error）。
             # 状态失真会让"看 /sync/status 判断今天是否要补跑"这条唯一路径失效。
