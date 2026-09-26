@@ -6,7 +6,7 @@
 >
 > **提新发现前先查**文末「附录 · 已核验排除的误报（跨轮累计）」，避免重复提已证伪项。
 
-> **速览**：这里只记"各轮审查**发现了什么**"，修没修、怎么修、按什么顺序修都看 [FIX-LEDGER.md](FIX-LEDGER.md)。**当前轮次是 CR9（2026-09-26 全项目审查，合计 27 项发现：P1×1 + P2×7 + P3×19；CR9-1 已修 `7edc9ef` 并过实网验收，其余 26 项等主人拍板）**；CR8 开放（6 项已拍板待实施，实测确认代码一行未动）；**CR7 代码闭环 14+1、验收 1 项受阻转 CR9-26**（状态只在 [FIX-LEDGER.md](FIX-LEDGER.md) 看板维护，本行只给指针）。已闭环轮次（CR1–CR6）只留压缩结论+指针。编号黑话（CRn / CR-xx / G / V）先查下方「轮次对照表」。
+> **速览**：这里只记"各轮审查**发现了什么**"，修没修、怎么修、按什么顺序修都看 [FIX-LEDGER.md](FIX-LEDGER.md)。**当前轮次是 CR9（2026-09-26 全项目审查，合计 29 项：P1×1 + P2×8 + P3×19 + 误报撤回×1；已修/处置 7 项（`7edc9ef` + `000d721` + CR9-24 口径处置），余 21 项等主人拍板）**；CR8 开放（6 项已拍板待实施，实测确认代码一行未动）；**CR7 代码闭环 14+1、验收 1 项受阻转 CR9-26**（状态只在 [FIX-LEDGER.md](FIX-LEDGER.md) 看板维护，本行只给指针）。已闭环轮次（CR1–CR6）只留压缩结论+指针。编号黑话（CRn / CR-xx / G / V）先查下方「轮次对照表」。
 
 ---
 
@@ -184,7 +184,39 @@ curl ":3000/api/quote?type=hk&code=00700" → {"price":436.6,"source":"tencent",
 
 **教训回记**：本轮两次误判（上一条 CR8"已写未提交"、这一条 CR9-5 定级偏高）都源于**采信并行审计代理的陈述而未先复核**。已在文末排除表写下纪律：subagent 关于 git 状态 / 路由守卫 / 文件存在性的结论，必须由我自己用 `git status`、`grep`、`curl` 复一遍才能入账。
 
-> **CR9 合计（09-26 收尾口径）**：**27 项 = P1×1 + P2×7 + P3×19**（上表 23 项 + 追加 4 项：CR9-24/25/26/27；其中 CR9-5 降为 P3、CR9-7 升为 P2）。状态与批次只在 [FIX-LEDGER.md](FIX-LEDGER.md) 看板维护。
+### CR9 追加三（09-26 15:2x–16:0x，批次一实施所得：1 条撤回 + 2 条新发现）
+
+> 主人指令"先修 cr9"，按本账本批次一实施。实施前逐条回代码复核原指控，**结果推翻了我登记的一条**。
+
+#### 撤回 CR9-5（原指控不成立）
+
+登记时写的是"`POST /sync/run` 无 type 白名单，未知类型记成功并抑制当天同步"。实施前复核：`main.py:259` 的 `def sync_run(trigger: str = Query(...))` **根本没有 `type` 参数**，`_execute` 也是无参 POST `/api/sync`（同步全类型）；而 web 侧 `api/sync/route.ts:22-26` 本来就有 `SYNC_TYPES` 白名单。**这条指控的前提不存在**，撤回（原已在追加二里降为 P3，现整条撤销）。根因仍是同一条：审计代理给的行号我未复核端点函数签名就入账——已把"登记'某参数缺校验'前必须读该端点签名"补进文末排除表的纪律。
+
+#### 新发现 CR9-28（P2，取代 CR9-5 的位置）· `/sync/status` 的 `ok` 与真实结果脱钩
+
+`sync_scheduler._execute:75` 把结果硬写成 `{"ok": True, ...}`，而 web 返回的是真判定 `results.every(r => !r.error)`（`api/sync/route.ts:33`）。
+- **实测**：09-26 14:38 那轮同步 `GET :8000/sync/status` → `lastResult.ok=true`，而 `results` 里 **stock/bond/crypto/hk 四类全带 error**（只有 fund 成功）。
+- **为什么严重**：`/sync/status` 的 `ok` 是唯一能判断"今天要不要补跑"的状态位；它说谎就等于把"四类主数据今天没更新"这件事对运维隐藏。CR7-4 手测之所以今天做不了（hk 0 行），正是这类状态失真的下游后果。
+- **修法（已实施）**：跟随 web 的 `ok`，并附 `failedTypes` + 显式 `note`；**失败类型不自动重试是有意取舍**（整轮同步实测 455~561s，反复重试会持续占东财源族，与 CR7-7/C1 的让位设计相冲），故只暴露缺口、不改调度行为。
+- **验收**：`data-service/tests/test_cr9_sync_status.py` 7 项，含 C34 反向对照（"全成功仍为 True"证明 `ok` 不是恒假桩；"失败轮仍置 lastDate"锁住那条取舍，将来要改必须先改文档）。
+
+#### 新发现 CR9-29（P3）· 腾讯日 K 不返回 `amount`，备源服务时字段契约不齐
+
+`GET :8000/kline?type=stock&code=600519`（东财冷却、由 tencent 服务）→ candles 每行只有 `date/open/close/high/low/volume`，**无 `amount`**；`test_p0.py:82`「kline 字段完整（volume/amount 非空）」因此必挂。这与 CR9-6（缺 `currency`）、CR9-7（`timestamp` 三形态）是**同一个根因的第三种表现：降级路径丢语义字段**。修法：补齐 amount，或在备源显式标注该字段不可用——与 CR8-1 拍板的 `reasons[]` 方向一致。
+
+#### 批次一实施结果（修 4 撤 1，证据）
+
+| 项 | 实现 | 证据 |
+|---|---|---|
+| CR9-2 | `chat-stream-exit.ts` 加 `sawError → "errored"` 第四形态；`ChatUI` 记 `sawErrorEvent`，收尾时 `errored` 不覆盖服务端真因 | `chat-stream-exit.test.ts` +3（含"error 与到期同时成立仍判 errored"）；vitest **185/185** |
+| CR9-6 | `tencent_provider` 新增 `CURRENCY_BY_TYPE`；`browse.ts` 透传 `currency`；详情页指标卡走 `priceWithCurrency`、日线表头标一次币种（不逐格加，避免噪声） | `test_g6_hk` 断言 hk 备源 `currency=HKD`、`test_p2_m8` 断言 A股 `CNY`；实网 `stock/hk/fund` 三查均带正确币种 |
+| CR9-7 | `_ts_iso()` 在 provider 边界统一 ISO；**实施中实测出第三种形态**：港股是 `2026/09/18 16:08:32`（斜杠+空格，非我登记时写的连字符），故改成"只取数字"归一而非逐个 replace；不满 14 位原样返回不猜 | 首版实现漏斜杠形态 → `test_g6_hk` 精确失败 1 项，修正后 32/32；`test_p2_m8` 原断言 `== "20260911150000"` 实为把缺陷锁成契约，已改断言 ISO |
+| CR9-27 | `deadlineMs` 常量与提示文案同源插值 | 同上 vitest |
+| CR9-28 | `_execute` 跟随真 ok + `failedTypes`/`note` | `test_cr9_sync_status` 7/7 |
+
+**回归面**：ds 离线 14 套件全绿（新增 `test_cr9_sync_status`；`tencent_minute` 20、`g6_hk` 32、`p2_m8` 50）；`tsc` 0 错；vitest 185/185。**p0（服务耦合套件）今天 13/15**，两条失败分别是"detail 文案随熔断状态变化"（环境态）与 CR9-29（真实缺口），非本批引入。提交 `000d721`。
+
+> **CR9 最新合计**：**29 项 = P1×1 + P2×8 + P3×19 + 误报撤回×1**；已修/处置 7 项，余 21 项。状态与批次只在 [FIX-LEDGER.md](FIX-LEDGER.md) 看板维护。
 
 
 
