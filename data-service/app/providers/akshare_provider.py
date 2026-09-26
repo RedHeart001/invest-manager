@@ -21,6 +21,7 @@ from .base import (
     register_list,
 )
 from ..utils.limiter import get_limiter
+from ..utils.timeutil import beijing_now, beijing_today
 
 logger = logging.getLogger("akshare")
 
@@ -422,9 +423,9 @@ class AkshareProvider(BaseProvider):
             return self._fund_nav_kline(code, start, end)
 
         if interval == "1m":
-            from datetime import date as _date
-
-            today = _date.today().strftime("%Y%m%d")
+            # CR9-16（§B 北京时间口径）：此处原为本地 date.today()，主机时区非 +08 时
+            # 会在跨日窗口取到错误日期（分钟线只有"当日"这一种取法，取错即整段空）。
+            today = beijing_today().replace("-", "")
             klt, beg, end_p = "1", today, today
         else:
             klt, beg, end_p = "101", start or "20200101", end or "20991231"
@@ -597,16 +598,21 @@ class AkshareProvider(BaseProvider):
     def get_fund_holdings(self, code: str) -> dict:
         import akshare as ak
 
-        from datetime import date as _date
-
+        # CR9-16（§B 北京时间口径）：年份按北京时间取——本地时区在 12-31/01-01 窗口会枚举错年份
+        bj_year = beijing_now().year
         last_err = None
-        for year in (str(_date.today().year), str(_date.today().year - 1)):
+        for year in (str(bj_year), str(bj_year - 1)):
             try:
                 df = _ak_request(lambda: ak.fund_portfolio_hold_em(symbol=code, date=year), 40.0, "ak.fund_portfolio_hold_em")
             except Exception as e:  # noqa: BLE001
                 last_err = e
                 continue
             if df is None or len(df) == 0:
+                continue
+            # CR9-17（C2 显式降级）：列名由上游决定。此前 `df["季度"]` 落在 try 之外，
+            # 上游改列名会以裸 KeyError 冒到 HTTP 层变成 500，而不是"该源不可用"的降级。
+            if "季度" not in df.columns:
+                last_err = f"缺列「季度」（上游表结构变更），实际列={list(df.columns)[:8]}"
                 continue
             quarters = list(dict.fromkeys(df["季度"].astype(str)))
             latest = quarters[-1]
@@ -644,7 +650,8 @@ class AkshareProvider(BaseProvider):
         """
         import akshare as ak
 
-        from datetime import date as _date
+        # CR9-16（§B 北京时间口径）：年份走北京时间，与本文件其余日期口径一致
+        bj_year = beijing_now().year
 
         cached = self._fund_report_cache.get(code)
         if cached and time.time() - cached[0] < self.FUND_REPORT_TTL:
@@ -679,7 +686,7 @@ class AkshareProvider(BaseProvider):
 
         industry: dict | None = None
         last_err = None
-        for year in (str(_date.today().year), str(_date.today().year - 1)):
+        for year in (str(bj_year), str(bj_year - 1)):
             try:
                 df2 = _em_ak_request(
                     lambda y=year: ak.fund_portfolio_industry_allocation_em(

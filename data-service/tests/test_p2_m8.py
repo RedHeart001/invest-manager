@@ -162,6 +162,10 @@ def test_tencent_parsers() -> None:
           out["source"] == "tencent" and c["open"] == 3.323 and c["close"] == 3.341
           and c["high"] == 3.354 and c["low"] == 3.280,
           str(c))
+    # CR9-29（2026-09-26）：腾讯日 K 每行恰 6 字段、无成交额（实测）。原行为是"键不存在"
+    # ⇒ 同一端点在主源/备源下形态不同，消费端只能靠猜。现契约：字段恒在 + 值 null + note 说明。
+    check("CR9-29🔁：amount 键恒在且为 null（不再静默缺字段）", "amount" in c and c["amount"] is None, str(c))
+    check("CR9-29🔁：响应 note 显式声明成交额不可用", "成交额" in str(out.get("note")), str(out.get("note")))
 
     # 行情解析（程序化构造，字段位标 30/31/32/33/34）
     fields = ["51", "创业板ETF易方达", "159915", "3.341", "3.358", "3.323", "19052972", "9905270", "9147702"]
@@ -478,6 +482,102 @@ def test_abandoned_count_race_narrow_window() -> None:
     )
 
 
+def test_fund_holdings_missing_column_and_beijing_dates() -> None:
+    """CR9-17 / CR9-16（2026-09-26）：持仓表缺列的降级形态 + 日期一律走北京时间。
+
+    CR9-17：`get_fund_holdings` 里 `df["季度"]` 原本落在 try 之外，上游一改列名就是裸
+    `KeyError` → HTTP 500（C2 同族：外部数据的列缺失必须显式降级，不许冒泡）。
+    CR9-16：分钟线"当日"窗口与持仓/报告的年份枚举都用过本地 `date.today()`（§B 禁用），
+    这里把 `beijing_today` 钉成一个与本机不同的日期来断口径——若代码仍走本地时区必挂。
+    """
+    import types
+
+    import pandas as pd
+
+    import app.providers.akshare_provider as akp
+
+    provider = akp.AkshareProvider()
+    orig_ak_req = akp._ak_request
+
+    good = pd.DataFrame(
+        [{"季度": "2026年1季度", "股票代码": "600519", "股票名称": "贵州茅台", "占净值比例": 5.1}]
+    )
+    no_col = pd.DataFrame([{"股票简称": "某股票", "占净值比例": 1.0}])
+
+    # ① 缺「季度」列 → ProviderError（含列名诊断），且绝不是 KeyError
+    akp._ak_request = lambda *a, **k: no_col
+    try:
+        kind = "none"
+        msg = ""
+        try:
+            provider.get_fund_holdings("012414")
+        except ProviderError as e:
+            kind, msg = "ProviderError", str(e)
+        except Exception as e:  # noqa: BLE001
+            kind, msg = type(e).__name__, str(e)
+        check("CR9-17🔁：缺列不冒泡成 KeyError", kind == "ProviderError", f"{kind}: {msg[:120]}")
+        # 注意：不能只断 "季度" in msg —— 裸 KeyError 的文本本身就是 "'季度'"，
+        # 那样这条断言在坏状态下也是绿的（回退实证抓到过）。必须断"显式降级"的措辞。
+        check("CR9-17🔁：降级说明为显式缺列诊断", "缺列" in msg and "季度" in msg, msg[:160])
+        check("CR9-17🔁：降级说明带实际列名可诊断", "实际列" in msg, msg[:160])
+    finally:
+        akp._ak_request = orig_ak_req
+
+    # ② 正向对照：列齐全必须照常产出（证明 ① 不是恒假的桩）
+    akp._ak_request = lambda *a, **k: good
+    try:
+        out = provider.get_fund_holdings("012414")
+        check(
+            "CR9-17🔁：列齐全时正常产出持仓（正向对照）",
+            out.get("quarter") == "2026年1季度" and len(out.get("holdings") or []) == 1,
+            str(out)[:160],
+        )
+    finally:
+        akp._ak_request = orig_ak_req
+
+    # ③ CR9-16：1m 的 beg/end 必须是北京日期（把 beijing_today 钉成非本机日期）
+    captured: dict = {}
+
+    class _Resp:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return {"data": {"klines": ["2026-03-31 09:30,1.0,2.0,0.5,1.5,100,20000"]}}
+
+    def _fake_get(url, params=None, **kw):
+        captured["params"] = params
+        return _Resp()
+
+    orig_requests = akp.requests
+    orig_em_request = akp._em_request
+    orig_today = akp.beijing_today
+    akp.requests = types.SimpleNamespace(get=_fake_get)
+    # 绕开源族令牌桶：本用例只验日期口径，不该被限速器状态左右
+    akp._em_request = lambda fn, *a, **k: fn()
+    akp.beijing_today = lambda: "2026-03-31"
+    try:
+        out = provider.get_kline("stock", "600519", interval="1m")
+        p = captured.get("params") or {}
+        check(
+            "CR9-16🔁：1m 请求的 beg/end = 北京日期紧凑串",
+            p.get("beg") == "20260331" and p.get("end") == "20260331",
+            str(p)[:160],
+        )
+        check("CR9-16🔁：klt=1 且分时解析出 1 根", p.get("klt") == "1" and len(out.get("candles") or []) == 1, str(out)[:160])
+    finally:
+        akp.requests = orig_requests
+        akp._em_request = orig_em_request
+        akp.beijing_today = orig_today
+
+    # ④ CR9-16：持仓年份枚举走北京时区年（本机年 + 上一年），不再引用 date.today()
+    import inspect
+
+    src = inspect.getsource(akp.AkshareProvider.get_fund_holdings)
+    check("CR9-16🔁：get_fund_holdings 源码内不再出现 date.today()", "date.today()" not in src, src[:120])
+    check("CR9-16🔁：改用 beijing_now().year", "beijing_now().year" in src)
+
+
 if __name__ == "__main__":
     test_limiter()
     test_symbol_mapping()
@@ -487,6 +587,7 @@ if __name__ == "__main__":
     test_kline_null_ohlc_filtered()
     test_fund_nav_failure_negative_cache()
     test_fund_nav_empty_table_and_missing_columns()
+    test_fund_holdings_missing_column_and_beijing_dates()
     test_abandoned_watchdog_count()
     test_abandoned_count_race_narrow_window()
     fails = [x for x in results if not x[1]]

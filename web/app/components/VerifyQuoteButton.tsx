@@ -12,6 +12,8 @@ type VerifiedResp = {
   source?: string;
   note?: string | null;
   crossChecked?: boolean;
+  /** CR9-11：ds 给的三态比对结论（前端不再靠中文文案子串判色） */
+  verifyVerdict?: "agree" | "diverged" | "no_second_source";
   error?: string;
 };
 
@@ -51,8 +53,23 @@ export default function VerifyQuoteButton({ type, code }: { type: string; code: 
       </button>
       {result && (
         <span
-          className={`text-xs ${result.note?.includes("偏差") ? "text-amber-600" : "text-zinc-500"}`}
+          className={`text-xs ${
+            // CR9-11：原判色是 `note.includes("偏差")`——把中文文案当契约，且
+            // crossChecked 只表示"试过比对"（实测 true + "备源不可用"时渲染成与"一致"
+            // 同色同灰，正是 09-26 浏览器实点看到的现象）。现按三态结论判定；
+            // 字段缺失（旧 ds）时回落原推断，不崩。
+            result.verifyVerdict === "diverged" || (!result.verifyVerdict && result.note?.includes("偏差"))
+              ? "text-amber-600"
+              : result.verifyVerdict === "no_second_source" ||
+                  (!result.verifyVerdict && !result.crossChecked)
+                ? "text-zinc-400 italic"
+                : "text-zinc-500"
+          }`}
           data-testid="verify-note"
+          data-verdict={
+            result.verifyVerdict ??
+            (result.note?.includes("偏差") ? "diverged" : result.crossChecked ? "agree" : "no_second_source")
+          }
         >
           {result.note ??
             (result.crossChecked

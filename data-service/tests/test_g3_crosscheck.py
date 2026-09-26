@@ -52,6 +52,8 @@ def test_within_threshold() -> None:
     check("G3：阈值内 → crossChecked=true", r.get("crossChecked") is True)
     check("G3：阈值内 → note 标注双源一致", "双源一致" in str(r.get("note")), str(r.get("note")))
     check("G3：主源值保留", r.get("price") == 100.0, str(r.get("price")))
+    # CR9-11：比对成立时必须有机器可读结论（前端不再靠文案子串判色）
+    check("CR9-11🔁：阈值内 → verifyVerdict=agree", r.get("verifyVerdict") == "agree", str(r.get("verifyVerdict")))
 
 
 def test_exceeds_threshold() -> None:
@@ -60,6 +62,7 @@ def test_exceeds_threshold() -> None:
     r = verify_metric("__cc_b", lambda p: p.get_quote("__cc_b", "X"), field="price", threshold_pct=0.5)
     check("G3：超阈值 → note 含偏差标注", "双源偏差" in str(r.get("note")), str(r.get("note")))
     check("G3：超阈值 → 显式列出两源值", "primary: 100.0" in str(r.get("note")) and "backup: 105.0" in str(r.get("note")), str(r.get("note")))
+    check("CR9-11🔁：超阈值 → verifyVerdict=diverged", r.get("verifyVerdict") == "diverged", str(r.get("verifyVerdict")))
 
 
 def test_backup_unavailable() -> None:
@@ -68,12 +71,18 @@ def test_backup_unavailable() -> None:
     r = verify_metric("__cc_c", lambda p: p.get_quote("__cc_c", "X"), field="price")
     check("G3：备源不可用不阻塞主源结果", r.get("price") == 100.0)
     check("G3：备源不可用写入说明", "不可用" in str(r.get("note")), str(r.get("note")))
+    # CR9-11 的**正身**：这一格就是 09-26 实测到的谎言现场——crossChecked 为 true
+    # （"试过了"）却什么都没比对。文案照旧，但结论必须是 no_second_source，
+    # 否则前端会把"没比对上"渲染成与"一致"同样的灰字。
+    check("CR9-11🔁：备源不可用时 crossChecked 仍为 true（语义=试过，非比对成功）", r.get("crossChecked") is True)
+    check("CR9-11🔁：备源不可用 → verifyVerdict=no_second_source", r.get("verifyVerdict") == "no_second_source", str(r.get("verifyVerdict")))
 
 
 def test_no_backup_source() -> None:
     register(["__cc_d"], _P("primary", 100.0))  # 无备源
     r = verify_metric("__cc_d", lambda p: p.get_quote("__cc_d", "X"), field="price")
     check("G3：无备源 → crossChecked=false 且不报错", r.get("crossChecked") is False and r.get("price") == 100.0)
+    check("CR9-11🔁：无备源 → verifyVerdict=no_second_source", r.get("verifyVerdict") == "no_second_source", str(r.get("verifyVerdict")))
 
 
 if __name__ == "__main__":

@@ -238,6 +238,10 @@ class TencentProvider(BaseProvider):
                     "high": h,
                     "low": low_,
                     "volume": _num(row[5]),
+                    # CR9-29（2026-09-26 实测：腾讯日 K 每行恰为 6 个字段，无成交额）：
+                    # 原实现是"这个键不存在"，与主源同一端点两种形态 ⇒ 消费端只能靠猜。
+                    # 现统一为字段恒在、值 null，并在响应 note 里显式说明不可用（R16）。
+                    "amount": None,
                 }
             )
         if not candles:
@@ -248,6 +252,8 @@ class TencentProvider(BaseProvider):
             "interval": "1d",
             "source": self.source,
             "candles": candles,
+            # 与 chain.py 的降级说明是**追加**关系（`result["note"]；merged`），不冲突
+            "note": "备源（腾讯日 K）不提供成交额，amount 恒为 null",
         }
 
     # ---------- 分钟线（C6a，2026-09-25） ----------

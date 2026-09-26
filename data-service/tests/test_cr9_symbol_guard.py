@@ -199,10 +199,39 @@ def test_chain_behaviour() -> None:
         _restore_tencent_http()
 
 
+def test_error_message_names_subject_when_rate_limited() -> None:
+    """CR9-30（2026-09-26）：限速/熔断态下错误文案必须仍点名标的。
+
+    实测两次（今天 16:4x 与 17:5x）把 test_p0 变成红：东财冷却时逐源理由是
+    "eastmoney cooling down (rate-limited); fallback to backup source"——这句话
+    **与入参无关**，于是 detail 里再没有 999999，"是环境噪声还是真回归"无法判定。
+    修法在端点边界补主语（type/code），本用例把该契约钉住。
+    """
+    from fastapi import HTTPException
+
+    import app.main as m
+    import app.providers.akshare_provider as akp
+
+    orig_acquire = akp.EM_LIMITER.acquire
+    akp.EM_LIMITER.acquire = lambda *a, **k: False  # 强制"限速排队失败"
+    try:
+        try:
+            m.quote(type="stock", code="999999")
+            check("CR9-30🔁：限速态下仍抛 502", False, "居然成功了")
+        except HTTPException as e:
+            detail = str(e.detail)
+            check("CR9-30🔁：限速态 → 502", e.status_code == 502, str(e.status_code))
+            check("CR9-30🔁：detail 点名标的（type/code）", "stock/999999" in detail, detail[:160])
+            check("CR9-30🔁：逐源理由原文保留（不吞诊断）", "cooling down" in detail, detail[:160])
+    finally:
+        akp.EM_LIMITER.acquire = orig_acquire
+
+
 def main() -> int:
     test_symbol_for_narrowing()
     test_provider_rejects_without_http()
     test_chain_behaviour()
+    test_error_message_names_subject_when_rate_limited()
     passed = sum(1 for _n, ok, _d in results if ok)
     for name, ok, detail in results:
         if not ok:

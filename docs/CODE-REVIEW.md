@@ -220,6 +220,50 @@ curl ":3000/api/quote?type=hk&code=00700" → {"price":436.6,"source":"tencent",
 
 
 
+### CR9 追加四（09-26 17:1x–18:0x，批次三实施所得：3 条新发现，2 修 1 待判）
+
+#### 新发现 CR9-30（P3）· 限速态下 `/quote` 的 detail 丢掉标的标识，错误无法归因
+`main.py` 的 `/quote` 在 `ProviderError` 时 `detail=str(e)`，而 `_em_request` 被限速拒绝时的文案是
+`"eastmoney cooling down (rate-limited); fallback to backup source"`——**整句与入参无关**。
+于是东财冷却期间 `detail` 里不再有代码，`test_p0`「quote 不存在代码 → 502 + detail」必挂。
+今天该形态出现两次（16:4x、17:5x），每次都把"是环境噪声还是真回归"变成不可判定——
+**这不是环境问题，是可诊断性缺口**（同族：CR9-26 的"失败文案谎称已降级"）。
+**修法**：端点边界补主语 `detail=f"{type}/{code}: {e}"`，逐源理由原文保留在后。
+已修，证据：`test_cr9_symbol_guard` 新 3 项（强制 `EM_LIMITER.acquire` 恒假 → 502 + detail 含 `stock/999999` + 逐源理由不吞）。
+
+#### 新发现 CR9-31（P3）· 东财债列表超时降级后，`/products?type=bond` 只剩 327/1059 行
+16:44 实测：`bond list primary (em) failed: ak.bond_zh_cov 超时（>90.0s），已放弃等待并降级`
+⇒ 同一次 `test_p1` 得 `count=327`（断言要求 >500）；16:59 主源恢复后同一端点 **1059 行 / 5.7s / 无降级 note**。
+⇒ 降级路径的**覆盖面只剩 31%**，且那次降级响应是否带 note **未采集到**（响应已过期，不假装知道）。
+与 CR9-26（hk/crypto 列表按设计无备源）同族：**列表类备源的覆盖率从来没有被断言过**。
+**未修**，需先实测备源列表的真实口径（327 是"备源本来只有这些"还是"分页被截断"）。
+
+#### 新发现 CR9-32（P3）· `kline-range.test.ts:34-38` 是一条我复现不出来、却稳定通过的绿用例
+用例名"end 非法 → error（点名 end）"，实际入参是 `normalizeRange(null, "2026-06-30")`——
+**合法日期**。按当前源码它不该返回 error；实测确认：
+- 独立探针文件连调 3 次同结果 `{start:"2026-06-28", end:"2026-06-30"}`（无 error）；
+- 在该测试文件内插 `console.log`：`r` = `{error:"invalid end format ...: 2026-06-30"}`，而**同一行里紧接着的另一次同参调用返回正常**；
+- 字面量字节核对为纯 ASCII `2026-06-30`（无全角/零宽/尾空格）；清 `node_modules/.vite`（仅 4K）后仍 6/6 绿。
+⇒ 同一函数、同一入参，在同一 tick 内给出两种结果，我给不出解释。**这条与 CR9-15 的 `or True` 同属"绿色不等于有效"**，
+且它比 CR9-15 更危险：断言看着具体、跑着恒过。修法方向：把它换成显式的非法入参（`2026-06/30` 或 `20260630`）并断言点名 end——
+CR9-12 的新用例已经覆盖了这一形态，所以**本条现在的实际价值只剩"别拿它当证据"**。⚠️ 待主人判定是否直接改写。
+
+#### 批次三实施结果（修 10 项：CR9-8/11/12/13/15/16/17/21/25/29/30）
+| 项 | 落点 | 证据 |
+|---|---|---|
+| CR9-15 | `test_backup_db.py:70` 去掉 `or True`，改为断"失败路径不得新增 dev-* 产物" | 🔁 反向实证：注入一个泄漏空壳 → 该断言与"仅 1 个产物"同时变红；无泄漏时实测确无残留 |
+| CR9-8 | `providers/__init__.py` 注释纠错 | 实测 `get_provider("hk")` → `akshare-hk`、`get_provider("us")` → KeyError；原注释两句皆错 |
+| CR9-16 | `akshare_provider.py` 三处本地 `date.today()` → `beijing_today()`/`beijing_now().year`，删掉局部 `from datetime import date as _date` | `test_p2_m8` 新 4 项（把 `beijing_today` 钉成 `2026-03-31` 断请求 beg/end + 源码内不再出现 `date.today()`） |
+| CR9-17 | 缺「季度」列 → 显式 `ProviderError`（含实际列名诊断），不再裸 `KeyError`→500 | `test_p2_m8` 新 3 项 + 正向对照；🔁 旁路守卫 → 精确复现 `KeyError: '季度'` |
+| CR9-12 | `normalizeRange` 加历法校验（`dayStart` 回环比对），非法历法 → `{error}` → 路由 400 | `kline-range.test.ts` 新 5 项，含**闰年 2024-02-29 必须放行 / 非闰年 2026-02-29 拒绝**的成对断言 |
+| CR9-13 | `ProductCharts` 回落动作提为 `fallbackToDaily3M()`，新增"200 + 空 candles"触发；`kline.ts` 1m 路径 `note: ds.note ?? null`（`DsKline` 补 `note` 字段） | 行为：软失败不再渲染成无说明空白图；降级说明得以上屏 |
+| CR9-11 | `chain.py` 新增机器可读三态 `verifyVerdict`；按钮按三态判色，字段缺失时回落原推断 | `test_g3_crosscheck` 由 8→13 项，其中一条专门钉"备源不可用时 `crossChecked` 仍为 true"这个语义坑；🔁 换 HEAD 版 chain.py → 恰好 4 条新断言红 |
+| CR9-21 | `web/.env.example` 实为**半误报**：`INGEST_TOKEN` 已在（注释态），`ALLOWED_ORIGINS` 确缺（`request-origin.ts:29` 在读） | 改成两键均为空值 + 写明 fail-open 语义与暴露面前提；键值一律为空 |
+| CR9-29 | 腾讯日 K 实测每行恰 6 字段（**无成交额可取**）⇒ 走"显式声明"而非"补齐"：`amount` 键恒在 + 值 null + 响应 note 说明；`test_p0` 的断言改为**按源分别断** | 离线 2 项 + 实网 p0 该条转绿（本次实网恰好走备源，等于端到端验过） |
+| CR9-25 | `verify-all.mjs` 声明各套件应跑断言数并对比实跑数，缺口公开打印（放弃"静态数 `ok(`"方案——循环里的调用点会 0..n 次，p2 就是 43 点 vs 38 实跑，必误报） | 本次 7 套件全跑满：16/16、20/20、38/38、27/27、19/19、24/24、**21/21**（p5 串行不再欠 4 条） |
+
+> **CR9 最新合计**：**32 项 = P1×1 + P2×8 + P3×22 + 误报撤回×1**；已修/处置 21 项，余 10 项。状态与批次只在 [FIX-LEDGER.md](FIX-LEDGER.md) 看板维护。
+
 ### 本轮实测的门禁与探针清单（供复核）
 
 | 动作 | 结果 |

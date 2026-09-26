@@ -87,7 +87,11 @@ def quote(
     try:
         return _chain_call(type, lambda p: p.get_quote(type, code))
     except ProviderError as e:
-        raise HTTPException(status_code=502, detail=str(e))
+        # CR9-30：detail 必须点名是哪个标的。限速/熔断态下逐源理由只有
+        # "eastmoney cooling down (rate-limited)"这类**与入参无关**的文案，
+        # code 从错误里消失 ⇒ 运维与 LLM 看不出谁失败（今天两次让 test_p0
+        # 在"环境噪声"与"真回归"之间无法判定）。
+        raise HTTPException(status_code=502, detail=f"{type}/{code}: {e}")
 
 
 @app.get("/quotes")

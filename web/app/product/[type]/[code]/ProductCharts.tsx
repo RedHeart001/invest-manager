@@ -97,6 +97,16 @@ export default function ProductCharts({
       // C6b：新一次**用户主动**加载（rangeKey 非 fallback 触发）清掉上一轮的回落标注；
       // 回落调用自身传入 fallbackNote，不会被这里清掉（清完再设）。
       if (params.fallbackNote === undefined) setFallbackNote(null);
+      // C6b 的回落动作（抛错与"200 空序列"两种成因共用，见 CR9-13）
+      const fallbackToDaily3M = () => {
+        void load({
+          start: shiftDays(beijingToday(), -90),
+          end: beijingToday(),
+          interval: "1d",
+          rangeKey: "3M",
+          fallbackNote: "分钟线暂不可用，已显示近 3 个月日线",
+        });
+      };
       try {
         const q = new URLSearchParams({ type, code, interval: params.interval });
         if (params.interval === "1d") {
@@ -107,6 +117,12 @@ export default function ProductCharts({
         const data = (await res.json()) as KlineResult & { error?: string };
         if (isStale()) return;
         if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
+        // CR9-13：东财抖动/熔断时 1m 是**软失败**——HTTP 200 + 0 根，根本不抛错，
+        // 于是 C6b 的回落只在 catch 里的那条路走不到，页面渲染成一张无说明的空白图。
+        if (params.interval === "1m" && !params.fallbackNote && !data.candles?.length) {
+          fallbackToDaily3M();
+          return;
+        }
         setKline(data);
         // 代码审查修复：调用方显式传入预设 key（此前按 start 日期反推，
         // 只有 1D/3M 能命中，1W/1M/6M/1Y 点击后高亮丢失）
@@ -146,14 +162,9 @@ export default function ProductCharts({
         // C6b（2026-09-25）：分钟线单源无备源（东财抖动/熔断即挂）——1D 档失败时
         // 自动回落 3M 日 K 并显式标注（R15 用户侧永不空白 + R16 降级可感知）。
         // 回落调用 interval 已是 "1d"，不会再进本分支，无循环风险。
+        // CR9-13：动作已提为 fallbackToDaily3M()，与"200 空序列"那条成因共用。
         if (params.interval === "1m" && !params.fallbackNote) {
-          void load({
-            start: shiftDays(beijingToday(), -90),
-            end: beijingToday(),
-            interval: "1d",
-            rangeKey: "3M",
-            fallbackNote: "分钟线暂不可用，已显示近 3 个月日线",
-          });
+          fallbackToDaily3M();
           return;
         }
         setError(e instanceof Error ? e.message : "加载失败");

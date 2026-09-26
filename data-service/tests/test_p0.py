@@ -85,7 +85,23 @@ check(
     "kline 每根 OHLC 合理（low≤min(open,close) 且 high≥max(open,close)）",
     all(c["low"] <= min(c["open"], c["close"]) and c["high"] >= max(c["open"], c["close"]) for c in candles),
 )
-check("kline 字段完整（volume/amount 非空）", all(c.get("volume") is not None and c.get("amount") is not None for c in candles[-30:]))
+# CR9-29：amount 可否取得**取决于源**——主源（akshare/东财）有成交额，备源（腾讯日 K）
+# 接口就没有（实测每行恰 6 字段）。原断言无条件要求"volume/amount 非空"，于是任何一次
+# 降级都必挂，把真实契约缺口混进环境噪声里。现按源分别断：
+#   主源 → 两个字段都非空；备源 → amount 键恒在且为 null，且 note 显式说明不可用。
+_tail = candles[-30:]
+if d.get("source") == "akshare":
+    check(
+        "kline 字段完整（主源 volume/amount 非空）",
+        all(c.get("volume") is not None and c.get("amount") is not None for c in _tail),
+        str(d.get("source")),
+    )
+else:
+    check(
+        "kline 备源契约（amount 恒在且为 null + note 声明不可用）",
+        all(("amount" in c and c["amount"] is None) for c in _tail) and "成交额" in str(d.get("note")),
+        f"source={d.get('source')} note={str(d.get('note'))[:90]}",
+    )
 
 r = get("/kline", type="foo", code="600519")
 check("kline 不支持类型 → 400", r.status_code == 400, r.text[:150])

@@ -76,6 +76,8 @@ def verify_metric(
 
     notes: list[str] = []
     checked = 0
+    # CR9-11：比对结论必须机器可读（前端靠 note 文案子串判色等于猜）
+    verdicts: list[str] = []
     for provider in providers:
         if checked >= max_extra_sources:
             break
@@ -99,11 +101,13 @@ def verify_metric(
             notes.append(f"交叉验证源 {provider.source} 数值不可比对")
             continue
         if diff_pct > threshold_pct:
+            verdicts.append("diverged")
             notes.append(
                 f"⚠ 双源偏差 {diff_pct:.2f}%（{primary_source}: {primary_val} vs "
                 f"{provider.source}: {other_val}，阈值 {threshold_pct}%）"
             )
         else:
+            verdicts.append("agree")
             notes.append(
                 f"双源一致（{primary_source} vs {provider.source}，偏差 {diff_pct:.3f}%）"
             )
@@ -112,4 +116,10 @@ def verify_metric(
         merged = "；".join(notes)
         result["note"] = f"{result['note']}；{merged}" if result.get("note") else merged
     result["crossChecked"] = checked > 0
+    # CR9-11：`crossChecked` 的语义是"**尝试过**比对"，不是"比对成功"——实测出现过
+    # crossChecked:true 同时 note 写"交叉验证源 akshare 不可用"。这里给出三态结论，
+    # 让前端不必再从中文文案里猜（R16：降级既要可感知，也要可判定）。
+    result["verifyVerdict"] = (
+        "diverged" if "diverged" in verdicts else "agree" if "agree" in verdicts else "no_second_source"
+    )
     return result

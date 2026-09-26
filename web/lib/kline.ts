@@ -38,6 +38,9 @@ type DsKline = {
   interval: string;
   valueOnly?: boolean;
   source: string;
+  // CR9-13：ds 的降级说明（如"主源不可用，已降级至 tencent"）必须能透到 web 侧，
+  // 否则 1m 路径只能硬写 note: null——用户看到的是正常数据，实际是降级产物（违 R16）。
+  note?: string | null;
   candles: { date: string; open: number; high: number; low: number; close: number; volume: number | null }[];
 };
 
@@ -100,6 +103,19 @@ export function normalizeRange(
   }
   if (end && iso(end) === null) {
     return { error: `invalid end format (expect YYYY-MM-DD): ${end}` };
+  }
+  // CR9-12：只校验形态会放过 2026-02-31 这种"不存在的那天"——dayStart() 得 Invalid Date，
+  // 下面两个比较都是 NaN 比较（恒 false），于是窗口被上游静默改写（实测请求 02-31 返回从
+  // 03-03 起，调用方以为自己要的是 2 月底）。历法非法同样按 A2-② 的契约返回 400。
+  const calendarInvalid = (s: string) => {
+    const d = dayStart(s);
+    return Number.isNaN(d.getTime()) || d.toISOString().slice(0, 10) !== s;
+  };
+  if (start && calendarInvalid(start)) {
+    return { error: `invalid start date (no such calendar day): ${start}` };
+  }
+  if (end && calendarInvalid(end)) {
+    return { error: `invalid end date (no such calendar day): ${end}` };
   }
   const s = iso(start) ?? isoAddDays(todayIso(), -90);
   const e = iso(end) ?? todayIso();
@@ -228,7 +244,8 @@ export async function getKlineRange(
       phases: [],
       cachedDays: 0,
       fetchedDays: ds.candles.length,
-      note: null,
+      // CR9-13：原为硬编码 `note: null`，把 ds 的降级说明整条丢掉
+      note: ds.note ?? null,
     };
   }
 

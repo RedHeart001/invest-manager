@@ -49,3 +49,38 @@ describe("normalizeRange（CR7-2/A2-②：非法格式必须报错，不得静�
     if ("error" in r) expect(r.error).toContain("start must be <= end");
   });
 });
+
+// CR9-12（2026-09-26）：形态合法但**历法不存在**的日期必须按 A2-② 同一契约报错。
+// 原实现只跑 /^\d{4}-\d{2}-\d{2}$/，`2026-02-31` 放行后 dayStart() 得 Invalid Date，
+// 下面两个比较全是 NaN 比较（恒 false）⇒ 窗口被上游静默改写（登记时实测：请求 02-31
+// 返回从 03-03 起，调用方以为拿到的是 2 月底）。
+describe("normalizeRange（CR9-12：形态过 ≠ 历法过，不存在的日期必须报错）", () => {
+  it("2026-02-31（2 月没有 31 号）→ error 且点名 start", () => {
+    const r = normalizeRange("2026-02-31", null);
+    expect("error" in r).toBe(true);
+    if ("error" in r) expect(r.error).toContain("invalid start date");
+  });
+
+  it("2026-02-30 → error 且点名 end", () => {
+    const r = normalizeRange(null, "2026-02-30");
+    expect("error" in r).toBe(true);
+    if ("error" in r) expect(r.error).toContain("invalid end date");
+  });
+
+  it("月份越界 2026-13-01 → error", () => {
+    const r = normalizeRange("2026-13-01", null);
+    expect("error" in r).toBe(true);
+  });
+
+  it("反向对照：非闰年 2026-02-29 拒绝，而闰年 2024-02-29 必须放行", () => {
+    // 这条是"判据不是粗暴 day<=28"的证据——否则会把真实存在的闰日也拒掉。
+    expect("error" in normalizeRange("2026-02-29", null)).toBe(true);
+    const leap = normalizeRange("2024-02-29", "2024-03-01");
+    expect(leap).toEqual({ start: "2024-02-29", end: "2024-03-01" });
+  });
+
+  it("反向对照：常规合法日期不受影响（证明不是恒假桩）", () => {
+    const r = normalizeRange("2026-01-01", "2026-06-30");
+    expect(r).toEqual({ start: "2026-01-01", end: "2026-06-30" });
+  });
+});

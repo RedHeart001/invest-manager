@@ -67,7 +67,12 @@ def test_backup_integrity_and_corrupt_cleanup() -> None:
             f.write(b"this is not a sqlite database" * 10)
         dest2 = backup_db.backup(bad_db, outdir)
         check("D1：损坏源备份失败返回空", dest2 == "", str(dest2))
-        check("D1：失败产物不残留（--list 干净）", not any(f.startswith("dev-") for f in os.listdir(outdir) if f != os.path.basename(dest)) or True, "bad.db 备份失败后无新产物")
+        # CR9-15：原断言末尾挂着 `or True` → 恒真，把这条防线变成了假覆盖（C34）。
+        # 去掉后按真实语义断：失败路径不得在 out 目录留下新的 dev-* 产物。
+        leftovers = [
+            f for f in os.listdir(outdir) if f.startswith("dev-") and f != os.path.basename(dest)
+        ]
+        check("D1：失败产物不残留（--list 干净）", not leftovers, str(leftovers))
         # 精确核对：out 目录中 db 文件数量 = 1（只有 good 的备份）
         dbs = [f for f in os.listdir(outdir) if f.endswith(".db")]
         check("D1：out 目录仅 1 个备份产物", len(dbs) == 1, str(dbs))
