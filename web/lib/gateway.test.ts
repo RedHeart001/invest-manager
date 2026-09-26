@@ -11,6 +11,17 @@ import { buildSystemPrompt, executeAgentTool, getAgentTools, gatewayStatus } fro
 import { stopAllMcp } from "./mcp";
 
 const savedEnv = { ...process.env };
+// CR9-14：本文件的工具用例原会真打实时链路（get_quote → ds → 东财）。实测两次实证其
+// 不可复现：ds 饥饿态下 184/185（撞 vitest 默认 5s），服务恢复后 185/185 且同一用例仅
+// 1029ms——同一份代码只换外部源健康度就翻转，"vitest 全绿"因此失去判别力。
+// 现按本仓库既有约定（见 data-service.test.ts）stub globalThis.fetch，精确复现两种失败形态。
+// 真实降级链的覆盖不在此处：ds 离线套件（test_g6_hk / test_p2_m8 / test_tencent_minute）
+// 与 web 集成套件（scripts/test-p4.mjs、test-p6.mjs）。
+const realFetch = globalThis.fetch;
+
+afterEach(() => {
+  globalThis.fetch = realFetch;
+});
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "gateway-test-"));
 const localServer = path.resolve(__dirname, "..", "scripts", "mcp-local-util.mjs");
 
@@ -81,9 +92,22 @@ describe("命名空间分派", () => {
   });
 
   it("内置工具执行失败也返回结构化结果（降级不抛错）", async () => {
-    const r = await executeAgentTool("get_quote", { type: "stock", code: "600519" });
-    expect(typeof r.ok).toBe("boolean");
-    expect(typeof r.summary).toBe("string");
+    // 形态①：连不上（ds 未起 / 网络不可达）→ dsGet 抛 DataServiceError，executeTool 兜住
+    globalThis.fetch = (() => Promise.reject(new TypeError("fetch failed"))) as unknown as typeof fetch;
+    const r1 = await executeAgentTool("get_quote", { type: "stock", code: "600519" });
+    expect(r1.ok).toBe(false);
+    expect(r1.summary).toContain("unreachable");
+
+    // 形态②：ds 在跑但该标的取数失败（502 + detail）→ 失败理由原样交给 LLM，不许变空白
+    globalThis.fetch = () =>
+      Promise.resolve({
+        ok: false,
+        status: 502,
+        json: () => Promise.resolve({ detail: "all sources failed: akshare: cooling down; tencent: quote empty" }),
+      } as unknown as Response);
+    const r2 = await executeAgentTool("get_quote", { type: "stock", code: "600519" });
+    expect(r2.ok).toBe(false);
+    expect(r2.summary).toContain("all sources failed");
   });
 });
 

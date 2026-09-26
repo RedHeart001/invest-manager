@@ -1,7 +1,7 @@
 """P1 集成测试：产品列表接口 + 行情覆盖（股票/场内基金/场外基金/可转债）。
 
 运行（先启动 uvicorn）：
-    cd data-service && PYTHONUTF8=1 .venv/Scripts/python tests/test_p1.py
+    cd data-service && .venv/Scripts/python tests/test_p1.py
 
 注意：会触发少量外部请求（东财/天天基金），避免连续高频执行。
 """
@@ -10,6 +10,12 @@ import json
 import sys
 
 import requests
+# CR9-14：用例名含 🔁 等非 GBK 字符，Windows GBK 控制台会 UnicodeEncodeError。
+# 自带 UTF-8 输出后，跑本脚本不再需要 PYTHONIOENCODING（errors=replace 兜极端情况）。
+for _s in (sys.stdout, sys.stderr):
+    if hasattr(_s, "reconfigure"):
+        _s.reconfigure(encoding="utf-8", errors="replace")
+
 
 BASE = "http://localhost:8000"
 results: list[tuple[str, bool, str]] = []

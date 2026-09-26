@@ -1,7 +1,7 @@
 """P0 阶段集成冒烟测试（对运行中的 data-service 执行）。
 
 运行方式（先启动 uvicorn）：
-    PYTHONUTF8=1 .venv/Scripts/python tests/test_p0.py
+    .venv/Scripts/python tests/test_p0.py
 
 覆盖：/health、/quote（沪深创业板 + 错误路径）、/kline（区间过滤 +
 数据合理性）、quote 与 kline 当日交叉验证。
@@ -11,6 +11,12 @@ import json
 import sys
 
 import requests
+# CR9-14：用例名含 🔁 等非 GBK 字符，Windows GBK 控制台会 UnicodeEncodeError。
+# 自带 UTF-8 输出后，跑本脚本不再需要 PYTHONIOENCODING（errors=replace 兜极端情况）。
+for _s in (sys.stdout, sys.stderr):
+    if hasattr(_s, "reconfigure"):
+        _s.reconfigure(encoding="utf-8", errors="replace")
+
 
 BASE = "http://localhost:8000"
 TIMEOUT = 30
