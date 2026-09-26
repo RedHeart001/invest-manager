@@ -4,7 +4,9 @@
 - 日 K：`web.ifzq.gtimg.cn/appstock/app/fqkline/get`（前复权 qfq）
 - 分钟线：`ifzq.gtimg.cn/appstock/app/minute/query`（当日分时，C6a 2026-09-25；
   **累计量/额必须 diff 成增量**再返回——东财主源口径为每分钟增量）
-- 不覆盖：可转债日 K（实测返回空）、场外基金（无）、加密
+- 不覆盖：可转债日 K（实测返回空）、场外基金（无）、加密。
+  **场外基金由 `_symbol_for` 按场内判据强制拒绝（CR9-1）**——否则同码不同品种
+  （000001/110022）会把别家品种的序列当成该基金交付。
 """
 
 import os
@@ -48,6 +50,18 @@ def _symbol_for(type_: str, code: str) -> str | None:
     """
     if type_ == "hk":
         return _hk_symbol(code)
+    if type_ == "fund":
+        # CR9-1：本 provider 是**场内**备源（见模块 docstring），必须用场内判据收窄。
+        # 同一 6 位数字在基金与股票/转债两个空间指代两个品种——000001 是华夏成长混合
+        # （净值 1.295）也是平安银行 sz000001，110022 是易方达消费行业（净值 2.78）
+        # 也是 sh110022 的交易所序列（140+ 元级）。按前缀猜交易所会把**别家品种的价格
+        # 序列**当成该基金交付，且 chain_call 会标成"已降级但成功"，web 一取数就
+        # upsert 进 KlineDaily(type,code,date) 形成持久污染（C26 / §C-4 / R16）。
+        # 场外基金一律返回 None → 上层抛 ProviderNotSupported → 显式降级，不冒领。
+        from .akshare_provider import _is_exchange_traded_fund
+
+        if not _is_exchange_traded_fund(code):
+            return None
     return _symbol(code)
 
 

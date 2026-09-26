@@ -161,8 +161,30 @@ def test_minute_unsupported_type_rejected() -> None:
 
 
 def test_minute_otc_fund_empty_raises() -> None:
-    """场外基金（012414 实测返回单行占位 '  0'）→ 解析为空 → ProviderError，不静默半成品。"""
+    """分钟线的场外基金防线（CR9-1 收紧后的两层）：
+    ① 场外代码在 `_symbol_for` 就被拒 → `ProviderNotSupported`，**根本不发出请求**；
+    ② 场内代码若上游返回空占位（如 '  0'）→ `ProviderError`，不静默半成品。
+    （此用例此前只用 012414 验 ②，而 012414 属场外——正好绕过了串号缺陷。）
+    """
+    calls = {"n": 0}
+
+    def _counting_get(url, params=None, **kw):
+        calls["n"] += 1
+        raise AssertionError("场外代码不应发出请求")
+
     orig_requests = tp.requests
+    tp.requests = types.SimpleNamespace(get=_counting_get)
+    try:
+        try:
+            tp._provider.get_kline("fund", "012414", interval="1m")
+            check("CR9-1：分钟线场外基金被拒", False, "未抛异常")
+        except tp.ProviderNotSupported:
+            check("CR9-1：分钟线场外基金 → ProviderNotSupported（守卫在请求之前）", True)
+        except Exception as e:  # noqa: BLE001
+            check("CR9-1：分钟线场外基金被拒", False, f"{type(e).__name__}: {e}")
+        check("CR9-1：场外分钟线路径零次请求", calls["n"] == 0, f"实际 {calls['n']} 次")
+    finally:
+        tp.requests = orig_requests
 
     class _Resp:
         status_code = 200
@@ -174,15 +196,16 @@ def test_minute_otc_fund_empty_raises() -> None:
             return {
                 "code": 0,
                 "msg": "",
-                "data": {"sz012414": {"data": {"data": ["  0"], "date": "20260924"}, "qt": {}}},
+                "data": {"sz159915": {"data": {"data": ["  0"], "date": "20260924"}, "qt": {}}},
             }
 
+    orig_requests = tp.requests
     tp.requests = types.SimpleNamespace(get=lambda url, params=None, **kw: _Resp())
     try:
-        tp._provider.get_kline("fund", "012414", interval="1m")
-        check("C6a：场外基金空数据 → ProviderError", False, "未抛异常")
+        tp._provider.get_kline("fund", "159915", interval="1m")
+        check("C6a：场内 ETF 空数据 → ProviderError", False, "未抛异常")
     except tp.ProviderError:
-        check("C6a：场外基金空数据 → ProviderError（不静默半成品）", True)
+        check("C6a：场内 ETF 空数据 → ProviderError（不静默半成品）", True)
     finally:
         tp.requests = orig_requests
 
