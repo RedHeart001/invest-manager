@@ -6,13 +6,13 @@
 >
 > **提新发现前先查**文末「附录 · 已核验排除的误报（跨轮累计）」，避免重复提已证伪项。
 
-> **速览**：这里只记"各轮审查**发现了什么**"，修没修、怎么修、按什么顺序修都看 [FIX-LEDGER.md](FIX-LEDGER.md)。**当前轮次是 CR8（2026-09-24 界面语义审查，7 项发现：CR8-1…6 已拍板待实施，CR8-7 转 OPT-2 候选）**；**CR7（2026-09-20 第二轮·全项目审查，14 项发现）仍开放**，两轮并行。已闭环轮次（CR1–CR6）只留压缩结论+指针。编号黑话（CRn / CR-xx / G / V）先查下方「轮次对照表」。
+> **速览**：这里只记"各轮审查**发现了什么**"，修没修、怎么修、按什么顺序修都看 [FIX-LEDGER.md](FIX-LEDGER.md)。**当前轮次是 CR9（2026-09-26 全项目审查，23 项发现：P1×1 + P2×5 + P3×17，全部未处置，等主人拍板）**；CR8 开放（6 项已拍板待实施，实测确认代码一行未动）；**CR7 已全部闭环**（状态只在 [FIX-LEDGER.md](FIX-LEDGER.md) 看板维护，本行只给指针）。已闭环轮次（CR1–CR6）只留压缩结论+指针。编号黑话（CRn / CR-xx / G / V）先查下方「轮次对照表」。
 
 ---
 
 ## 轮次 ↔ 编号 ↔ commit 对照表
 
-> 本项目历史上并行存在过四套编号，这是唯一对照表。**规范轮次为连续的 CR1…CR7。**
+> 本项目历史上并行存在过四套编号，这是唯一对照表。**规范轮次为连续的 CR1…CR9。**
 
 | 轮次 | 日期 | commit | 当时的文档称谓 | 编号前缀 | 状态 |
 |---|---|---|---|---|---|
@@ -22,8 +22,9 @@
 | **CR4** | 09-15/16 | `4905095` | "第四轮审查（CR4）" | C26–C33（P1×5 + P2×12 + P3×25） | 已闭环；C31 验证未做 |
 | **CR5** | 09-17 | `4905095` | "第五轮审查（CR5）" | C34（P1×2 + P2×1 + 缺口×3 + P3×6） | 已闭环；3 项暂不处理 |
 | **CR6** | 09-18~20 | `2efda87` | "第一轮·全项目"（**误名**） | `CR-01..22` + `G1–G7` + `V1–V3` | 已处置；遗留 G3/G6/G7 |
-| **CR7** | 09-20 | `2efda87`（被审代码） | "第二轮·全项目"（**误名**） | `CR7-1..14` | 开放；逐项状态见 FIX-LEDGER 看板 |
-| **CR8** | 09-24 | `3b07643`（被审代码） | 界面语义审查（主人本地实跑点击驱动） | `CR8-1..7` | 开放；6 项已拍板待实施，CR8-7 转 OPT-2 |
+| **CR7** | 09-20 | `2efda87`（被审代码） | "第二轮·全项目"（**误名**） | `CR7-1..14` | 已闭环（逐项状态见 FIX-LEDGER 看板；余 3 项手测与门禁复现见 CR9-14） |
+| **CR8** | 09-24 | `3b07643`（被审代码） | 界面语义审查（主人本地实跑点击驱动） | `CR8-1..7` | 开放；6 项已拍板待实施（09-26 实测确认代码一行未动），CR8-7 转 OPT-2 |
+| **CR9** | 09-26 | `02f0e95`（被审代码，工作树干净） | 全项目审查（CR7 闭环复核 + 两路并行审计 + 实时接口/DB 探针） | `CR9-1..23` | 开放；**23 项全部未处置，等主人拍板** |
 
 **为什么 CR6/CR7 会"误名"**：git 用的是连续"第 N 轮"（CR2–CR5），而 09-18 起文档重新从"第一轮"计数，测试文件却延续内部编号 `test_cr6_*.py`，PLAN 又并行维护 C/O/R 系列——四套编号各说各话。
 
@@ -37,7 +38,129 @@
 
 ---
 
-## CR8 · 界面语义审查（2026-09-24，当前轮）
+## CR9 · 全项目审查（2026-09-26，当前轮）
+
+> **审查对象**：工作树 `dev` @ `02f0e95`（`git status --porcelain` 为空，无未提交改动）。
+> **审查方式**：三条腿取证——① **闭环复核**：CR7 的 14 项 + C6 逐条回代码取行号，不采信账本与注释；② **两路并行审计**（web 侧 / data-service 侧各一路，含 CR7 五个修复 commit 的 diff 复盘）；③ **实时探针**：双服务在跑（web :3000 / ds :8000），用 `curl` 打真实端点、用 python `sqlite3` 只读查 `dev.db`，并按账本门槛复跑 `tsc` / `vitest` / ds 12 个离线套件。每条发现都要能由一条命令或一段代码复现。
+> **两条纪律**：① 不采信注释与文档的"已实现/已修复"，以运行行为为准；② **本轮跑了测试与真实接口**（区别于 CR7/CR8 的"未运行任何测试"），文中数字均为 09-26 实测值。
+> **去重**：已逐条比对 CR6 排除 9 项、CR7 排除 8 项、整理期新增 1 项、CR6 可优化项 🔵 保留 5 项，以及 CR8-1…7 / OPT-2 / G7 / C31 的既有口径；本轮新条目全部避开。审计过程中**撤回 1 条**（`backup_db.py` 残留空壳清理不可达——实测 19/19 通过证明损坏源不会创建文件），见文末附录。
+> **总判断**：23 项 = **P1×1 + P2×5 + P3×17**。与 CR8 的结论同构且更严重一层：**CR7 的代码层修复全部落地且质量可靠（14/14 + C6 逐条行号可查），错的是"闭环"这个词**——三项手测从未执行、门禁今天不可复现、以及两项修复自身带出新缺陷（CR9-2 由 A3 引入、CR9-6 由 B2c 半落地）。另有一类从未被任何一轮抓到的问题：**备源在服务时把语义或身份丢掉**（CR9-1/6/7），以及**限流计数单位与实际 HTTP 请求数差一个量级**（CR9-3），后者是长期熔断的真正根因，也直接改变 CR8 批次二 / OPT-2 的前提。归并为六个根因：① 降级即丢身份/语义（CR9-1/6/7）② "修复只做了一半"第 4 次复现（CR9-2/6/13）③ 计数与单位口径错位（CR9-3/9/22）④ 状态写给用户与 LLM 但口径是错的（CR9-4/5/11/12）⑤ 验收门禁不可复现（CR9-14/15）⑥ 状态/指针层漂移（CR9-23）。
+
+### 处置总览
+
+| 编号 | 严重度 | 一句话 | 关联需求/约束 | 证据 |
+|---|---|---|---|---|
+| **CR9-1** | **P1** | 腾讯备源按数字前缀映射标的，**场外基金被串成同码沪市品种**，错数据会被写进 `KlineDaily` | C26 / §C-4 / R16 / R11 | `tencent_provider.py:20-27`（`_symbol`）vs `:286`（注册含 fund）；缺 `sina_provider.py:18-23` 式守卫与 `akshare_provider.py:145-147` 权威判据；**实测**见详述 |
+| **CR9-2** | P2 | CR7-5/A3 的"异常退出"分支把**服务端 error 事件全覆盖**成"连接中断" | R16 / R17（修复自身引入） | `ChatUI.tsx:302-304` vs `:350-362`；`api/chat/route.ts:260-279`（发 error 后不发 done） |
+| **CR9-3** | P2 | 东财令牌**按 akshare 函数计次**，1 次 acquire 实发 ~10–20 个 HTTP 请求 | C29 / R15 / limiter 自记事实 | `limiter.py:118-121` + `pipeline.py:258/:500` + akshare `stock_board_concept_em.py:47/:440`（`fetch_paginated_data`）与 `:421-426`（传名称时重拉全表） |
+| **CR9-4** | P2 | 02:00–08:30 之间启动服务 → **当天主数据同步整日不发生** | R15 / R10（CR7-7/C1 修复的残留） | `sync_scheduler.py:35`（`DEFAULT_SYNC_HOUR=2`）+ `:143-148` + `:154-176`（`while/else` 唯一出口是 break）+ `hotspot/scheduler.py:26`（8:30 前不补跑） |
+| **CR9-5** | P2 | `POST /sync/run` 无 type 白名单：未知类型跑成 0 行却**记成功并置 `lastDate`**，抑制当天真实同步 | C1 族 / R15 / C12 | `main.py:268-275`（`type` 原样透传）+ `sync_scheduler.py:71-73`（遍历未知键得空）+ `:93-101`（无条件置 lastDate） |
+| **CR9-6** | P2 | 币种只在"主源 + 现价"成立：**东财一冷却，港股就变回无单位数字**；指标卡/明细表/分类浏览从未接 | R8 / R12 / R16（CR7-4/B2c 半落地） | `tencent_provider.py:91-105` 无 `currency`；`browse.ts:103-117`；`page.tsx:169-174`、`:370-373`；**实测** `/quote?type=hk&code=00700` 返回 436.6 无 currency |
+| **CR9-7** | P3 | 行情 `timestamp` 三源三形态**原样渲染**（14 位紧凑串直接上屏） | 界面可读性 / R16 | `akshare_provider.py:275-280`（ISO）、`tencent_provider.py:99`（`f[30]` 紧凑）、hk 分支带空格；`page.tsx:295`、`QuoteCard.tsx:92` 原样输出 |
+| **CR9-8** | P3 | CR7-14-④ 的注释对齐**自身写错**：称 hk 用 `register_chain`、`get_provider("hk")` 抛 KeyError | 落笔纪律「不臆测」 | `providers/__init__.py:39-40` vs `hk_provider.py:326`（`register(["hk"], provider)`） |
+| **CR9-9** | P3 | 快照刷新的限速集合 `EM_TYPES` 漏 hk（48 批无限速打东财 ulist） | C29 / R15 | `market-snapshot.ts:12`（`{"stock","bond"}`）+ `:127-129` + `hk_provider.py:148-159`；⚠️ 影响幅度**未实测** |
+| **CR9-10** | P3 | `/api/events` 与工具执行路径未过 `lib/validate`（CR7-6 的单一来源有两条漏接线） | C33 / R15 | `api/events/route.ts:7-12`；`tools.ts:236/:265/:382`；lib 层有 type 门（`events.ts:101`）与 TTL 缓存，故耗额度影响有限 |
+| **CR9-11** | P3 | `crossChecked` 语义是"已尝试比对"而非"已比对成功"，前端又用**文案子串**决定颜色 | R13 / R16 | `chain.py:84,114`；`VerifyQuoteButton.tsx:52-61`；**实测** 返回 `crossChecked:true` 同时 note 写"交叉验证源 akshare 不可用" |
+| **CR9-12** | P3 | `normalizeRange` 校验形态不校验历法：`2026-02-31` 放行，窗口被静默改写 | A2-② 的同一契约 | `kline.ts:95-110` + `:71-73`（`dayStart` 对非法历法得 Invalid Date）；**实测** 两次请求均 200，返回区间从 03-03 起 |
+| **CR9-13** | P3 | C6b 只覆盖"请求抛错"，**200 + 空 candles 不回落 3M**；且 1m 透传把 ds 的 note 丢了 | R15 / R16（C6b 计划原文含"返回空 candles"） | `ProductCharts.tsx:144-158`（仅 catch 分支）；`kline.ts:219-233`（1m 路径 `note: null`） |
+| **CR9-14** | P3 | 验收门禁**今天不可复现**：vitest 181/182、ds 两套件在 GBK 控制台崩、账本记"8 套件"实为 12 个文件 | R9 / 落笔纪律「可复现」 | `gateway.test.ts:83-87`（真打实时链路，实测 5.53s > vitest 默认 5s，连跑 2 次同挂）；`test_cr7_research.py:42`/`test_p2_m8.py:29` 的 `check()` 名内含 🔁 |
+| **CR9-15** | P3 | 回归防线里有一条**恒真断言**（末尾 `or True`），C34 意义上的假覆盖 | C34 | `tests/test_backup_db.py:64` |
+| **CR9-16** | P3 | 分钟线取当日窗口用**本地时区** `date.today()` | §B 北京时间口径 / CR-06 | `akshare_provider.py:424-427`（同文件其余处已走 `beijing_*`） |
+| **CR9-17** | P3 | 基金持仓的 `df["季度"]` 在 try 之外，上游改列名 → 裸 `KeyError` → 500 而非 200+degraded | R10 | `akshare_provider.py:605-611` |
+| **CR9-18** | P3 | 令牌桶参数**按导入顺序首调用获胜**，akshare 侧显式调参静默失效 | C29 | `limiter.py:118-121` + `pipeline.py:58`（无参先注册）+ `akshare_provider.py:70-78`；当前默认值恰好相同故无症状（`:25-30`） |
+| **CR9-19** | P3 | 死代码：`QuoteCard.tsx` 零 importer 且自带缺 `currency` 的私有 `Quote` 类型；`browse` 的 `stale` 字段零消费者 | 批次 D「不留声明了没做的模糊态」 | `grep -rn "QuoteCard" web/app web/lib web/scripts` = 0；`browse.ts:23/:112` |
+| **CR9-20** | P3 | `/api/market/refresh` 仍 `maxDuration=800`——同一轮 C3 刚按实测把 `/api/sync` 抬到 1500 | C3/CR7-9 口径 | `market/refresh/route.ts` vs `api/sync/route.ts:12`；⚠️ 刷新总耗时**未实测** |
+| **CR9-21** | P3 | `web/.env.example` 缺 `INGEST_TOKEN` / `ALLOWED_ORIGINS` ⇒ 开发态落库与来源校验 **fail-open** | G7 关联 | `api/hotspots/ingest/route.ts:10-12`（`if (expected && ...)`）+ `web/.env.example` 键位；compose 侧有 `:?` 保护（`docker-compose.yml:31`） |
+| **CR9-22** | P3 | 同源族口径不齐：同一文件里一处用 helper 一处内联读 env；**非 2xx 继续等、异常反而放行** | C29 族 | `sync_scheduler.py:56` vs `:159`；`:161` vs `:165` |
+| **CR9-23** | P3 | 状态/指针层漂移 6 处（PLAN R13/G3 仍标待实施、CODE-REVIEW 速览与对照表仍说 CR7 开放、FIX-LEDGER D4-④ 仍标待办、PROGRESS 基线停在 148/148、rules 入口仍写"当前开放轮次 CR7"、FIX-LEDGER:140 的"34 条定义在工作树"为假） | 文档单一来源纪律 | 见详述 P3 段末 |
+
+### 详述 · P1
+
+#### CR9-1（P1）· 腾讯备源把场外基金串成同码沪市品种，且错误数据会落库
+
+- **现象（09-26 实测）**：东财/天天基金处于冷却时（**今天就是这种状态**，处处 `eastmoney cooling down`），
+  ```
+  GET :8000/kline?type=fund&code=110022&start=2026-06-01&end=2026-06-30
+  → {"source":"tencent","note":"主源不可用，已降级至 tencent（akshare: fund nav history empty after filter: 110022）",
+     "candles":[{"date":"2015-01-05","close":146.88}, … 37 根]}
+  GET :8000/kline?type=fund&code=000001 → source=tencent，序列为 7.248/7.208（平安银行 sz000001）
+  ```
+  110022 是**易方达消费行业**（场外基金，净值约 2.78），146.88 是 `sh110022` 的转债/交易所序列；000001 华夏成长混合净值 1.295，返回的却是 `sz000001` 平安银行。**同一代码在两个市场指代两个不同品种。**
+- **根因**：`tencent_provider.py:20-27` 的 `_symbol()` **只看数字前缀**（`0/3/12/15/16/18` → `sz`，`5/6/9/11` → `sh`），不知道传入的 `type_` 是 fund；而 `:286` 把它注册进了 `["stock","fund"]` 的备源链。同文件 `:33-45` 的 `_hk_symbol` 注释里写着"绝不能复用 `_symbol`"——**同一个陷阱在港股侧被识别并规避了，在基金侧没有**。正确判据在项目里是现成的：`akshare_provider.py:145-147 _is_exchange_traded_fund()`（场内 ETF/LOF 前缀集合），新浪备源正是用 `_etf_symbol`（`sina_provider.py:18-23`）返回 `None` → `ProviderNotSupported` 来拒绝场外代码。
+- **影响链**：web `/api/kline` 拿到后会按 `(type,code,date)` `upsertCandles` 落 `KlineDaily`（`lib/kline.ts` 增量缓存路径）→ **持久污染**；随后详情页 K 线图、区间最高/最低（`page.tsx:173-174`）、R11 归因、R13 双源比对、研报回读（`adapter.py:121-128`）全部消费这批错数据，且 `chain.py:31-36` 会给它加"已降级"的可信 note。违 C26（跨类型唯一键必须含 type）、§C-4（腾讯是**场内**备源）、R16（不得把无据渲染成有据）。
+- **当前库状态（只读核对）**：`KlineDaily` 中 `type='fund'` 的 639 条非场内前缀行仍是 4 位小数的真净值，`fund/110022` 128 行 close=2.781/2.82/2.828，`fund/000001` 无行——**尚未被污染**。触发条件已经具备，任何一次命中该路径的真实取数（含 test-p2）就会写入。
+- **为什么测试没抓到**：`test_tencent_minute.py:161-180` 用 `012414` 演示主备链降级，而该代码恰好**没有**深市同号品种，串号不可见。000001–004499 是场外基金最密的号段，全部与深市股票撞号。
+- **复现**：`curl "http://127.0.0.1:8000/kline?type=fund&code=110022&start=2026-06-01&end=2026-06-30"`（东财冷却期必现；主源正常时返回 `source` 含 `fund-nav`）。
+- **建议**：`_symbol_for()` 对 `type_=="fund"` 除非 `_is_exchange_traded_fund(code)` 一律返回 `None`（→ `ProviderNotSupported` → 上层显式降级）；顺带核对腾讯日 K 是否遵守 `start/end`（实测 000001 请求 2026-06 窗口返回 2024 年起的序列）。按 C34 需配 🔁 反向验证（撤守卫 → 断言场外代码被拒）。**修好之前不建议跑 verify-all**（test-p2 步骤 [3]/[8b] 正是这条 URL）。
+
+### 详述 · P2
+
+#### CR9-2（P2）· A3 的"异常退出"分支把服务端错误全覆盖
+
+`api/chat/route.ts:260-279` 在 catch 里发 `event: error` 后 `finally` 直接 `controller.close()`，**不再发 `done`**。客户端 `ChatUI.tsx:333` 因 `done` 而 `break`，此时 `gotDone=false, expired=false` → `classifyStreamExit` 判成 `abnormal` → `:360-361` 无条件 `setError("连接中断，回答可能不完整——可直接重新发送")`，把 `:302-304` 刚写入的**唯一可行动文案**（如"LLM 未配置：请在 web/.env 设置 LLM_BASE_URL / LLM_API_KEY / LLM_MODEL…保存后重启 dev server 生效"）覆盖掉。即任何一次服务端显式报错，用户都会被告知"网络断了"，并被引导去做一件无意义的事（重发）。违 R16（失败原因如实呈现）/ R17。**建议**：`handleEvent` 里记 `sawErrorEvent=true`，收尾时若为真则不再覆盖。与 CR7-1 的"dataBased 恒真"同属修复只做了一半——A3 达成了"有出口"，但出口在最常见的分支上说错了话。
+
+#### CR9-3（P2）· 令牌计数单位与真实 HTTP 请求数差一个量级
+
+`_EM = get_limiter("eastmoney")`（`pipeline.py:58`）按"**逻辑请求**"计次（C29 的明文口径），一次 `acquire` 对应**一次 akshare 函数调用**。但 akshare 的函数不是单请求：`ak.stock_board_concept_name_em` 内部走 `fetch_paginated_data`（site-packages `akshare/stock/stock_board_concept_em.py:47`，~900 个板块 ÷ pz=100 ≈ 9 页）；`ak.stock_board_concept_cons_em(名称)` 更糟——`:421-426` 若 `symbol` 不是 `^BK\d+` 就**先重拉整张板块映射表**（再 ~9 请求），然后 `:440` 分页取成分。调用点 `pipeline.py:258`（`_board_names`）与 `:500`（`map_board_products`，最多 10 次）传的正是**名称**。⇒ 1 个令牌 ≈ 10–20 次真实东财请求，一次 pipeline ≈ 百次级。这与 `limiter.py:3-6` 自己记录的实测事实（"连续 2+ 请求立即触发惩罚，惩罚覆盖其全部域名"）直接矛盾，是 CR7-7 / C0 实测"stock 熔断连坐 hk"的**真正来源**，也是 CR8-1 ③（板块映射未命中噪声）的上游成因。**对既有规划的影响**：CR8-7/OPT-2 立项时算的"单次 pipeline 10 次 acquire、东财必调后更紧"**低估了一个量级**——瓶颈是扇出而不是 acquire 次数，批次二的令牌风险缓解方案（缩短 acquire 超时/重排顺序）打不死这个根。**建议**：把 名称→`BKxxxxx` 映射缓存下来并传 BK 代码（akshare 对 `^BK\d+` 会短路，省掉 ~9 请求），并按成分页计次；同时给 C29 补一条"逻辑请求 ≠ HTTP 请求"的量化事实。
+
+#### CR9-4（P2）· 02:00–08:30 启动 → 当天同步整日不发生
+
+`sync_scheduler._catch_up_if_needed`（`:154-176`）是 `while waited < 600: … else: return`——**唯一出口是 `break`（当日 digest 行数 > 0）**，等满 600s 就 `return` 且不置 `lastDate`，于是当天再没有第二次机会（`add_job` 只在 `DEFAULT_SYNC_HOUR=2`（`:35`）触发，需服务在跑）。而热点侧 `hotspot/scheduler.py:26` 的 `PRE_MARKET=8:30` 之前**不做补跑**（`:96` 直接 return）。两者相加：**任何在 02:00–08:30 之间的启动**，同步都会判定"已过调度时刻"、然后等一个根本不会跑的热点、等满 10 分钟、放弃。第二条独立触发路径：热点跑了但**当日 0 行产出**（`run_pipeline` 在 `items` 为空时根本不 POST，`pipeline.py:642`；或 `emit_ingest` 被 401 拒），count 恒 0 → 同样必放弃。另有口径反转：`:161` 非 2xx → 当作 0 行继续等，`:165` 请求异常 → `break` 放行。`test_c1_catchup_yield.py` 的 5 个用例覆盖了"热点在跑""已有产出""永不结束""已同步"，**恰好没覆盖**"热点 idle 且 count==0"这一条，且用例④名字（before schedule）与实际断言（`lastDate`）不符。**建议**：用热点侧完成态（`hotspot_scheduler._state["lastResult"]/lastRun`）区分"还没跑"与"跑完但没产出"，后者直接 fall through 去同步；补 2 个用例。
+
+#### CR9-5（P2）· `POST /sync/run` 的 type 无白名单，未知类型记成功并抑制当天同步
+
+`main.py:268-275` 把 `type` 原样放进 `payload`，`sync_scheduler.py:71-73` 遍历 `payload["results"]` 里的未知键得到空结果，`:93-101` **无条件**把 `lastDate` 置为今天并把本轮记为成功。后果：一次拼错的类型（如 `heek`/`HK`）会让补跑看门狗（`:146` 读 `lastDate`）与调度器认为"今天已同步"，**当天真实同步被静默抑制**，而 `/sync/status` 显示成功。CR7-10 已把该端点异步化，但没补 type 校验（CR7-6 的校验只做了 web 侧 BFF）。**建议**：进 `_execute` 前用 `get_list_provider(t)` 试解析，未知类型显式失败且**不置 lastDate**。
+
+#### CR9-6（P2）· 币种只在"主源 + 现价"成立
+
+CR7-4/B2c 的账本做法原文写的是"详情页现状区/**指标卡**、搜索结果、`toolGetQuote` summary"。实测：`page.tsx:281` 的现价接了 `priceWithCurrency`，但 `:169-174` 的今开/昨收/最高/最低与 `:370-373` 的 K 线明细表只调 `fmtPrice`；`browse.ts:103-117` 的 `BrowseItem` 根本没有 `currency` 字段（`browse.ts` 不在 d4c9703 的改动清单里），而 `search-client.tsx:317` 渲染的正是它 ⇒ `/search?type=hk` 的 20 个港股价格全无单位。更关键：**`tencent_provider.py:91-105` 的行情 dict 不返回 `currency`**，而 hk 的备源恰是 tencent ⇒
+```
+curl ":3000/api/quote?type=hk&code=00700" → {"price":436.6,"source":"tencent","note":"主源不可用，已降级至 tencent（…）"}  ← 无 currency
+```
+即东财一冷却（本机常态），详情页只剩"436.6"、`profile.ts:85` 的"计价：港币"也消失——正是 CR7-4 当初要消灭的现象，只是换了一条链路复现。**建议**：tencent 按 `type_` 补 `currency`（A股/场内基金/转债=CNY，hk=HKD，us=USD）；指标卡/明细表/浏览复用 `priceWithCurrency`；顺带把 `browse` 的 `stale`（`:112`，零消费者）显出来或删掉（CR9-19）。**验收须配断言**：备源路径（`source="tencent"`）下 currency 仍非空——现有 `currency.test.ts` 只测纯函数，所以这条缺口对测试不可见。
+
+### 详述 · P3
+
+| 编号 | 现象与证据 | 复现/判定 |
+|---|---|---|
+| CR9-7 | `akshare_provider.py:275-280` 出 ISO、`tencent_provider.py:99` 出 `f[30]`（A股为 14 位紧凑串、港股为 `YYYY-MM-DD HH:MM:SS`），`page.tsx:295` 原样拼接渲染 | `curl ":3000/api/quote?type=stock&code=600519"` → `"timestamp":"20260924161444"`，详情页显示成 14 位数字串。建议：provider 侧统一 ISO，web 侧统一格式化 |
+| CR9-8 | `providers/__init__.py:39-40` 称 hk 经 `register_chain` 注册、`get_provider("hk")` 抛 KeyError；实际 `hk_provider.py:326` 用 `register(["hk"], …)` | 该注释是 CR7-14-④ 的"实证核对"产物，本身是新的漂移。只改注释，但要点破：**"标了实证"不等于已核对** |
+| CR9-9 | `market-snapshot.ts:12` `EM_TYPES={"stock","bond"}`，`:127-129` 据此决定是否 `sleep(1500)`；hk 的批量行情走 `hk_provider.py:148-159` 东财 `ulist.np` | hk 约 4707 只 = 48 批，逐批无限速进同一令牌桶。**⚠️ 未实测失败批次率**，不建议按断言下结论；修法 = 把 hk 纳入限速集合（间隔按实测 12/分钟定），不是抽公共常量（CR6 保留项 7） |
+| CR9-10 | `api/events/route.ts:7-12` 只判非空 code；`tools.ts:236/:265/:382` 把 LLM 给的 type/code 直送 ds | 与 CR7-6 的 `lib/validate.ts` 单一来源口径不一致。影响有限：`events.ts:101` 有 type 门（非 stock 不取数）+ 进程内 TTL 缓存；实测任意 code 0.32s/0.02s 返回。端点无 UI 消费者（只有 `scripts/test-p2.mjs:277`）→ **接线或显式裁剪，二选一** |
+| CR9-11 | `chain.py:84` 只要"尝试过"就 `checked+=1`，`:114` `crossChecked = checked > 0`；`VerifyQuoteButton.tsx:52-61` 用 `note.includes("偏差")` 决定琥珀/灰 | 实测 `/api/quote/verify?type=stock&code=600519` → `"crossChecked":true` 且 note 写"交叉验证源 akshare 不可用"。当前 UI 不踩（note 非空时优先显示 note），但契约对外是假声明；子串承载语义与 OPT-1 的结论相悖。建议加机器可读字段（`compared`/`reason`） |
+| CR9-12 | `kline.ts:95-110` 只匹配形态，`dayStart`（`:71-73`）对非法历法得 Invalid Date，比较全 false → 放行 | 实测 `?start=2026-02-31&end=2026-03-05` 两次均 200，返回区间从 03-03 起（窗口被静默改写，无 note）。建议：`!Number.isFinite(dayStart(s))` → 400 |
+| CR9-13 | `ProductCharts.tsx:144-158` 的回落只在 `catch` 内；`kline.ts:219-233` 的 1m 透传把 `note` 置 null | C6b 计划原文含"请求失败/**返回空 candles**"，代码只覆盖前者；空 candles 时用户仍看到空图（与 R15 相悖），且降级 note 丢失 |
+| CR9-14 | 门禁实测：`tsc --noEmit` 0 错；`vitest run` **181/182**（失败项 `gateway.test.ts:83-87`）；ds **12** 个离线套件全绿（cr7_research 23 / p2_m8 49 / g6_hk 28 / tencent_minute 18 / backup_db 19 / cr6_lru 18 / cr6_pipeline 10 / cr6_timeutil 6 / g3_crosscheck 8 / c1 5 / c3 5 / d3 9 = 198），但其中 2 个必须加 `PYTHONIOENCODING=utf-8` | `check()` 用 `print("OK"/"NG "+name)` 输出，而 CR7 起的用例名里带 🔁（`test_cr7_research.py:42`、`test_p2_m8.py:29`）——GBK 控制台下整脚本抛 `UnicodeEncodeError`。账本/PROGRESS 记的"8 套件""182/182"都不可按原命令复现。建议：用例名去 emoji（或 `sys.stdout.reconfigure`），并把 `gateway.test.ts:83` 改为 mock ds 或显式传 timeout |
+| CR9-15 | `tests/test_backup_db.py:64` 断言尾部 `\| … if f != basename(dest)) or True` → 恒真 | 该用例想验"失败产物不残留"，实际永不失败；紧随其后的 `len(dbs)==1` 才真正兜住。C34 要求反向验证，恒真断言属假覆盖，删掉 `or True` 让其成为真断言（或删整条并说明由下一条覆盖） |
+| CR9-16 | `akshare_provider.py:424-427` 用 `_date.today()` 算 1m 的 `beg/end` | §B 明文"data-service 一律用 `timeutil.beijing_*()`，禁用 `date.today()`"（CR-06）。本机 TZ=Asia/Shanghai 无症状，容器/异时区主机上会取到"昨天"→ 空序列 → 502 |
+| CR9-17 | `akshare_provider.py:605-611` 的 `df["季度"]` 不在任何 try 内（try 只包 `_ak_request`） | 上游改列名 → 裸 `KeyError` → `/fund/holdings` 500，而非 R10 要求的 200+degraded。同文件 C2 已为"列缺失"建了显式降级范式（`:362-380`），照搬即可 |
+| CR9-18 | `limiter.py:118-121` `get_limiter(name, **kwargs)` 首调用创建即固定；`pipeline.py:58` 无参先创建，`akshare_provider.py:70-78` 的显式调参被忽略 | 当前默认值（`:25-30`）与显式值恰好相同 ⇒ 无症状。但 CR8 批次二若要调东财参数，**改哪一处都不会生效**。建议：集中一处创建，或 `get_limiter` 对冲突 kwargs 抛错 |
+| CR9-19 | `QuoteCard.tsx` 零 importer（含 `:92` 的裸 timestamp 渲染），且自带缺 `currency` 的私有 `Quote` 类型；`browse.ts:23/:112` 的 `stale` 零消费者 | 属 CR7-3"能力已在、消费侧无出口"同族的反向形态（组件已在、无人消费）。删文件/删字段，或接线，不留模糊态 |
+| CR9-20 | `api/market/refresh/route.ts` 仍 `maxDuration=800` | 同一轮 C3 以实测把 `/api/sync` 抬到 1500；刷新（全类型快照）耗时**从未实测**。建议：先测再一次定数，不照抄（CR7-9 的教训就是"不要按注释 tuning"） |
+| CR9-21 | `web/.env.example` 只有 8 个键，缺 `INGEST_TOKEN`/`ALLOWED_ORIGINS`；`api/hotspots/ingest/route.ts:10-12` 是 `if (expected && …)` 形态 | 键未设 ⇒ 校验整条跳过（fail-open）。compose 侧由 `docker-compose.yml:31` 的 `${INGEST_TOKEN:?}` 强制，所以只有**开发态**暴露。G7 关联，但属"模板缺键导致静默失去保护"，可独立补 |
+| CR9-22 | `sync_scheduler.py:56` 有 `_web_base()` helper，`:159` 内联读 env；`:161` 非 2xx→继续等，`:165` 异常→break 放行 | 口径不齐 + 未来改 base 会漏一处。与 CR9-4 同文件，建议同批修 |
+| CR9-23 | 状态/指针层：① `PLAN.md:31`(R13)/`:427`(G3) 结论仍写"⬜ 待实施"且把 BFF 写成 `?verify=1`（实际 `/api/quote/verify`，且 09-25 已上线）；② `FIX-LEDGER.md:295` D4-④ 仍标"⬜ 待办"而看板 `:33` 已记闭环、代码在 `providers/__init__.py:31-41`；③ `PROGRESS.md:26` 验证基线仍写 vitest **148/148（24 文件）**而同一文件 `:29` 写"CR7 全闭环"；④ `CODE-REVIEW.md:9/:25` 曾写"CR7 仍开放"；⑤ `.claude/rules/project.md:89` 仍写"当前开放轮次 CR7"（**未改**，因不在 docs/ 范围，待主人点头）；⑥ `FIX-LEDGER.md:140` 与 `CODE-REVIEW.md` 附录「整理期新增排除」称"C1–C34 的 34 条定义全在工作树 / `grep -cE … PLAN.md` = 34"——**为假**：实测工作树里 `docs/PLAN.md` 该 grep 返回 **0**，`git show d6ac165:PLAN.md` 亦 0，C1–C34 正文在 `docs/CONSTRAINTS.md`（表格式 34 行），`PLAN.md:8` 已明文"C 正文在 CONSTRAINTS" | 这一批没有行为后果，但会误导下一次改动（尤其⑥——它使一条**已核验排除**的证据命令失效，未来复跑会得出"约束丢了"的相反结论）。⑤ 需要主人点头，因为它在 `.claude/rules/` 不在 `docs/` |
+
+### 本轮实测的门禁与探针清单（供复核）
+
+| 动作 | 结果 |
+|---|---|
+| `cd web && npx tsc --noEmit` | exit 0，无输出 |
+| `cd web && npx vitest run` | **181 passed / 1 failed（31 文件）**，失败项 `lib/gateway.test.ts:83`，重跑单文件同样挂（5.53s > 5s） |
+| `PYTHONIOENCODING=utf-8 PYTHONPATH=. .venv/Scripts/python tests/<12 个>` | 全绿，合计 198 项；缺 `PYTHONIOENCODING` 时 `test_cr7_research` / `test_p2_m8` **崩在 print** |
+| `curl :8000/kline?type=fund&code=110022` | `source=tencent`，37 根，首行 close=146.88（**CR9-1 实证**） |
+| `curl :3000/api/quote?type=hk&code=00700` | 436.6 **无 currency**（**CR9-6 实证**） |
+| `curl :3000/api/quote/verify?type=stock&code=600519` | `crossChecked:true` + note 称备源不可用（**CR9-11 实证**） |
+| `curl ":3000/api/kline?…&start=20260201"` / `start=2026-02-31` | 前者 400（CR7-2/A2-② 生效）；后者 200 且窗口被改（**CR9-12 实证**） |
+| `sqlite3`（`dev.db` 副本，`mode=ro`） | `KlineDaily`：`type='fund'` 非场内前缀 639 行均为真净值；`fund/000001` 0 行 → **尚未污染** |
+| 集成 `verify-all` | **未复跑**（理由见 CR9-1：p2 步骤[3]/[8b] 会命中污染路径） |
+| 密钥自查 | `.env` 未被跟踪、`git log --all -- .env` 全历史空；两个 `.env.example` 密钥位全空 |
+
+> **建议处置顺序与修复计划见 [FIX-LEDGER.md](FIX-LEDGER.md)「CR9 · 修复计划」。** 其中 CR9-1 建议先于 CR8 批次二（批次二要改的正是同一条取数链）。
+
+---
+
+## CR8 · 界面语义审查（2026-09-24，开放轮次）
 
 > **审查对象**：当前工作树（`dev`，HEAD=`3b07643`）+ **本地实跑**（`web` `npm run dev` :3000、`data-service` venv uvicorn :8000，根 `.env` 注入子进程）。
 > **审查方式**：主人实操点击首页热点卡片流提出 6 项观感问题；逐条回代码取行号锚点，并用运行中的服务实测（`GET /api/hotspots?limit=30` 等）。第 7 项由讨论中"可以多源"一句引出，属取数模型候选，不是缺陷。
@@ -260,4 +383,19 @@ CR8-5 删掉面包屑后，详情页没有任何页内回指入口，故本条�
 
 | 怀疑点 | 结论 |
 |---|---|
-| `PLAN.md` 工作树副本"删除了 C18–C23 / C26–C34 完整定义（−145/+31）"（CR7-14-③ / D4-①） | **证伪**：`git diff --stat HEAD -- PLAN.md` = **+36/−5**；`grep -cE '^\s*[-*]?\s*\**C[0-9]+' PLAN.md` = **34**。C1–C34 定义一条不少。原指控在 `code-review.md:402`、`code-review-fix-plan.md:217`、`:321` 三处重复，均已按此结论清除 |
+| `PLAN.md` 工作树副本"删除了 C18–C23 / C26–C34 完整定义（−145/+31）"（CR7-14-③ / D4-①） | **证伪**：`git diff --stat HEAD -- PLAN.md` = **+36/−5**；`grep -cE '^\s*[-*]?\s*\**C[0-9]+' PLAN.md` = **34**。C1–C34 定义一条不少。原指控在 `code-review.md:402`、`code-review-fix-plan.md:217`、`:321` 三处重复，均已按此结论清除。
+  > **⚠️ 2026-09-26 CR9 复验补记（不改原判，只补证据时效）**：上面那条 `grep -cE … PLAN.md = 34` 是在**五文件拆分之前**的 `PLAN.md` 上测的；今天对 `docs/PLAN.md` 重跑同一命令返回 **0**（C1–C34 正文已迁 `docs/CONSTRAINTS.md`，表格式恰 34 行，`PLAN.md:8` 已明文指针）。**结论仍成立（约束一条没丢）**，但任何人按这条证据复跑会得出相反判断 → 已在 [FIX-LEDGER.md](FIX-LEDGER.md) CR9-23-⑥ 登记为文档层待修项。
+
+### CR9 轮排除与撤回（2026-09-26）
+
+> 本轮实测后证伪或撤回的怀疑点，**不要再提**。
+
+| 怀疑点 | 结论 |
+|---|---|
+| 真实密钥/凭据被提交进仓库 | **证伪**：`.env` 未被跟踪（`git ls-files` 只有两个 `.env.example`）、`git log --all -- .env web/.env` 全历史为空、两个模板密钥位全空、`git grep` 密钥形态仅命中 `package-lock.json` 里 `task-list-item` 的假阳性 |
+| 「CR8 批次一代码已写但未提交，工作树有 ~242 行未提交改动」 | **撤回（本审计自身的一次误判）**：`git status --porcelain` 为空、`layout.tsx:19` 无 `sticky`、`web/app/components/PageBack.tsx` 不存在、HEAD `02f0e95` 是纯文档提交——**FIX-LEDGER 的"代码一行未动"记载是对的**。成因：并行审计代理称"改动存在但未入库"，而我未以 `git status` 复核就采信并按"已提交"口径去核对。**纪律回补：subagent 关于版本状态的结论必须由 `git status` / `git show HEAD:<file>` 复核后才可入报告** |
+| 「`.claude/rules/project.md` 的文档路由表缺 `CODE-REVIEW.md` 一行」 | **证伪**：`:100` 就在表内（同一审计代理的误报，已复核原文） |
+| 「`backup_db.py` 损坏源会残留空壳产物，且 D1 的清理路径不可达」 | **证伪**：`sqlite3.connect()` 不落盘，`src.backup()` 抛错时不创建文件；紧随其后的 `len(dbs)==1` 是真断言，实测 19/19 通过。该文件中真正的问题是 `:64` 的恒真断言（已记 CR9-15），不是清理路径 |
+| 「集成产物 `web/verify-suites.txt` 未入库，违反 `.gitignore` 约定」 | **证伪**：该文件当前不存在（`verify-all.mjs:26` 每次写出、无代码读取、未被跟踪），属"一次性产物用完即无"，无需处置 |
+| 「fund K 线在 09-25 之前的实跑里已被腾讯串号数据污染」 | **证伪（目前是潜在缺陷而非既存污染）**：`dev.db` 只读核对——`type='fund'` 的 639 条非场内前缀行全为 4 位小数真净值，`fund/110022` 128 行 close=2.781/2.82/2.828，`fund/000001` 0 行。触发条件已具备（CR9-1 实测可达），但库还干净 |
+| 「hk 分页上限改成截断而非抛错 → 静默缩水主数据」 | **证伪**：与 CR6 排除表同族——C1 空载荷保护 + `sync.ts` 的 70% 缩水保护双兜住；`hk_provider.py:289-291` 的截断有 `log.warning` | |

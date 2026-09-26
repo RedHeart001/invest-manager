@@ -90,7 +90,10 @@
 | **Prisma DateTime 在 SQLite 的存储** | Prisma 存的是 **Unix 毫秒整数**（实测 `typeof(date)='integer'`） | 原生 `INSERT` 若传 ISO 字符串，该行与 Prisma 生成的 `date >= ? / <= ?`（数字比较）**不匹配** → 带日期范围的查询**静默漏行**。V1 实测污染 3 行，导致 K 线图少一根、缓存天数虚高、R13 交叉验证失败。**规则：原生写入必须传 `dayStart(d).getTime()`** |
 | **北京时间口径** | web 侧用北京时间建/查 `(type,code,date)`；data-service 侧曾全部用**本地时区** `date.today()` | TZ≠Asia/Shanghai 时，北京时间 00:00–08:00 区间会出现"回调带 D-1 → D 行永久 running + D-1 重复行"与每日限额错位。**规则：data-service 一律用 `app/utils/timeutil.py` 的 `beijing_*()`，禁用 `date.today()`**（CR-06） |
 | **`/api/kline` 的 `phases` 字段** | 研报与详情页归因同源的契约（P5 落地定稿新增） | 改动 `/api/kline` 响应结构时须同步 `research/adapter.py` |
-| **provider 的 `currency` 字段** | provider 早已返回（hk=HKD / us=USD / sina-bond=CNY），但 `web/lib/data-service.ts` 的 `Quote` 类型**没有该字段**，全 web 侧 `grep currency` 零命中 | 港股在列表与详情页显示成无单位数字（`100` 实为 100 港币）。CR7-4（修复状态见 [FIX-LEDGER.md](FIX-LEDGER.md)） |
+| **provider 的 `currency` 字段** | provider 早已返回（hk=HKD / us=USD / sina-bond=CNY），但 `web/lib/data-service.ts` 的 `Quote` 类型**没有该字段**，全 web 侧 `grep currency` 零命中 | 港股在列表与详情页显示成无单位数字（`100` 实为 100 港币）。CR7-4（修复状态见 [FIX-LEDGER.md](FIX-LEDGER.md)；**09-26 复核：TS 契约已补，但备源侧仍不返回该字段 → 见下一条**） |
+| **备源的"标的身份"（09-26 实测）** | 腾讯 `qt.gtimg.cn` 的符号是 `sh/sz + 6 位数字`，**同一 6 位数字在基金与股票/转债两个空间指代两个品种**：`000001` 场外基金=华夏成长混合（净值 1.295）↔ `sz000001`=平安银行；`110022` 场外基金=易方达消费行业（净值 2.78）↔ `sh110022`=交易所品种（140+ 元级序列） | `tencent_provider.py:20-27 _symbol()` **只看数字前缀、不看 `type_`**，却被注册进 `fund` 备源链（`:286`）。主源（天天基金）一冷却就静默换标的返回，且 web 会把它 `upsert` 进 `KlineDaily(type,code,date)` → **持久污染**。**规则：任何按代码前缀猜交易所的映射，都必须先用该类型的权威判据收窄**——场内基金用 `akshare_provider.py:145-147 _is_exchange_traded_fund()`，参照 `sina_provider.py:18-23 _etf_symbol()` 的"不匹配即 `None` → `ProviderNotSupported`"写法。同文件 `_hk_symbol` 的注释早已点破"绝不能复用 `_symbol`"，但只在港股侧规避了。CR9-1 |
+| **降级不得丢语义字段** | 主源与备源返回的**字段集合不同**：`currency` 只有 `hk_provider`/`openbb_provider`/`sina_bond_provider` 返回，`tencent_provider.py:91-105` 不返回；`timestamp` 三源三形态（akshare=ISO、腾讯 A股=14 位紧凑串、腾讯港股=`YYYY-MM-DD HH:MM:SS`） | 东财冷却（本机常态）时港股价格退化成无单位数字、详情页时间戳变成 `20260924161444`。**规则：新增/修改备源时，逐字段核对是否与主源同形**；展示层若要依赖某字段，必须断言"备源路径下该字段仍非空"（只测纯函数等于没测）。CR9-6 / CR9-7 |
+| **`start/end` 在备源不一定生效** | 腾讯日 K 路径实测忽略请求窗口（要 2026-06 返回 2024 年起的序列） | 上层若信任备源的窗口参数就会静默拿到错区间。取数后须自行按 `start/end` 过滤，或断言返回区间。CR9-1 附带 |
 
 **新增跨语言/跨服务参数的通用规则**：凡是跨进程传递、且两侧各自解析的参数（日期、代码前缀、枚举值），**必须在两侧都写断言**——一侧写错而另一侧静默回落，是本项目已发生两次的错误模式（V1、CR7-2）。
 
@@ -157,6 +160,18 @@
 | 港股 行情 | 东财 `push2` 系（`clist/get` 多 host 降级） | **腾讯 `qt.gtimg.cn`（✅ 2026-09-20 实测：`hk00700` HTTP 200 / 78 字段，字段位置与 A 股一致）**——`tencent_provider` 注册为 hk 备源（position=1） |
 | 港股 日K | 东财 `push2his` 系（多 host 降级） | **腾讯 `web.ifzq.gtimg.cn/fqkline`（✅ 2026-09-20 实测：`hk00700,day,...` 返回 day 数组，行格式与 A 股同，`qfqday or day` 回退已覆盖）**；复权口径与主源一致（均前复权） |
 | 港股 列表 | 东财 `clist/get`（多 host 降级） | **确认无可用备源**（腾讯无全量港股列表接口）→ 显式降级：已有数据保留（C1 空载荷保护 + 降级缩水保护）+ 同步显式报错（R10 语义） |
+
+---
+
+### C-5 东财请求扇出：一个"逻辑请求"≠ 一个 HTTP 请求（2026-09-26 实测）
+
+- **事实**：本项目对东财按**源族**限速（`app/utils/limiter.py`：`min_interval=5s / burst=2 / rate_per_min=12 / 连续失败 2 次熔断 180s→900s`），计次口径是 C29 的"**按逻辑请求计次**"。但一个 akshare 函数调用不是 1 个 HTTP 请求：
+  - `ak.stock_board_concept_name_em` 内部走 `fetch_paginated_data`（site-packages `akshare/stock/stock_board_concept_em.py:47`），约 900 个板块 ÷ `pz=100` ≈ **9 页请求**；
+  - `ak.stock_board_concept_cons_em(名称)` 更甚——若 `symbol` 不是 `^BK\d+`，**先重拉整张板块映射表**（再 ~9 请求，`:421-426`），然后分页取成分（`:440`）。我们的调用点 `hotspot/pipeline.py:258`、`:500` 传的正是**名称**。
+  - ⇒ **1 次 `acquire` ≈ 10–20 个真实东财请求**；一次热点 pipeline 是百次级。
+- **为什么重要**：这与 `limiter.py:3-6` 自己记录的实测事实（"连续 2+ 请求即触发惩罚，惩罚覆盖其全部域名"）直接矛盾，是长期熔断、以及 C0 实测"stock 熔断连坐 hk"的**真正来源**（不是"同步和热点抢 10 个令牌"这么简单）。
+- **口径规则**：任何"额度是否打满"的测量必须数**真实 HTTP 请求**，不得用 `acquire` 次数或 akshare 调用次数代替——按 acquire 计会得出"额度没满"的假结论（CR8 批次二/OPT-2 的前置实测 ② 尤其注意）。
+- **两个连带坑**：① `get_limiter(name, **kwargs)` 是**首调用创建即固定**（`limiter.py:118-121`），而 `pipeline.py:58` 无参先创建 ⇒ `akshare_provider.py:70-78` 的显式调参**不生效**（当前默认值恰好相同故无症状）——**要调东财桶参数，先修这一条**（CR9-18）；② 修法优先"缓存 名称→`BKxxxxx` 并传 BK 代码"（akshare 对 `^BK\d+` 短路，直接省掉 ~9 个冗余请求），而不是先动桶参数（CR9-3）。
 
 ---
 
