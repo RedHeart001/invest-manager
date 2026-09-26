@@ -28,7 +28,17 @@ POST_MARKET_HOUR, POST_MARKET_MINUTE = 16, 30
 
 _scheduler: BackgroundScheduler | None = None
 _lock = threading.Lock()
-_state: dict = {"running": False, "lastRun": None, "lastResult": None, "runs": 0}
+# catchUpResolved（CR9-4，2026-09-26）：当日补跑是否已"定案"（跑了 / 决定不跑 / 查询失败）。
+# 同步补跑要靠它判断"还要不要让位"——若只看"当日有没有 digest 产出"，
+# 则 02:00–08:30 启动（热点此刻不跑）与热点跑了但 0 产出这两种情况下，
+# 同步会死等到 600s 上限后**整日不跑**。
+_state: dict = {
+    "running": False,
+    "lastRun": None,
+    "lastResult": None,
+    "runs": 0,
+    "catchUpResolved": None,
+}
 
 
 def _execute(trigger: str) -> dict:
@@ -90,8 +100,22 @@ def _reached_schedule_today(now: datetime) -> bool:
 
 
 def _catch_up_if_needed() -> None:
-    """P3 补强：重启后若已过调度时刻且当日无 digest → 补跑一次。"""
+    """P3 补强：重启后若已过调度时刻且当日无 digest → 补跑一次。
+
+    CR9-4（2026-09-26）：无论走哪条出口（未到点跳过 / 已有产出跳过 / 触发补跑 /
+    查询失败），都要置 `catchUpResolved=今天`。同步侧要靠它判断"还要不要让位"——
+    只看"当日有没有 digest"是不行的：02:00–08:30 启动（热点此刻根本不会跑）与
+    热点跑了但 0 产出这两种情况，在 digest 计数上长得一模一样（都是 0），
+    于是同步死等到 600s 上限后放弃，**当天主数据同步整日不发生**。
+    """
     time.sleep(5)  # 等服务就绪
+    try:
+        _catch_up_decide()
+    finally:
+        _state["catchUpResolved"] = beijing_today()
+
+
+def _catch_up_decide() -> None:
     now = datetime.now(TZ)
     if not _reached_schedule_today(now):
         log.info("catch-up skipped: before pre-market schedule")

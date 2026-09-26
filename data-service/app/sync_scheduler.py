@@ -35,6 +35,10 @@ TZ = ZoneInfo("Asia/Shanghai")
 DEFAULT_SYNC_HOUR = 2
 DEFAULT_SYNC_MINUTE = 0
 
+# C1/CR9-4：启动补跑让位热点的轮询参数（上限 10min，与热点侧 300s 预算 + 单飞相称）
+CATCHUP_POLL_INTERVAL_S = 10.0
+CATCHUP_YIELD_MAX_WAIT_S = 600.0
+
 _scheduler: BackgroundScheduler | None = None
 _lock = threading.Lock()
 _state: dict = {"running": False, "lastRun": None, "lastDate": None, "lastResult": None, "runs": 0}
@@ -164,33 +168,45 @@ def _catch_up_if_needed() -> None:
         log.info("sync catch-up skipped: already synced today")
         return
 
-    # C1：让位热点——热点在跑/当日未产出 → 等它结束（每 10s 查一次，上限 10 分钟）
+    # C1（CR7-7）让位热点。**CR9-4/CR9-22 修正（2026-09-26）**：
+    # 原实现等的是"当日有没有 digest 产出"，那个判据在两种常态下永远不满足——
+    #   ① 02:00–08:30 之间启动：热点侧 `scheduler._catch_up_decide` 未到点直接跳过，
+    #      当日不会有任何产出；
+    #   ② 热点跑了但落库 0 行（新闻源全挂 / ingest 被 401 拒）。
+    # 两者都表现为 count==0，于是 `while … else: return` 死等满 600s 后**整轮放弃**，
+    # 而调度器只在 02:00 触发 ⇒ 当天主数据同步根本不发生。
+    # 现改为只让位给"真的会与之争抢东财令牌"的热点：**正在跑** 或 **尚未定案**；
+    # 热点一旦定案（跑完/决定不跑/查询失败）就立即同步，不再反推它有没有产出。
+    # 顺带删掉这条 web 查询——原来 HTTP 非 2xx 走"继续等"、请求异常走"直接放行"，
+    # 同一件事两种方向（CR9-22）。
     from .hotspot import scheduler as hotspot_scheduler
 
+    today = beijing_today()
     waited = 0.0
-    while waited < 600.0:
-        if not hotspot_scheduler._state["running"]:
-            try:
-                import requests
-
-                web = os.environ.get("WEB_BASE_URL", "http://localhost:3000")
-                r = requests.get(f"{web}/api/hotspots/ingest", params={"date": beijing_today()}, timeout=10)
-                count = int((r.json() or {}).get("count", 0)) if r.ok else 0
-                if count > 0:
-                    log.info("sync catch-up: hotspot digest exists (%s rows), proceeding", count)
-                    break
-            except Exception as e:  # noqa: BLE001 web 未启动等 → 视为可继续（同步不依赖 web 状态查询）
-                log.warning("sync catch-up hotspot check failed: %s", e)
+    while waited < CATCHUP_YIELD_MAX_WAIT_S:
+        st = hotspot_scheduler._state
+        if not st["running"]:
+            if st.get("catchUpResolved") == today:
+                log.info("sync catch-up: hotspot resolved for today, no need to yield")
                 break
-            # 未在跑且当日无产出 → 热点补跑即将/正在由其自身线程触发，继续等
-            log.info("sync catch-up: waiting for hotspot pipeline (%.0fs)...", waited)
+            log.info("sync catch-up: hotspot not started/resolved (%.0fs)...", waited)
         else:
             log.info("sync catch-up: hotspot pipeline running (%.0fs)...", waited)
-        time.sleep(10)
-        waited += 10.0
+        time.sleep(CATCHUP_POLL_INTERVAL_S)
+        waited += CATCHUP_POLL_INTERVAL_S
     else:
-        log.warning("sync catch-up: waited 600s for hotspot, giving up this round (retry at next schedule)")
-        return
+        # 到上限：热点仍在跑 → 放弃本轮（不能压在一个卡死的 pipeline 上）；
+        # 热点没在跑却迟迟没定案（其补跑线程异常/被跳过）→ 照常同步，别把当天饿掉。
+        if hotspot_scheduler._state["running"]:
+            log.warning(
+                "sync catch-up: hotspot still running after %.0fs, giving up this round",
+                CATCHUP_YIELD_MAX_WAIT_S,
+            )
+            return
+        log.warning(
+            "sync catch-up: hotspot never resolved within %.0fs, syncing anyway",
+            CATCHUP_YIELD_MAX_WAIT_S,
+        )
 
     # 无法确知"当日是否已同步"（同步状态在 web 侧，未持久化）→ 保守补跑一次：
     # 单飞 + 空载荷保护（C1）已能兜住重复同步的安全性。
