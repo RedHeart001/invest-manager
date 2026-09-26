@@ -6,7 +6,8 @@ import path from "node:path";
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
-import { AGENT_TOOLS } from "./tools";
+import { AGENT_TOOLS, guardToolArgs } from "./tools";
+import { QUOTE_TYPES } from "./validate";
 import { buildSystemPrompt, executeAgentTool, getAgentTools, gatewayStatus } from "./gateway";
 import { stopAllMcp } from "./mcp";
 
@@ -76,6 +77,23 @@ describe("内置工具兼容性（P4 回归红线）", () => {
     expect(names).toContain("mcp_gw_test_local_now");
     expect(names.some((n) => n.startsWith("builtin:"))).toBe(false);
   });
+
+  // CR9-10 把 PRODUCT_TYPE_ENUM 归一成 QUOTE_TYPES 的别名——**发给 LLM 的 schema 值不能因此变动**
+  // （P4 兼容红线：工具名不变之外，寻址面也不能变）。这条把 enum 的实际取值钉死。
+  it("发给 LLM 的 type enum 取值逐项不变（六类通用 / 研报两工具只 stock+us）", () => {
+    for (const t of AGENT_TOOLS) {
+      const props = (
+        t.function.parameters as { properties?: Record<string, { enum?: readonly string[] }> }
+      ).properties;
+      const typeProp = props?.type;
+      if (!typeProp?.enum) continue;
+      if (t.function.name === "deep_research" || t.function.name === "get_research_report") {
+        expect([...typeProp.enum]).toEqual(["stock", "us"]);
+      } else {
+        expect([...typeProp.enum]).toEqual([...QUOTE_TYPES]);
+      }
+    }
+  });
 });
 
 describe("命名空间分派", () => {
@@ -139,6 +157,43 @@ describe("命名空间分派", () => {
     expect(r3.ok).toBe(false);
     expect(r3.summary).toContain("invalid code");
     expect(calls).toBe(1); // 四条非法入参一次都没出网
+  });
+
+  // 需求面红线（PLAN 验证方式 P4/P5）：闸门只许拒绝，不许把合法调用挤出轨道。
+  // 初版实现在此处真留过一个回归——缺省 type 被回填成 "stock"，于是
+  // `deep_research(code="AAPL")`（P5 验收②：详情页/工具对 AAPL 走同一链路）
+  // 会被判成 A股标的，美股研报直接失效。
+  it("数字型 code（LLM function calling 的常见形态）仍放行，且按字符串出网", async () => {
+    let seenUrl = "";
+    globalThis.fetch = ((input: unknown) => {
+      seenUrl = String(input);
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ name: "贵州茅台", price: 1237, currency: "CNY" }),
+      } as unknown as Response);
+    }) as unknown as typeof fetch;
+    const r = await executeAgentTool("get_quote", { type: "stock", code: 600519 });
+    expect(r.ok).toBe(true);
+    expect(seenUrl).toContain("code=600519");
+    expect(seenUrl).not.toContain("600519%20");
+  });
+
+  it("闸门不回填缺省的 type，也不改写非 code 字段", () => {
+    const g = guardToolArgs("deep_research", { code: "AAPL" });
+    expect("err" in g).toBe(false);
+    if ("args" in g) expect(g.args.type).toBeUndefined(); // 交给工具自己的 A股/美股形态判断
+    const g2 = guardToolArgs("get_kline", { code: " 600519 ", days: 7 });
+    if ("args" in g2) {
+      expect(g2.args.code).toBe("600519"); // 只做 trim/String 化
+      expect(g2.args.days).toBe(7);
+      expect("type" in g2.args).toBe(false);
+    } else {
+      expect("不应被拒：" + g2.err).toBe("ok");
+    }
+    const g3 = guardToolArgs("get_fund_holdings", { code: 110022 });
+    if ("args" in g3) expect(g3.args.code).toBe("110022");
+    else expect("数字 code 不应被拒：" + g3.err).toBe("ok");
   });
 });
 

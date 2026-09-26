@@ -40,20 +40,29 @@ const CODE_ONLY_TOOLS = new Set(["get_fund_holdings", "get_fund_report"]);
 
 type ToolArgsGuard = { args: Record<string, unknown> } | { err: string };
 
-function guardToolArgs(name: string, args: Record<string, unknown>): ToolArgsGuard {
+/**
+ * 出网前的入参闸门。**只做拒绝，不做补全**——归一化一旦替调用方填了默认值，
+ * 就会改掉下游自己的形态判断（本函数初版把缺省 type 填成 "stock"，直接让
+ * `deep_research(code="AAPL")` 走成 A股链路，P5 验收 ② 的美股研报失效）。
+ * 唯一做的归一化：`code` 一律 `String()` + 去空白——LLM 的 function calling 常把
+ * 纯数字代码发成 number，改动前 `dsGet` 会把它拼进 URL 正常工作，闸门不得把它
+ * 变成失败（需求 4 的可用性优先）。
+ */
+export function guardToolArgs(name: string, args: Record<string, unknown>): ToolArgsGuard {
+  const code = String(args.code ?? "").trim();
   if (SUBJECT_TOOLS.has(name)) {
-    const v = checkSubject(
-      typeof args.type === "string" ? args.type : null,
-      typeof args.code === "string" ? args.code : null,
-    );
-    return "error" in v ? { err: v.error } : { args: { ...args, ...v } };
+    const t = args.type === undefined || args.type === null || args.type === ""
+      ? null
+      : String(args.type);
+    const v = checkSubject(t, code);
+    if ("error" in v) return { err: v.error };
+    return { args: { ...args, code: v.code, ...(t === null ? {} : { type: v.type }) } };
   }
   if (CODE_ONLY_TOOLS.has(name)) {
-    const c = String(args.code ?? "").trim();
-    if (!CODE_SET.test(c)) {
-      return { err: `invalid code: ${c.replace(/\s+/g, " ").slice(0, 40) || "(空)"}` };
+    if (!CODE_SET.test(code)) {
+      return { err: `invalid code: ${code.replace(/\s+/g, " ").slice(0, 40) || "(空)"}` };
     }
-    return { args: { ...args, code: c } };
+    return { args: { ...args, code } };
   }
   return { args };
 }

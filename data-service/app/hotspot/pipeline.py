@@ -272,7 +272,9 @@ def _board_names() -> list[tuple[str, str]]:
                 code_col = _pick_col(df, "板块代码", "code").tolist()
                 for raw_name, raw_code in zip(name_col, code_col):
                     n = str(raw_name).strip()
-                    if not n or n.lower() == "nan":
+                    # 旧实现是 `series.dropna()`：pandas 同时丢 NaN 与 None，改成逐行判断后
+                    # 这两个占位值会以字符串形式漏进来，必须一并按名字滤掉（否则会进关键词表）。
+                    if not n or n.lower() in ("nan", "none"):
                         continue
                     boards.append((n, tag))
                     c = str(raw_code).strip()
