@@ -232,8 +232,9 @@ export default function ChatUI() {
         let buffer = "";
         let assistantStarted = false;
         // CR7-5：done 事件到达时置位（此前 `terminated` 是只读不写的死守卫）。
-        // 退出循环后按 (gotDone, expired) 判定三形态：完成 / 180s 中断 / 异常退出。
+        // 退出循环后按 (gotDone, sawError, expired) 判定四形态：完成 / 服务端已报错 / 超时中断 / 异常退出。
         let gotDone = false;
+        let sawErrorEvent = false; // CR9-2：服务端 error 已给出原因，收尾时不得覆盖
 
         const handleEvent = (event: string, dataRaw: string) => {
           let data: Record<string, unknown> = {};
@@ -302,6 +303,7 @@ export default function ChatUI() {
           } else if (event === "error") {
             setStatusText(null);
             setError(String(data.message ?? "发生错误"));
+            sawErrorEvent = true; // CR9-2：真因已入屏，收尾的通用文案必须让位
           } else if (event === "done") {
             gotDone = true;
             setStatusText(null);
@@ -324,8 +326,10 @@ export default function ChatUI() {
           return null;
         };
 
-        // 退出循环后按 (gotDone, expired) 判定三形态：完成 / 180s 中断 / 异常退出。
-        const deadline = Date.now() + 180_000;
+        // 退出循环后按 (gotDone, sawError, expired) 判定形态：完成 / 服务端已报错 / 超时中断 / 异常退出。
+        // CR9-27：deadline 常量与提示文案同源，改窗口不会留下说谎的秒数。
+        const deadlineMs = 180_000;
+        const deadline = Date.now() + deadlineMs;
         while (Date.now() < deadline && !gotDone) {
           const rr = await readChunk();
           if (rr) {
@@ -347,7 +351,11 @@ export default function ChatUI() {
             handleEvent(ev, dataRaw);
           }
         }
-        const exitKind = classifyStreamExit({ gotDone, expired: Date.now() >= deadline });
+        const exitKind = classifyStreamExit({
+          gotDone,
+          expired: Date.now() >= deadline,
+          sawError: sawErrorEvent,
+        });
         // 超时/异常退出时释放流连接（2026-09-13 code review：否则连接滞留至服务端超时）
         try {
           reader.cancel();
@@ -356,10 +364,11 @@ export default function ChatUI() {
         }
         if (exitKind === "interrupted") {
           // R17：中断必须可感知且有出口——保留已渲染内容，给出重发入口
-          setError("回答在 180s 处中断，本条可能不完整——可直接重新发送");
+          setError(`回答在 ${Math.round(deadlineMs / 1000)}s 处中断，本条可能不完整——可直接重新发送`);
         } else if (exitKind === "abnormal") {
           setError("连接中断，回答可能不完整——可直接重新发送");
         }
+        // exitKind === "errored" 时故意不动：服务端 error 事件已写入真因（CR9-2）
       } catch (e) {
         setError(e instanceof Error ? e.message : "发送失败");
       } finally {

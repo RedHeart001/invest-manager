@@ -166,12 +166,16 @@ export default async function ProductPage({
   const rangeLow = closes.length ? Math.min(...closes.map((c) => c.low)) : null;
 
   const stats: { label: string; value: string }[] = [];
-  if (quote?.open != null) stats.push({ label: "今开", value: fmtPrice(quote.open, valueDecimals) });
-  if (quote?.prevClose != null) stats.push({ label: "昨收", value: fmtPrice(quote.prevClose, valueDecimals) });
-  if (quote?.high != null) stats.push({ label: "今日最高", value: fmtPrice(quote.high, valueDecimals) });
-  if (quote?.low != null) stats.push({ label: "今日最低", value: fmtPrice(quote.low, valueDecimals) });
-  if (rangeHigh != null) stats.push({ label: "区间最高(3M)", value: fmtPrice(rangeHigh, valueDecimals) });
-  if (rangeLow != null) stats.push({ label: "区间最低(3M)", value: fmtPrice(rangeLow, valueDecimals) });
+  // CR9-6：指标卡与现价同口径带币种（CNY/缺失时 priceWithCurrency 原样返回，与 09-24 拍板一致）
+  const cur = quote?.currency ?? null;
+  const priceStat = (label: string, v: number | null | undefined) =>
+    stats.push({ label, value: priceWithCurrency(fmtPrice(v as number, valueDecimals), cur) });
+  if (quote?.open != null) priceStat("今开", quote.open);
+  if (quote?.prevClose != null) priceStat("昨收", quote.prevClose);
+  if (quote?.high != null) priceStat("今日最高", quote.high);
+  if (quote?.low != null) priceStat("今日最低", quote.low);
+  if (rangeHigh != null) priceStat("区间最高(3M)", rangeHigh);
+  if (rangeLow != null) priceStat("区间最低(3M)", rangeLow);
   if (quote?.volume != null) stats.push({ label: "成交量", value: fmtVolume(quote.volume) });
   if (quote?.turnover != null) stats.push({ label: "换手率", value: `${quote.turnover.toFixed(2)}%` });
   if (quote?.marketCap != null) {
@@ -349,7 +353,9 @@ export default async function ProductPage({
         {tableRows.length > 0 && (
           <div className="rounded-xl border border-zinc-200 bg-white p-4">
             <h3 className="text-xs font-medium text-zinc-500">
-              日线数据（最近 {tableRows.length} 条 / 来源：{effectiveKline.source}）
+              日线数据（最近 {tableRows.length} 条 / 来源：{effectiveKline.source}
+              {/* CR9-6：币种在表头标一次即可，15 行×4 列逐格追加只会变噪声 */}
+              {cur && cur !== "CNY" ? ` / 币种：${cur}` : ""}）
             </h3>
             <div className="mt-2 overflow-x-auto">
               <table className="w-full min-w-[520px] text-left text-xs">

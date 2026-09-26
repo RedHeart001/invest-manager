@@ -19,6 +19,8 @@ export type BrowseItem = {
   tags: string[];
   price: number | null;
   changePct: number | null;
+  /** CR9-6：非 CNY 品种（港股/美股）必须带币种，否则分类浏览显示成无单位数字 */
+  currency?: string | null;
   quoteSource?: string;
   /** true = 展示的是快照值（实时行情不可用时） */
   stale: boolean;
@@ -111,6 +113,7 @@ export async function browseProducts(opts: {
       tags: parseTags(r.tags),
       price: q?.price ?? r.lastPrice ?? null,
       changePct: q?.changePct ?? r.lastChangePct ?? null,
+      currency: q?.currency ?? null, // CR9-6：实时币种透传；快照回退无币种时留空（CNY 语义下不显示后缀）
       quoteSource: q?.source,
       stale,
     };

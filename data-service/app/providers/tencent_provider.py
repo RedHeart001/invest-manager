@@ -10,6 +10,7 @@
 """
 
 import os
+import re
 
 import requests
 
@@ -17,6 +18,30 @@ from .base import BaseProvider, ProviderError, ProviderNotSupported, register_ch
 
 REQ_TIMEOUT = 15
 SYMBOL_MARKETS = {"sh", "sz", "bj"}
+
+# CR9-6：备源必须与主源返回同一组语义字段。此前腾讯不返回 `currency`，
+# 东财一冷却（本机常态）港股价格就退化成无单位的 "436.6"（与 CR7-4 要消灭的
+# 现象同源，只是换了链路）。本 provider 只服务 A股/场内基金/港股，币种按类型定。
+CURRENCY_BY_TYPE = {"stock": "CNY", "fund": "CNY", "bond": "CNY", "hk": "HKD", "us": "USD"}
+
+
+def _ts_iso(raw: str | None) -> str | None:
+    """CR9-7：把各市场时间戳统一到 ISO（`YYYY-MM-DDTHH:MM:SS`）。
+
+    腾讯 `qt.gtimg.cn` 的 f[30] **形态随市场而变**，09-26 实测三种：
+    A股 14 位紧凑串 `20260924161444`、港股斜杠带空格 `2026/09/18 16:08:32`、
+    akshare 主源 ISO。原样透传会让详情页显示 14 位数字串，更会让"quote 与当日
+    K 线是否同一交易日"的比较恒假（`tests/test_p0.py:91` 实测：价格相等仍判失败）。
+    实现按"只取数字"归一，分隔符形态变化不影响结果；凑不满 14 位数字则原样返回
+    ——宁可形态不齐，不可猜出错时刻。
+    """
+    s = (raw or "").strip()
+    if not s:
+        return None
+    digits = re.sub(r"\D", "", s)
+    if len(digits) >= 14:
+        return f"{digits[0:4]}-{digits[4:6]}-{digits[6:8]}T{digits[8:10]}:{digits[10:12]}:{digits[12:14]}"
+    return s
 
 
 def _symbol(code: str) -> str | None:
@@ -110,11 +135,13 @@ class TencentProvider(BaseProvider):
             "prevClose": _num(f[4]),
             "open": _num(f[5]),
             "volume": _num(f[6]),  # 手
-            "timestamp": f[30],
+            "timestamp": _ts_iso(f[30]),  # CR9-7：统一 ISO
             "change": _num(f[31]),
             "changePct": _num(f[32]),
             "high": _num(f[33]),
             "low": _num(f[34]),
+            # CR9-6：备源也得带币种，否则降级一次就丢一次语义
+            "currency": CURRENCY_BY_TYPE.get(type_, "CNY"),
             "source": self.source,
         }
 

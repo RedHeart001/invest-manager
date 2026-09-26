@@ -178,7 +178,11 @@ def test_tencent_parsers() -> None:
           q["price"] == 3.341 and q["changePct"] == -0.51
           and q["high"] == 3.354 and q["low"] == 3.280,
           str({k: q[k] for k in ("price", "changePct", "high", "low")}))
-    check("腾讯行情：时间字段解析", q["timestamp"] == "20260911150000", str(q["timestamp"]))
+    # CR9-7：原断言为 `== "20260911150000"`，那等于把"备源时间戳原样透传"锁成契约。
+    # 现断言归一后的 ISO 形态（若回退 _ts_iso，本条精确失败）。
+    check("腾讯行情：时间字段归一为 ISO（CR9-7）",
+          q["timestamp"] == "2026-09-11T15:00:00", str(q["timestamp"]))
+    check("腾讯行情：备源也带币种（CR9-6，A股=CNY）", q.get("currency") == "CNY", str(q.get("currency")))
 
 
 # ---------- CR5-1：CoinGecko 失败负缓存（修复静默失效的回归防线） ----------

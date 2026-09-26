@@ -72,8 +72,25 @@ def _execute(trigger: str) -> dict:
             log.warning("daily sync rejected: status=%s body=%s", r.status_code, r.text[:200])
         else:
             body = r.json() or {}
-            result = {"ok": True, "tookMs": body.get("tookMs"), "results": body.get("results")}
-            log.info("daily sync done: %s", result)
+            results = body.get("results") or []
+            failed = [str(x.get("type")) for x in results if isinstance(x, dict) and x.get("error")]
+            # CR9-5（重述）：web 侧返回的是真 ok（`results.every(r => !r.error)`），
+            # 此前这里硬写 `ok: True` → 5 类里 4 类失败也被记成"同步成功"
+            # （09-26 实测：lastResult.ok=true，而 stock/bond/crypto/hk 全带 error）。
+            # 状态失真会让"看 /sync/status 判断今天是否要补跑"这条唯一路径失效。
+            result = {"ok": bool(body.get("ok")), "tookMs": body.get("tookMs"), "results": results}
+            if failed:
+                result["failedTypes"] = failed
+                # 失败类型不自动重试是有意取舍：整轮同步实测 9.6~13min，
+                # 反复重试会持续占东财源族（CR7-7/C1 的让位逻辑同样怕这个）。
+                # 因此只把缺口显式暴露出来，交给人/下次调度决定。
+                result["note"] = (
+                    f"部分类型失败：{', '.join(failed)}——lastDate 已置位，"
+                    f"本轮不自动重试；需要时可 POST /sync/run 或等下次调度"
+                )
+                log.warning("daily sync partially failed: ok=false failedTypes=%s", failed)
+            else:
+                log.info("daily sync done: %s", result)
     except requests.exceptions.ReadTimeout as e:
         # C3-③（CR7-9，2026-09-25）：**读超时 ≠ 同步失败**——web 侧仍在后台执行
         # （ds 只是不再等结果），且 lastDate 已在下方置位不再重跑。此前把这种情况

@@ -208,6 +208,39 @@ def test_tencent_hk_quote_and_kline_parsing() -> None:
           str({k: q[k] for k in ("price", "changePct", "prevClose", "high", "low", "name")}))
     check("G6 备源：港股行情 source=tencent", q.get("source") == "tencent", str(q.get("source")))
 
+    # CR9-6 / CR9-7（2026-09-26）：备源必须与主源返回同一组语义字段。
+    # 此前腾讯不带 `currency`，东财一冷却"436.6 港币"就退化成无单位数字；
+    # 且 f[30] 形态随市场而变（港股带空格、A股 14 位紧凑串），原样透传会让
+    # "quote 与当日 K 线是否同一交易日"的比较恒假（test_p0 实测假失败）。
+    check("CR9-6：备源港股行情带币种（降级不丢语义）",
+          q.get("currency") == "HKD", str(q.get("currency")))
+    check("CR9-7：港股斜杠带空格形态（`2026/09/18 16:08:32`）归一为 ISO",
+          q.get("timestamp") == "2026-09-18T16:08:32", str(q.get("timestamp")))
+
+    # A股形态：f[30] 为 14 位紧凑串，且币种应为 CNY（CNY 下前端不加后缀）
+    afields = ["100", "贵州茅台", "600519", "1237.00", "1251.24", "1250.01", "31239"]
+    afields += [str(i) for i in range(23)]
+    afields += ["20260924161444", "-14.24", "-1.14", "1256.13", "1231.05"]
+    apayload = 'v_sh600519="' + "~".join(afields) + '";'
+    assert len(afields) == 35, len(afields)
+
+    class _AResp:
+        content = apayload.encode("gbk")
+
+        def raise_for_status(self):
+            pass
+
+    orig2 = tp.requests.get
+    tp.requests.get = lambda *a, **k: _AResp()
+    try:
+        qa = tp.TencentProvider().get_quote("stock", "600519")
+    finally:
+        tp.requests.get = orig2
+    check("CR9-7：A股 14 位紧凑时间戳归一为 ISO（详情页不再显示数字串）",
+          qa.get("timestamp") == "2026-09-24T16:14:44", str(qa.get("timestamp")))
+    check("CR9-6：A股币种=CNY（前端按拍板口径不加后缀）",
+          qa.get("currency") == "CNY", str(qa.get("currency")))
+
     # K线：data.hk00700.day = [[日期,开,收,高,低,量], ...]
     class _KResp:
         def raise_for_status(self):
