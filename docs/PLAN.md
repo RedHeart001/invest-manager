@@ -342,6 +342,7 @@ LLM_DEBUG=                      # 设 1 时输出 LLM 请求日志（默认静�
 # ---- P7 预留 ----
 ALPHA_VANTAGE_API_KEY=           # 可选：TradingAgents/OpenBB 增强数据源，无 key 走 yfinance
 HTTP_PROXY=                      # 容器经 host.docker.internal 走宿主机代理（R12 海外源）
+HTTPS_PROXY=                     # **本机手工起 uvicorn 时必须与命令同行 export**——data-service 不加载任何 .env，且 `main.py` 的 `NO_PROXY=*` 会连带屏蔽系统代理 ⇒ 不设则 CoinGecko 不可达、加密主数据 0 行（R12 实测口径，见 FIX-LEDGER CR9-41）
 NO_PROXY=
 
 # ---- data-service 侧 ----
