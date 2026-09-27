@@ -331,8 +331,8 @@ async function main() {
     const html = page.text;
     ok("HTTP 200", page.status === 200, `status=${page.status}`);
     ok("① 身份区：名称与画像行", html.includes("贵州茅台") && html.includes('data-testid="profile"'));
-    ok("② 现状区：指标卡", html.includes("昨收") && html.includes("区间最高(3M)"));
-    ok("③ 主图区：时间档位与对比入口", html.includes(">1Y<") && html.includes("叠加对比"));
+    ok("② 现状区：指标卡", html.includes("昨收") && html.includes("区间最高(近3月)"));
+    ok("③ 主图区：时间档位与对比入口", html.includes(">近1年<") && html.includes("叠加对比"));
     ok("④ 变化解读区：归因克制文案", html.includes("可能相关事件（非因果断言）"));
     ok("④ 变化解读区：阶段表格有数据行", (html.match(/→/g) ?? []).length >= 1);
     ok("⑤ 明细区：日线数据表", html.includes("日线数据（最近"));

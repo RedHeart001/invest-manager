@@ -23,14 +23,19 @@ type Props = {
   valueLabel: string; // 价格 / 单位净值
 };
 
+// key 是与数据档/回落状态比较的内部标识，label 才是界面文案
 const PRESETS: { key: string; label: string; days: number; interval: "1m" | "1d" }[] = [
-  { key: "1D", label: "1D", days: 1, interval: "1m" },
-  { key: "1W", label: "1W", days: 7, interval: "1d" },
-  { key: "1M", label: "1M", days: 30, interval: "1d" },
-  { key: "3M", label: "3M", days: 90, interval: "1d" },
-  { key: "6M", label: "6M", days: 182, interval: "1d" },
-  { key: "1Y", label: "1Y", days: 365, interval: "1d" },
+  { key: "1D", label: "当日", days: 1, interval: "1m" },
+  { key: "1W", label: "近1周", days: 7, interval: "1d" },
+  { key: "1M", label: "近1月", days: 30, interval: "1d" },
+  { key: "3M", label: "近3月", days: 90, interval: "1d" },
+  { key: "6M", label: "近6月", days: 182, interval: "1d" },
+  { key: "1Y", label: "近1年", days: 365, interval: "1d" },
 ];
+
+function presetLabel(key: string): string {
+  return PRESETS.find((p) => p.key === key)?.label ?? key;
+}
 
 // B4：beijingToday 已抽公共 util（lib/time.ts）
 import { beijingToday } from "@/lib/time";
@@ -452,7 +457,7 @@ export default function ProductCharts({
               data-testid="fallback-chip"
               className="rounded bg-amber-50 px-2 py-1 text-xs text-amber-700"
             >
-              {fallbackFrom} 无分钟数据 · 已显示 3M 日线
+              {presetLabel(fallbackFrom)}无分钟数据，已改显示近3月日线
             </span>
           )}
           <span className="ml-2 flex items-center gap-1 text-xs text-zinc-500">
@@ -550,7 +555,7 @@ export default function ProductCharts({
           <p className="mt-1 text-xs text-amber-600">事件标注不可用：{events.note}</p>
         )}
         {kline.interval === "1m" ? (
-          <p className="mt-2 text-xs text-zinc-400">1D 分钟线不参与阶段划分。</p>
+          <p className="mt-2 text-xs text-zinc-400">当日分钟线不参与阶段划分。</p>
         ) : phases.length === 0 ? (
           <p className="mt-2 text-xs text-zinc-400">暂无阶段数据。</p>
         ) : (

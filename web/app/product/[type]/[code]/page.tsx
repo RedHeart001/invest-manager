@@ -175,8 +175,8 @@ export default async function ProductPage({
   if (quote?.prevClose != null) priceStat("昨收", quote.prevClose);
   if (quote?.high != null) priceStat("今日最高", quote.high);
   if (quote?.low != null) priceStat("今日最低", quote.low);
-  if (rangeHigh != null) priceStat("区间最高(3M)", rangeHigh);
-  if (rangeLow != null) priceStat("区间最低(3M)", rangeLow);
+  if (rangeHigh != null) priceStat("区间最高(近3月)", rangeHigh);
+  if (rangeLow != null) priceStat("区间最低(近3月)", rangeLow);
   if (quote?.volume != null) stats.push({ label: "成交量", value: fmtVolume(quote.volume) });
   if (quote?.turnover != null) stats.push({ label: "换手率", value: `${quote.turnover.toFixed(2)}%` });
   if (quote?.marketCap != null) {
