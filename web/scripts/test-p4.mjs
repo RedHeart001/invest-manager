@@ -23,6 +23,21 @@ function ok(name, cond, detail = "") {
   }
 }
 
+// CR9-38（2026-09-27）：`res.json()` 在 dev 服务返回 HTML 时抛 `Unexpected token '<'`，
+// 套件**没打印汇总行就崩**，verify-all 只能按 CR9-25 记 `0/19`（一个断言没跑完却像跑完了）。
+// 统一走 jsonOf：非 JSON 一律带状态码与响应前缀显式失败，让"环境坏了"和"功能坏了"长得不一样。
+async function jsonOf(res, what) {
+  const text = await res.text();
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(
+      `${what}: 期望 JSON 但拿到 status=${res.status} content-type=${res.headers.get("content-type")} ` +
+        `body=${text.slice(0, 120).replace(/\s+/g, " ")}`,
+    );
+  }
+}
+
 async function main() {
   console.log(`\n== P4 验收（部分）：BFF=${BASE}\n`);
 
@@ -35,11 +50,11 @@ async function main() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ title: "【测试】P4 会话" }),
     });
-    const body = await res.json();
+    const body = await jsonOf(res, "POST /api/chat/sessions（创建）");
     sid = body.id ?? "";
     ok("创建会话", res.status === 200 && sid.length > 0, JSON.stringify(body).slice(0, 100));
 
-    const list = await (await fetch(`${BASE}/api/chat/sessions`)).json();
+    const list = await jsonOf(await fetch(`${BASE}/api/chat/sessions`), "GET /api/chat/sessions（列表）");
     ok("列表包含新会话", (list.sessions ?? []).some((s) => s.id === sid));
 
     const put = await fetch(`${BASE}/api/chat/sessions`, {
@@ -49,7 +64,10 @@ async function main() {
     });
     ok("追加消息", put.status === 200);
 
-    const detail = await (await fetch(`${BASE}/api/chat/sessions/${sid}`)).json();
+    const detail = await jsonOf(
+      await fetch(`${BASE}/api/chat/sessions/${sid}`),
+      "GET /api/chat/sessions/:id（详情）",
+    );
     ok("详情含消息", (detail.messages ?? []).some((m) => m.content === "测试消息"));
   }
 
@@ -137,7 +155,10 @@ async function main() {
       ok("回答引用了真实数据（茅台/价格数字）", /茅台|\d{3,}/.test(assistantText), assistantText.slice(0, 120));
     }
 
-    const detail = await (await fetch(`${BASE}/api/chat/sessions/${sid}`)).json();
+    const detail = await jsonOf(
+      await fetch(`${BASE}/api/chat/sessions/${sid}`),
+      "GET /api/chat/sessions/:id（流式后回读）",
+    );
     ok("用户消息已持久化", (detail.messages ?? []).some((m) => m.content === "贵州茅台现在多少钱？"));
   }
 
@@ -168,7 +189,7 @@ async function main() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ title: "【测试】多轮上下文" }),
     });
-    const mkBody = await mk.json();
+    const mkBody = await jsonOf(mk, "POST /api/chat/sessions（多轮会话）");
     const sid2 = mkBody.id;
 
     const ask = (msg) =>
@@ -183,6 +204,7 @@ async function main() {
       const decoder = new TextDecoder();
       let buffer = "";
       let text = "";
+      const events = []; // CR9-38：断言要看事件流本身（有哪些事件、工具入参是什么）
       let terminated = false;
       const deadline = Date.now() + timeoutMs;
       let pendingRead = null;
@@ -216,21 +238,79 @@ async function main() {
           const ev = buffer.slice(evIdx + 6, evEnd).trim();
           const dataRaw = buffer.slice(dataIdx + 5, dataEnd).trim();
           buffer = buffer.slice(dataEnd + 1);
-          if (ev === "delta") text += String((JSON.parse(dataRaw) ?? {}).content ?? "");
-          if (ev === "error") terminated = true;
-          if (ev === "done") terminated = true;
+          // 帧内容不保证是完整 JSON（C3：LLM 流的尾帧常无换行结尾），解析不了就留空对象，
+          // 但事件名照常记账——CR9-38 的断言要看的是"有哪些事件、工具入参是什么"。
+          let data = {};
+          try {
+            data = JSON.parse(dataRaw) ?? {};
+          } catch {
+            /* 忽略坏帧 */
+          }
+          events.push({ ev, data });
+          if (ev === "delta") text += String(data.content ?? "");
+          if (ev === "error" || ev === "done") terminated = true;
         }
       }
-      return text;
+      return { text, events, status: res.status };
     };
 
-    const r1 = await ask("贵州茅台的股票代码是什么？");
-    const t1 = await readAll(r1);
-    ok("第一轮回答包含代码 600519", /600519/.test(t1), t1.slice(0, 80));
+    // CR9-38（2026-09-27）：原来两条断言是"回答里有没有 600519"“有没有'股票/stock'"——
+    // 那是拿**模型措辞**当验收，同一轮改动下批次跑 18/19、单跑 3 次里 2 次 19/19，
+    // 门禁在此条上没有判别力。改判结构化证据（PLAN P4 要的是多轮能接上，不是散文写法）：
+    //   ① 两轮都必须真正走完（done 收尾、无 error、有正文）——第二轮走不完才是回归；
+    //   ② 会话里必须攒出 user/assistant 交替四条，这是"它"能被消解的**输入契约**；
+    //   ③ 指代是否消解对：模型若发起工具调用，`status` 事件里的 args 就是结构化答案
+    //      （必须仍指向第一轮的主体）；没调工具时只断"正文可用"，不去猜它怎么写。
+    const a = await readAll(await ask("贵州茅台的股票代码是什么？"));
+    const b = await readAll(await ask("它属于哪个产品类型？"));
+    const evNames = (x) => x.events.map((e) => e.ev);
+    const turnDone = (x) => evNames(x).includes("done") && !evNames(x).includes("error");
 
-    const r2 = await ask("它属于哪个产品类型？");
-    const t2 = await readAll(r2);
-    ok("第二轮理解指代（回答股票/stock）", /股票|stock/i.test(t2), t2.slice(0, 80));
+    ok(
+      "多轮：两轮各自走完（done 收尾、无 error、正文非空）",
+      a.status === 200 && b.status === 200 && turnDone(a) && turnDone(b) && a.text.length > 0 && b.text.length > 0,
+      `a=${a.status}/${turnDone(a)}/${a.text.length} b=${b.status}/${turnDone(b)}/${b.text.length}`,
+    );
+
+    const detail = await jsonOf(
+      await fetch(`${BASE}/api/chat/sessions/${sid2}`),
+      "GET /api/chat/sessions/:id（多轮历史）",
+    );
+    const msgs = detail.messages ?? [];
+    const roles = msgs.map((m) => m.role);
+    const u1 = roles.indexOf("user");
+    const u2 = roles.indexOf("user", u1 + 1);
+    const roundOneOutput = msgs.slice(u1 + 1, u2); // 第一轮的产出（assistant / tool 混排）
+    const roundTwoAnswer = msgs.slice(u2 + 1);
+    // 实测形态（09-27）：`user,assistant,tool,assistant,user,assistant` ——发起工具调用的那条
+    // assistant 正文为空、内容在 tool 行里。所以判"落库了吗"不能按"每条都有正文"，
+    // 只能按结构：第一轮有产出、第二轮有最终正文回答。
+    ok(
+      "多轮：第一轮产出已落库、第二轮提问在其后且有正文回答（指代消解的输入契约）",
+      u1 >= 0 &&
+        u2 > u1 &&
+        roundOneOutput.length > 0 &&
+        roundOneOutput.every((m) => m.role !== "user") &&
+        roundTwoAnswer.some((m) => m.role === "assistant" && String(m.content ?? "").length > 0),
+      `seq=${roles.join(",")} lens=${msgs.map((m) => String(m.content ?? "").length).join("/")}`,
+    );
+
+    const toolArgs = b.events
+      .filter((e) => e.ev === "status")
+      .map((e) => `${e.data.name ?? "?"} ${JSON.stringify(e.data.args ?? {})}`);
+    if (toolArgs.length > 0) {
+      ok(
+        "多轮🔧：第二轮的工具入参仍指向第一轮主体（600519/茅台）",
+        /600519|茅台/.test(toolArgs.join(" ")),
+        toolArgs.join(" | ").slice(0, 160),
+      );
+    } else {
+      ok(
+        "多轮（本轮无工具调用）：第二轮直接给出可用正文",
+        b.text.trim().length >= 10,
+        `len=${b.text.trim().length} ${b.text.slice(0, 60)}`,
+      );
+    }
 
     await fetch(`${BASE}/api/chat/sessions/${sid2}`, { method: "DELETE" });
   }

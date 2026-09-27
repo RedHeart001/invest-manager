@@ -1,8 +1,9 @@
-"""C3（CR7-9）离线单测：读超时 ≠ 同步失败 + 超时参数依据。
+"""C3（CR7-9）+ CR9-33 离线单测：读超时 ≠ 同步失败 + 超时参数依据。
 
 背景（2026-09-25 C0 实测）：全 5 类型同步 9.6~13 分钟。此前 ds 侧对
 web 回调的 ReadTimeout 会记成 error——但 web 侧同步仍在后台执行且
 lastDate 已置位不再重跑，状态失真（"实际成功被记成失败"）。
+CR9-33（2026-09-27）追加：补跑态实测 ≥29 分钟会打穿定时态预算 ⇒ 预算分形态。
 
 运行方式（无需任何服务在跑）：
     PYTHONPATH=. .venv/Scripts/python tests/test_c3_readtimeout.py
@@ -69,9 +70,57 @@ def test_other_errors_still_failure() -> None:
         ss._state["lastResult"] = None
 
 
+def test_callback_timeout_by_form() -> None:
+    """③ CR9-33：回调读超时按**触发形态**取预算（一轮同步耗时实测差一个数量级）。
+
+    定时态 runs=1 逐类合计约 430s；补跑态 09-26 实测 ≥29 分钟仍未收敛——
+    两者共用 1800s 时，补跑态必然把"仍在正常执行的同步"记成读超时。
+    """
+    seen: dict[str, object] = {}
+
+    class _Resp:
+        status_code = 200
+        text = "{}"
+
+        def json(self):
+            return {"ok": True, "tookMs": 1, "results": []}
+
+    def _capture(url, timeout=None, **kw):
+        seen["timeout"] = timeout
+        return _Resp()
+
+    orig_post = real_requests.post
+    real_requests.post = _capture
+    try:
+        for trigger, expected in (
+            ("daily", ss.SCHEDULED_CALLBACK_TIMEOUT_S),
+            (ss.CATCHUP_TRIGGER, ss.CATCHUP_CALLBACK_TIMEOUT_S),
+            ("manual-ui", ss.SCHEDULED_CALLBACK_TIMEOUT_S),  # 未知/手动 → 定时态口径
+        ):
+            ss._state["running"] = True
+            res = ss._execute(trigger)
+            check(f"CR9-33：形态 {trigger} 的回调预算 = {int(expected)}s",
+                  seen.get("timeout") == expected, f"got={seen.get('timeout')}")
+            check(f"CR9-33：本次预算回写进状态（/sync/status 可判定）",
+                  res.get("callbackTimeoutS") == int(expected), str(res)[:120])
+    finally:
+        real_requests.post = orig_post
+        ss._state["running"] = False
+        ss._state["lastDate"] = None
+        ss._state["lastResult"] = None
+
+    check("CR9-33🔁：两个形态确实分别取数（相同就等于没分形态）",
+          ss.SCHEDULED_CALLBACK_TIMEOUT_S != ss.CATCHUP_CALLBACK_TIMEOUT_S)
+    check("CR9-33🔁：补跑态预算盖过 09-26 实测的 ≥29 分钟",
+          ss.CATCHUP_CALLBACK_TIMEOUT_S > 29 * 60, f"{ss.CATCHUP_CALLBACK_TIMEOUT_S}s")
+    check("CR9-33🔁：补跑态 trigger 与 _catch_up_if_needed 用的是同一个常量",
+          ss.CATCHUP_TRIGGER == "startup-catchup")
+
+
 if __name__ == "__main__":
     test_read_timeout_is_not_failure()
     test_other_errors_still_failure()
+    test_callback_timeout_by_form()
     fails = [x for x in results if not x[1]]
     print(f"\n===== {len(results) - len(fails)}/{len(results)} 通过 =====")
     if fails:

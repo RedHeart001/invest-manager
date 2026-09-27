@@ -6,6 +6,8 @@
 - kline:    {type, code, interval, source, candles: [{date, open, high, low,
              close, volume, amount}]}
 - product:  {type, code, name, pinyin, pinyinInitials, exchange, tags}
+- 列表信封: {type, count, products, source[, degraded, note]}
+            ——`source` 恒在（CR9-31）：覆盖面随上游变小的降级必须说得出是哪个源
 
 行情注册表与列表注册表分离：同一类型可由不同 provider 提供（如基金
 有列表但行情待 P2 接入）。
@@ -18,6 +20,7 @@ from .base import (
     get_list_provider,
     get_provider,
     get_provider_chain,
+    list_products_with_meta,
     register_chain,
 )
 from . import akshare_provider  # noqa: F401  导入即注册（主源）

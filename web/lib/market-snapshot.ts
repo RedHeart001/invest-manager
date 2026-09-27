@@ -3,14 +3,43 @@
 // 供"分类浏览"做全局涨幅排序（库内排序，避免对 3.4 万产品打实时行情）。
 // - 每日同步（lib/sync.ts）末尾自动执行；也可 POST /api/market/refresh 手动触发
 // - 展示层仍以实时富集为准（P1 管线），快照只用于排序
-// - 限流友好：EM 通道批次间隔 1.5s；任一批次失败不中断整体（R10），返回失败计数
+// - 限流友好：东财族批次间隔与源族桶放行速率同值（`EM_BATCH_DELAY_MS`，CR9-9）；
+//   任一批次失败不中断整体（R10），返回失败计数
 
 import { fetchQuotes } from "./data-service";
 import { prisma } from "./prisma";
 
 const BATCH = 100;
-const EM_TYPES = new Set(["stock", "bond"]); // 走东财 ulist，需限速
-const EM_BATCH_DELAY_MS = 1500;
+
+/** 会打东财 ulist 批量通道的类型（CR9-9，2026-09-27 按源实测，不再靠猜）：
+ *  - stock / bond / **fund** → `akshare_provider._em_ulist`；fund 只有**场内**部分打东财
+ *    （实测 27954 只里 2821 只场内，落在 280 批中的 30 批），场外走 30 分钟缓存的全市场净值表单请求
+ *  - **hk** → `hk_provider.get_quotes`，与 A 股共用**同一个** eastmoney 源族令牌桶
+ *  - crypto → CoinGecko（不属东财族）；us 不在刷新类型内 ⇒ 两者都不需要限速
+ */
+export const EM_SNAPSHOT_TYPES = new Set(["stock", "fund", "bond", "hk"]);
+
+/** 东财族批间隔（CR9-9）：**与源族桶自己的放行速率同值**，不是随手调的礼貌性节流。
+ *
+ * data-service 的 eastmoney 桶＝`min_interval 5s / burst 2 / rate_per_min 12`
+ * （唯一来源 `utils/limiter.py:PROFILES`）⇒ 稳态最多 12 批/分钟。
+ *
+ * 09-27 同一天、同一批转债标的做了对照实验（各 20 批 × 100 只，直连 data-service）：
+ *   · @1.5s（改动前）：尝试速率 **14.3 批/分** ＞ 桶的 12 ⇒ 批 1–2 走 burst（0.4/1.0s），
+ *     批 3–12 一律被 ds 侧 `acquire` 排队拉到 3.2~3.75s，批 13 滑窗卡到 6.86s，
+ *     批 14 东财报 all-hosts 失败并**连坐熔断 180s** ⇒ 余下批次 0.01~2.3s 全部转备源。
+ *     **非主源批次 7/20**。
+ *   · @5.5s（改动后）：尝试速率 **10.1 批/分** ＜ 12 ⇒ **非主源批次 0/20**，
+ *     单批均值从 2.69s 掉到 **0.58s**（排队整个消失），全程 `src=akshare` 无 note。
+ * ⇒ 抬到 5s（5s + 实测单批 0.58s ≈ 10.7 批/分，仍在桶内）不是"更礼貌"，而是
+ *    **让快照不再自己把家族打进熔断**——熔断一开，同族所有消费者（热点 pipeline、
+ *    搜索行情富集、其它类型快照）一起连坐，这正是 CR9-9 原始现象与 CR7-7 的根因。
+ * 代价实测口径（不是推算）：09-27 12:2x 用改后代码实跑 `POST /api/market/refresh?type=bond`
+ * ⇒ **11 批 51.7s（有效 4.7s/批，末批无尾延）**，`updated=311 failedBatches=0` 快照照常产出；
+ * 按当日真实批次数 149 个东财批次折算全类型刷新 ≈ **700s**（＋场外净值首拉与 280 批写库），
+ * 这就是 `/api/market/refresh` 的 maxDuration 从 800 抬到 1500 的依据（CR9-20）。
+ */
+export const EM_BATCH_DELAY_MS = 5000;
 
 type SnapshotResult = {
   type: string;
@@ -124,7 +153,7 @@ async function refreshSnapshotInner(type: string): Promise<SnapshotResult> {
     } catch {
       failedBatches += 1;
     }
-    if (EM_TYPES.has(type) && i + BATCH < total) {
+    if (EM_SNAPSHOT_TYPES.has(type) && i + BATCH < total) {
       await sleep(EM_BATCH_DELAY_MS);
     }
   }

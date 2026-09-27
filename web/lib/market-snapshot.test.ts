@@ -2,7 +2,11 @@ import { describe, expect, it } from "vitest";
 
 // CR-09：快照批量写用 COALESCE 保留旧值，避免部分降级把另一列为 null 的字段擦空。
 // 用纯函数 buildSnapshotUpdate 断言 SQL 与绑定参数（不触碰真实 DB）。
-import { buildSnapshotUpdate } from "./market-snapshot";
+import {
+  EM_BATCH_DELAY_MS,
+  EM_SNAPSHOT_TYPES,
+  buildSnapshotUpdate,
+} from "./market-snapshot";
 
 describe("buildSnapshotUpdate（CR-09）", () => {
   const rows = [
@@ -43,5 +47,22 @@ describe("buildSnapshotUpdate（CR-09）", () => {
     const { sql, params } = buildSnapshotUpdate("stock", []);
     expect(params).toEqual(["stock"]);
     expect((sql.match(/\?/g) ?? []).length).toBe(1);
+  });
+});
+
+// CR9-9（2026-09-27）：限速集合与批间隔按**真实出网源**判定，不再按类型名猜。
+// 旧集合只有 stock/bond ⇒ hk 与 fund 的场内部分是漏网的（实测见 market-snapshot.ts 注释）。
+describe("东财族批次限速（CR9-9）", () => {
+  it("会打东财 ulist 的四类全在集合内（本轮补 fund / hk）", () => {
+    expect([...EM_SNAPSHOT_TYPES].sort()).toEqual(["bond", "fund", "hk", "stock"]);
+  });
+
+  it("🔁 非东财族不得被限速：crypto 走 CoinGecko、us 不参与快照", () => {
+    expect(EM_SNAPSHOT_TYPES.has("crypto")).toBe(false);
+    expect(EM_SNAPSHOT_TYPES.has("us")).toBe(false);
+  });
+
+  it("批间隔不低于源族桶自己的放行下限（min_interval 5s / rate_per_min 12）", () => {
+    expect(EM_BATCH_DELAY_MS).toBeGreaterThanOrEqual(5000);
   });
 });

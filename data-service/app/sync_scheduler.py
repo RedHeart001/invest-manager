@@ -39,6 +39,26 @@ DEFAULT_SYNC_MINUTE = 0
 CATCHUP_POLL_INTERVAL_S = 10.0
 CATCHUP_YIELD_MAX_WAIT_S = 600.0
 
+# CR9-33（2026-09-27）：回调 web 的读超时**按触发形态分别取数**。
+# 一轮同步的耗时实测差一个数量级，单一预算必然要么误记失败要么放任挂死：
+#   · 定时态（到点就跑、东财空闲）runs=1 逐类 tookMs 合计约 **430s**
+#     （fund 358 / stock 41 / crypto 43 / bond 1.3 / hk 4ms）
+#   · 补跑态（重启后 catch-up：与热点争抢同一源族桶、常撞在冷却窗口上）
+#     09-26 实测 **≥29 分钟仍未收敛**，当时 1800s 第一次真被打穿
+# ⇒ 补跑态给 2700s（≥29min 实测 + 约 55% 余量），其余形态沿用 C3/CR7-9 的 1800s
+#    （定时态 4.2 倍余量）。web 侧 `maxDuration=1500` 仍小于两者，维持"web 先结束、
+#    ds 不把已成功的同步误记为失败"的口径（读超时的中性标注见 C3-③）。
+# ⚠️ 冷却日仍可能超过本预算——真护栏是源族桶自身（docs/CONSTRAINTS.md C-5），
+#    这里只保证"预算与实际形态同量级"，不假装能盖住最坏情况。
+SCHEDULED_CALLBACK_TIMEOUT_S = 1800.0
+CATCHUP_CALLBACK_TIMEOUT_S = 2700.0
+CATCHUP_TRIGGER = "startup-catchup"
+
+
+def _callback_timeout_s(trigger: str) -> float:
+    """按触发形态取回调读超时（CR9-33）。未知/手动形态按定时态预算。"""
+    return CATCHUP_CALLBACK_TIMEOUT_S if trigger == CATCHUP_TRIGGER else SCHEDULED_CALLBACK_TIMEOUT_S
+
 _scheduler: BackgroundScheduler | None = None
 _lock = threading.Lock()
 _state: dict = {"running": False, "lastRun": None, "lastDate": None, "lastResult": None, "runs": 0}
@@ -67,10 +87,12 @@ def _execute(trigger: str) -> dict:
 
     started = time.time()
     result: dict
-    # C3（CR7-9，2026-09-25）：C0 实测全 5 类型 9.6~13 分钟 → 1800s（30min）保留
-    # 约 2.3 倍余量，维持不变。
+    # C3（CR7-9，2026-09-25）：定时态实测全 5 类型 9.6~13 分钟 → 1800s 保留约 2.3 倍余量。
+    # CR9-33（2026-09-27）：预算按**触发形态**取数（补跑态实测 ≥29min，会打穿 1800s），
+    # 依据见上面 `SCHEDULED_CALLBACK_TIMEOUT_S` 一组常量；形态由 `trigger` 带进来。
+    timeout_s = _callback_timeout_s(trigger)
     try:
-        r = requests.post(f"{_web_base()}/api/sync", timeout=1800)
+        r = requests.post(f"{_web_base()}/api/sync", timeout=timeout_s)
         if r.status_code >= 300:
             result = {"error": f"HTTP {r.status_code}", "body": r.text[:200]}
             log.warning("daily sync rejected: status=%s body=%s", r.status_code, r.text[:200])
@@ -103,8 +125,9 @@ def _execute(trigger: str) -> dict:
         result = {
             "ok": True,
             "note": (
-                "回调读超时（同步可能仍在 web 侧完成，请查 /api/sync 结果或 "
-                "Product.updatedAt）——本条非失败标记"
+                f"回调读超时（本次预算 {int(timeout_s)}s，形态 {trigger}）"
+                "——同步可能仍在 web 侧完成，请查 /api/sync 结果或 "
+                "Product.updatedAt；本条非失败标记"
             ),
             "error": f"{type(e).__name__}: {e}",
         }
@@ -120,6 +143,9 @@ def _execute(trigger: str) -> dict:
         _state["runs"] += 1
         _state["running"] = False
     result["tookMsTotal"] = int((time.time() - started) * 1000)
+    # CR9-33：把本次实际生效的预算回写进状态，`GET /sync/status` 才说得出
+    # "这轮用的是哪个形态的预算"（否则超时说明只能靠读代码对）。
+    result["callbackTimeoutS"] = int(timeout_s)
     return result
 
 
@@ -211,7 +237,7 @@ def _catch_up_if_needed() -> None:
     # 无法确知"当日是否已同步"（同步状态在 web 侧，未持久化）→ 保守补跑一次：
     # 单飞 + 空载荷保护（C1）已能兜住重复同步的安全性。
     log.info("sync catch-up: running daily sync now")
-    run_now(trigger="startup-catchup")
+    run_now(trigger=CATCHUP_TRIGGER)
 
 
 def start_scheduler() -> None:

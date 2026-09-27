@@ -67,16 +67,10 @@ EM_QUOTE_FIELDS = {
 
 REQUEST_TIMEOUT = 15
 
-# R15/M8：东财为 IP 级滚动窗口限流，全部域名共享一个额度——按"源族"限速
-EM_LIMITER = get_limiter(
-    "eastmoney",
-    min_interval=5.0,
-    burst=2,
-    rate_per_min=12,
-    failure_threshold=2,
-    cooldown_base=180.0,
-    cooldown_max=900.0,
-)
+# R15/M8：东财为 IP 级滚动窗口限流，全部域名共享一个额度——按"源族"限速。
+# CR9-18：桶参数不在这里调，唯一来源是 `utils/limiter.py` 的 `PROFILES["eastmoney"]`
+# （此处曾是"首调用获胜"的第二个参数通道，改动会静默失效）。
+EM_LIMITER = get_limiter("eastmoney")
 
 
 def _em_request(fn):
@@ -771,7 +765,10 @@ class AkshareProvider(BaseProvider):
 
     # ---------- 产品列表（P1 同步） ----------
 
-    def list_products(self, type_: str) -> list[dict]:
+    def list_products(self, type_: str) -> list[dict] | tuple[list[dict], dict]:
+        """产品列表。转债一条自带主备切换 ⇒ 按 CR9-31 以 `(items, meta)` 声明出网源，
+        stock/fund 单一上游 ⇒ 仍是裸 `list[dict]`（两种形态由 `list_products_with_meta` 归一）。
+        """
         if type_ == "stock":
             return self._list_stocks()
         if type_ == "fund":
@@ -866,16 +863,20 @@ class AkshareProvider(BaseProvider):
             )
         return products
 
-    def _list_convertible_bonds(self) -> list[dict]:
+    def _list_convertible_bonds(self) -> tuple[list[dict], dict]:
         """可转债列表（MVP 债券范围，见 PLAN.md M3）。
 
         备源（2026-09-13）：东财限流时改用**新浪 cov_spot 快照**（约 320 只在交易标的）。
         覆盖度低于东财全量（1052 只，含未上市/待上市），属降级可用——避免限流期间
         转债列表整体为空、同步任务失败。
+
+        CR9-31（2026-09-27）：走备源时**必须把这件事说出来**。此前响应里只有
+        `type/count/products`，09-27 实测降级态 `count=327` 与"上游把转债砍到 327 只"
+        长得一模一样 ⇒ 降级对消费侧完全不可见（违 R16），BFF 的缩水保护也只能写"疑似"。
+        现在两条路径各自带回真实出网源，备源另带 `degraded`/`note`（与行情链路
+        `chain_call` 的标注口径一致）。
         """
         import akshare as ak
-
-        products: list[dict] = []
 
         def _build(rows) -> list[dict]:
             out: list[dict] = []
@@ -902,6 +903,7 @@ class AkshareProvider(BaseProvider):
             return out
 
         # 主源：东财全量
+        em_err = ""
         try:
             df = _em_ak_request(ak.bond_zh_cov, 90.0, "ak.bond_zh_cov")
             products = _build(
@@ -909,10 +911,12 @@ class AkshareProvider(BaseProvider):
                 for _, r in df.iterrows()
             )
         except Exception as e:  # noqa: BLE001
+            em_err = f"{type(e).__name__}: {e}"
             logger.warning("bond list primary (em) failed: %s", e)
+            products = []
 
         if products:
-            return products
+            return products, {"source": "akshare"}
 
         # 备源：新浪转债实时快照（在交易标的）
         try:
@@ -931,7 +935,14 @@ class AkshareProvider(BaseProvider):
         )
         if not products:
             raise ProviderError("convertible bond list empty from all sources")
-        return products
+        return products, {
+            "source": "sina-bond-cov-spot",
+            "degraded": True,
+            "note": (
+                f"东财转债全量列表不可用（{em_err or '未知原因'}），已降级至新浪 cov_spot 快照："
+                f"本次 {len(products)} 只、天然仅含在交易标的（东财全量约 1052 只，含未上市/待上市）"
+            ),
+        }
 
 
 _akshare = AkshareProvider()

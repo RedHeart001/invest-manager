@@ -31,6 +31,9 @@ class BaseProvider(ABC):
         """全量产品列表（供 P1 同步）。
 
         统一 schema：{type, code, name, pinyin, pinyinInitials, exchange, tags}
+
+        内部**自带主备切换**的 provider 可改返 `(items, meta)` 元组声明真正的出网源
+        与降级说明——见 `list_products_with_meta`（CR9-31）。
         """
         raise ProviderNotSupported(f"{self.source} does not support list_products")
 
@@ -86,3 +89,22 @@ def get_list_provider(type_: str) -> BaseProvider:
     if type_ not in _LIST_REGISTRY:
         raise KeyError(type_)
     return _LIST_REGISTRY[type_]
+
+
+def list_products_with_meta(
+    provider: BaseProvider, type_: str
+) -> tuple[list[dict], dict]:
+    """取全量列表，并拿到"这批数据实际来自哪个上游"（CR9-31，R16）。
+
+    默认契约不变：provider 返回 `list[dict]` ⇒ 元信息只有 provider 自己的 `source`。
+    **内部自带主备切换**的 provider 返回 `(items, meta)` ⇒ 由它自己声明真正的出网源
+    与降级说明。为什么必须显式声明（09-27 实证）：东财冷却时 `?type=bond` 的列表
+    1059→327 只，而响应里没有任何字段说得出"这 327 只是备源快照、覆盖面天然如此"，
+    降级对消费侧完全不可见——同一件事在行情链路上早就由 `chain_call` 写进 `note`
+    （`chain.py:31-35`），列表链路此前是漏的。
+    """
+    raw = provider.list_products(type_)
+    if isinstance(raw, tuple):
+        items, meta = raw
+        return items, {"source": provider.source, **(meta or {})}
+    return raw, {"source": provider.source}

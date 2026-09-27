@@ -25,6 +25,7 @@ from .providers import (
     ProviderNotSupported,
     get_list_provider,
     get_provider_chain,
+    list_products_with_meta,
 )
 from .research import tasks as research_tasks
 
@@ -164,18 +165,23 @@ def kline(
 def products(
     type: str = Query(..., description="产品类型：stock/fund/bond/crypto"),
 ):
-    """全量产品列表（供 BFF 同步落库，低频调用）。"""
+    """全量产品列表（供 BFF 同步落库，低频调用）。
+
+    CR9-31：响应恒带 `source`（这批数据真正的出网上游），走内部备源时另带
+    `degraded`/`note`——覆盖面缩水必须对消费侧可见（R16），否则 BFF 只能猜。
+    `count`/`products` 的既有形态不变（新增键，不破坏既有调用方）。
+    """
     try:
         provider = get_list_provider(type)
     except KeyError:
         raise HTTPException(status_code=400, detail=f"unsupported list type: {type}")
     try:
-        items = provider.list_products(type)
+        items, meta = list_products_with_meta(provider, type)
     except ProviderNotSupported as e:
         raise HTTPException(status_code=501, detail=str(e))
     except ProviderError as e:
         raise HTTPException(status_code=502, detail=str(e))
-    return {"type": type, "count": len(items), "products": items}
+    return {"type": type, "count": len(items), "products": items, **meta}
 
 
 # ---------- P2 新增：详情页数据接口（R10：失败降级为 200 + degraded 标注） ----------

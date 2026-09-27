@@ -22,7 +22,12 @@ os.environ.setdefault("NO_PROXY", "*")
 os.environ.setdefault("no_proxy", "*")
 
 from .hotspot import scheduler as hotspot_scheduler
-from .providers import ProviderError, get_list_provider, get_provider_chain
+from .providers import (
+    ProviderError,
+    get_list_provider,
+    get_provider_chain,
+    list_products_with_meta,
+)
 from .providers.chain import chain_call as _providers_chain_call
 from .research import tasks as research_tasks
 
@@ -99,7 +104,9 @@ def list_products(type: str = "stock", limit: int = 50) -> dict:
     # D3（CR7-13，2026-09-25）：list_products 无内在超时（hk 直连分页可达数十发
     # 请求）——外部 MCP 客户端视角此前是"无响应卡死 4 分钟"。用看门狗包裹，
     # 超时按 ProviderError 降级语义返回（不挂死客户端）。
-    value, err = run_with_timeout(lambda: provider.list_products(type), MCP_LIST_TIMEOUT_S, f"mcp.list_products({type})")
+    value, err = run_with_timeout(
+        lambda: list_products_with_meta(provider, type), MCP_LIST_TIMEOUT_S, f"mcp.list_products({type})"
+    )
     if err is not None:
         return {
             "type": type,
@@ -108,8 +115,15 @@ def list_products(type: str = "stock", limit: int = 50) -> dict:
             "degraded": True,
             "note": f"产品列表获取失败（{err.__class__.__name__}: {err}）",
         }
-    items = value or []
-    return {"type": type, "count": len(items), "products": items[: max(1, min(limit, 200))]}
+    items, meta = value if isinstance(value, tuple) else ([], {})
+    # CR9-31：来源标注一并带给外部 agent（与 REST /products 同一口径）——覆盖面因降级
+    # 变小时，"只有数量"会让外部使用者把降级当成上游真值。
+    return {
+        "type": type,
+        "count": len(items),
+        "products": items[: max(1, min(limit, 200))],
+        **meta,
+    }
 
 
 @mcp.tool

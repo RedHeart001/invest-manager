@@ -115,11 +115,15 @@ async function _syncTypeInner(type: string): Promise<SyncResult> {
     // 超时说明（2026-09-20）：港股列表必须分页（东财 `clist/get` 对港股忽略大分页参数，
     // 固定 100 条/页；约 4700 只 → 48 页），且每页经源族限速器（最小间隔 5s）
     // → 最坏约 4 分钟。原 180s 会在港股同步时必然超时，故放宽到 600s。
-    const data = await dsGet<{ count: number; products: ProductPayload[] }>(
-      "/products",
-      { type },
-      600_000,
-    );
+    const data = await dsGet<{
+      count: number;
+      products: ProductPayload[];
+      // CR9-31：data-service 对列表载荷显式声明出网源（走内部备源时另带 degraded/note）。
+      // 覆盖面因降级而缩水这件事，此前消费侧只能靠条数猜——见下面缩水保护那段。
+      source?: string;
+      degraded?: boolean;
+      note?: string;
+    }>("/products", { type }, 600_000);
     const rows = (data.products ?? []).map((p) => ({
       id: randomUUID(),
       type: p.type,
@@ -158,11 +162,16 @@ async function _syncTypeInner(type: string): Promise<SyncResult> {
     // 新载荷明显缩水（< 70%）时保留旧数据并显式标注，等主源恢复后再全量更新。
     const existingCount = await prisma.product.count({ where: { type } });
     if (existingCount > 0 && rows.length < existingCount * 0.7) {
+      // CR9-31：上游已显式声明降级时，这里不再是"疑似"，而是带来源、带原话的诊断
+      // （省掉一次去 data-service 日志里翻根因的功夫）；未声明时保留原有猜测口径。
+      const cause = data.degraded
+        ? `data-service 已声明降级：source=${data.source ?? "?"}——${data.note ?? "（无说明）"}`
+        : "疑似降级备源覆盖度不足";
       return {
         type,
         error:
           `payload shrunk (${rows.length} < ${existingCount} 的 70%)，` +
-          `疑似降级备源覆盖度不足，已保留现有数据`,
+          `${cause}，已保留现有数据`,
         tookMs: Date.now() - started,
       };
     }
@@ -212,12 +221,19 @@ async function _syncTypeInner(type: string): Promise<SyncResult> {
     // 暂存表清理统一放到 finally（成功/失败都要 DROP，避免失败时残留全量数据）
     await rebuildFts(type);
     // R14：同步完成后刷新行情快照（分类浏览排序用；失败不影响同步结果）
+    // CR9-31（R16）：载荷被上游声明为降级来源时，即便条数过了缩水闸门也要留痕——
+    // 否则"327 只转债入库"与全量同步长得一模一样，分类浏览的覆盖面缺口没人说得清。
     let note: string | undefined;
+    if (data.degraded) {
+      note = `list degraded source=${data.source ?? "?"}${data.note ? `：${data.note}` : ""}`;
+    }
     try {
       const snap = await refreshSnapshot(type);
-      note = `snapshot updated=${snap.updated}/${snap.total} failedBatches=${snap.failedBatches}`;
+      note =
+        `${note ? note + "；" : ""}snapshot updated=${snap.updated}/${snap.total}` +
+        ` failedBatches=${snap.failedBatches}`;
     } catch (e) {
-      note = `snapshot failed: ${e instanceof Error ? e.message : "unknown"}`;
+      note = `${note ? note + "；" : ""}snapshot failed: ${e instanceof Error ? e.message : "unknown"}`;
     }
     return { type, count: rows.length, note, tookMs: Date.now() - started };
   } catch (e) {

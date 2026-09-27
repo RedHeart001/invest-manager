@@ -193,7 +193,10 @@ async function main() {
     ok(
       "可转债列表非空（ds 全量/备源）",
       bonds.length > 0,
-      `status=${list.status} n=${bonds.length} ${list.body.detail ?? ""}`,
+      // CR9-31：把 data-service 声明的出网源/降级说明一并打出来——覆盖面是 1059 还是
+      // 320 只，光看 n= 判不出来；没有 source 就只能事后翻 ds 日志。
+      `status=${list.status} n=${bonds.length} src=${list.body.source ?? "?"}` +
+        `${list.body.degraded ? ` degraded:${list.body.note ?? ""}` : ""} ${list.body.detail ?? ""}`,
     );
 
     const SEGMENTS = {

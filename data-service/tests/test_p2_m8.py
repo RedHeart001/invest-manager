@@ -64,6 +64,138 @@ def test_limiter() -> None:
     check("限速器：每分钟上限超限不硬等", lim3.acquire(timeout=0.3) is False)
 
 
+def test_limiter_profile_single_source() -> None:
+    """CR9-18：桶参数只有一个来源，调参不会被"首调用获胜"静默吞掉。
+
+    旧缺陷现场：`hotspot/pipeline.py` 先 `get_limiter("eastmoney")`（无参）创建，
+    `akshare_provider` 随后传的六个参数因"已存在即复用"而全部丢弃——两处取值今天
+    恰好相同所以无症状，一旦按 C-5 调桶就会"改了不生效且不报错"。
+    """
+    import inspect
+
+    from app.utils import limiter
+
+    params = list(inspect.signature(limiter.get_limiter).parameters)
+    check("CR9-18：get_limiter 不再有第二个参数通道（签名只剩 name）",
+          params == ["name"], str(params))
+    try:
+        limiter.get_limiter("eastmoney", min_interval=99.0)  # type: ignore[call-arg]
+        kwargs_rejected = False
+    except TypeError:
+        kwargs_rejected = True
+    check("CR9-18🔁：传参数会被拒（调参只能改 PROFILES 一处）", kwargs_rejected)
+
+    em = limiter.get_limiter("eastmoney")
+    declared = limiter.PROFILES["eastmoney"]
+    actual = {k: getattr(em, k) for k in declared}
+    check("CR9-18：线上实例的六个值逐项等于 PROFILES", actual == declared, str(actual))
+    check("CR9-18：两个调用点拿到同一个源族实例",
+          limiter.get_limiter("eastmoney") is em)
+
+    from app.hotspot import pipeline
+    from app.providers import akshare_provider
+
+    check("CR9-18：pipeline._EM 与 akshare.EM_LIMITER 同源同实例",
+          pipeline._EM is akshare_provider.EM_LIMITER is em)
+
+    # 🔁 反向对照：改唯一来源，新建族必须真的取到新值（证明这条链没被别处覆盖）
+    fake = "__cr9_18_family"
+    undeclared = "__cr9_18_undeclared"
+    try:
+        limiter.PROFILES[fake] = {"min_interval": 0.75, "rate_per_min": 3}
+        created = limiter.get_limiter(fake)
+        check("CR9-18🔁：PROFILES 改动对新建源族立即生效",
+              created.min_interval == 0.75 and created.rate_per_min == 3,
+              f"got={created.min_interval}/{created.rate_per_min}")
+        unset = limiter.get_limiter(undeclared)
+        check("CR9-18🔁：未声明的族回落到类默认值（不是别处的隐式参数）",
+              unset.min_interval == FamilyLimiter("probe").min_interval)
+    finally:
+        limiter.PROFILES.pop(fake, None)
+        limiter._LIMITERS.pop(fake, None)
+        limiter._LIMITERS.pop(undeclared, None)
+        check("CR9-18：临时源族已清干净（不污染其它用例）",
+              fake not in limiter.PROFILES and fake not in limiter._LIMITERS)
+
+
+# ---------- 列表来源元信息（CR9-31） ----------
+
+
+def test_list_products_meta() -> None:
+    """列表类内部主备切换必须声明来源，否则降级对消费侧不可见（R16）。
+
+    实证（09-27）：东财冷却时 `/products?type=bond` 返回 327 只，响应里只有
+    type/count/products——与"上游真只有 327 只"长得一模一样，web 侧缩水保护
+    只能写"疑似"。现在 provider 用 `(items, meta)` 形态自己说清楚。
+    """
+    import akshare as ak
+    import pandas as pd
+
+    import app.providers.akshare_provider as akp
+    from app.providers.base import ProviderError, list_products_with_meta
+
+    orig = {n: getattr(ak, n) for n in ("bond_zh_cov", "bond_zh_hs_cov_spot")}
+    orig_limiter = (akp.EM_LIMITER.acquire, akp.EM_LIMITER.on_success, akp.EM_LIMITER.on_failure)
+    akp.EM_LIMITER.acquire = lambda *a, **k: True  # type: ignore[assignment]
+    akp.EM_LIMITER.on_success = lambda: None  # type: ignore[assignment]
+    akp.EM_LIMITER.on_failure = lambda: None  # type: ignore[assignment]
+
+    em_df = pd.DataFrame(
+        {"债券代码": ["113050", "123285"], "债券简称": ["N价值", "润禾转02"]}
+    )
+    sina_df = pd.DataFrame({"symbol": ["sh113050", "sz123285"], "name": ["价值转债", "润禾转债"]})
+
+    class _Plain:  # 默认契约：只回 list，不带元信息
+        source = "plain-src"
+
+        def list_products(self, type_: str):
+            return [{"code": "00700"}]
+
+    try:
+        items, meta = list_products_with_meta(_Plain(), "hk")
+        check("CR9-31：裸 list 契约不变，meta 回落 provider.source",
+              items == [{"code": "00700"}] and meta == {"source": "plain-src"}, str(meta))
+
+        # ① 主源（东财）成功 → 声明 akshare，且不得带 degraded 标记
+        ak.bond_zh_cov = lambda: em_df
+        ak.bond_zh_hs_cov_spot = lambda: sina_df
+        items, meta = list_products_with_meta(akp._akshare, "bond")
+        check("CR9-31：东财主源 count 与 schema 不变",
+              len(items) == 2 and items[0]["type"] == "bond" and "可转债" in items[0]["tags"],
+              str(items[:1]))
+        check("CR9-31：主源不谎称降级",
+              meta.get("source") == "akshare" and "degraded" not in meta, str(meta))
+
+        # ② 主源失败 → 备源必须自报来源 + degraded + note（含本次条数与原始错误）
+        def _boom():
+            raise RuntimeError("bond_zh_cov timeout")
+
+        ak.bond_zh_cov = _boom
+        items, meta = list_products_with_meta(akp._akshare, "bond")
+        note = meta.get("note") or ""
+        check("CR9-31🔁：备源来自 320 只快照（2 条样例）", len(items) == 2, str(items[:1]))
+        check("CR9-31🔁：备源显式声明 source/degraded",
+              meta.get("source") == "sina-bond-cov-spot" and meta.get("degraded") is True,
+              str(meta))
+        check("CR9-31🔁：note 说得出降级原因原文与本次覆盖面",
+              "bond_zh_cov timeout" in note and "本次 2 只" in note and "cov_spot" in note,
+              note[:200])
+        check("CR9-31🔁：备源 exchange 仍按新浪前缀解析（CR-17 口径未破）",
+              [x["exchange"] for x in items] == ["SH", "SZ"], str(items))
+
+        # ③ 两源皆空 → 仍按原契约抛 ProviderError（不静默返回空列表）
+        ak.bond_zh_hs_cov_spot = lambda: pd.DataFrame({"symbol": [], "name": []})
+        try:
+            list_products_with_meta(akp._akshare, "bond")
+            check("CR9-31🔁：两源皆空仍抛 ProviderError", False, "没抛错")
+        except ProviderError as e:
+            check("CR9-31🔁：两源皆空仍抛 ProviderError", "empty from all sources" in str(e), str(e))
+    finally:
+        for n, f in orig.items():
+            setattr(ak, n, f)
+        akp.EM_LIMITER.acquire, akp.EM_LIMITER.on_success, akp.EM_LIMITER.on_failure = orig_limiter
+
+
 # ---------- 符号映射 ----------
 
 
@@ -580,6 +712,8 @@ def test_fund_holdings_missing_column_and_beijing_dates() -> None:
 
 if __name__ == "__main__":
     test_limiter()
+    test_limiter_profile_single_source()
+    test_list_products_meta()
     test_symbol_mapping()
     test_chain()
     test_tencent_parsers()

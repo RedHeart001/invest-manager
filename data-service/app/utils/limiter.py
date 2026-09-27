@@ -114,9 +114,31 @@ class FamilyLimiter:
 _LIMITERS: dict[str, FamilyLimiter] = {}
 _REGISTRY_LOCK = threading.Lock()
 
+# CR9-18（2026-09-27）：桶参数**只有一个来源**。
+# 旧实现 `get_limiter(name, **kwargs)` 是"首调用获胜"——同名族的 kwargs 只在创建那一刻
+# 生效，而谁是首调用由 import 顺序决定：`hotspot/pipeline.py` 的无参调用先创建 eastmoney
+# 族，`akshare_provider` 写在调用点上的六个参数就被静默丢弃（当前两处取值恰好相同，
+# 所以无症状；一旦按 C-5 调桶，改动会不生效且不报错）。
+# 现在 get_limiter 不再接受参数，调参只有 PROFILES 一处。
+PROFILES: dict[str, dict] = {
+    "eastmoney": {
+        # R15/M8：东财 IP 级滚动窗口限流，全部域名共享额度（实测见 C-5）
+        "min_interval": 5.0,
+        "burst": 2,
+        "rate_per_min": 12,
+        "failure_threshold": 2,
+        "cooldown_base": 180.0,
+        "cooldown_max": 900.0,
+    },
+}
 
-def get_limiter(name: str, **kwargs) -> FamilyLimiter:
+
+def get_limiter(name: str) -> FamilyLimiter:
+    """取源族共享限速器（按名创建一次，之后所有调用方拿到同一实例）。
+
+    参数一律来自 `PROFILES[name]`；未声明的源族用 `FamilyLimiter` 的类默认值。
+    """
     with _REGISTRY_LOCK:
         if name not in _LIMITERS:
-            _LIMITERS[name] = FamilyLimiter(name, **kwargs)
+            _LIMITERS[name] = FamilyLimiter(name, **PROFILES.get(name, {}))
         return _LIMITERS[name]

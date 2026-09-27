@@ -34,11 +34,28 @@ def get(path: str, **params) -> requests.Response:
 r = get("/products", type="bond")
 body = r.json()
 items = body.get("products") or []
+# CR9-31（2026-09-27）：断言**按来源分别取数**（C23：验收不得写死单一数据源）。
+# 东财主源＝全量约 1059；新浪 cov_spot 备源＝天然只有约 320 只在交易标的。
+# 原断言只有 ">500"，于是"上游降级"与"上游把转债砍了一半"长得一样——今天红的那条
+# 就是靠这个缺口混成"环境噪声"的。现在降级必须由响应自己声明（source/degraded/note）。
 check(
-    "products?type=bond 返回 200 且数量 > 500",
-    r.status_code == 200 and body.get("count", 0) > 500,
-    f"status={r.status_code} count={body.get('count')}",
+    "products?type=bond 返回 200 且响应声明来源（CR9-31）",
+    r.status_code == 200 and bool(body.get("source")),
+    f"status={r.status_code} keys={sorted(body.keys())}",
 )
+_degraded = body.get("degraded") is True
+if _degraded:
+    check(
+        "bond 备源态：覆盖面按声明自洽（>=250）且带降级说明",
+        body.get("count", 0) >= 250 and bool(body.get("note")) and "cov_spot" in str(body.get("note")),
+        f"count={body.get('count')} note={str(body.get('note'))[:120]}",
+    )
+else:
+    check(
+        "bond 主源态：全量覆盖 count > 500",
+        body.get("count", 0) > 500,
+        f"status={r.status_code} count={body.get('count')} source={body.get('source')}",
+    )
 
 sample = items[0] if items else {}
 check(
