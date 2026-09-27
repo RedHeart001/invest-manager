@@ -105,6 +105,7 @@ export default async function ProductPage({
     code,
     interval: "1d",
     valueOnly: false,
+    flatOhlc: false,
     source: "--",
     candles: [],
     phases: [],

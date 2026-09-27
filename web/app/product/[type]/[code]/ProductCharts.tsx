@@ -63,6 +63,9 @@ export default function ProductCharts({
   const [error, setError] = useState<string | null>(null);
   // C6b（2026-09-25）：分钟线失败回落 3M 时的降级标注（R16：降级必须显式）
   const [fallbackNote, setFallbackNote] = useState<string | null>(null);
+  // CR9-43：回落发生时高亮留在**用户按下的那一档**（`rangeKey` 继续记数据档，
+  // 供对比窗口等数据语义用），否则点 1D 会"闪一下跳回 3M"、被读成没反应。
+  const [fallbackFrom, setFallbackFrom] = useState<string | null>(null);
   const [compareInput, setCompareInput] = useState("");
   const [compare, setCompare] = useState<{ code: string; candles: Candle[] } | null>(null);
   const [chartReady, setChartReady] = useState(false);
@@ -84,6 +87,7 @@ export default function ProductCharts({
       compareCode?: string;
       rangeKey?: string;
       fallbackNote?: string | null;
+      fallbackFrom?: string | null;
     }) => {
       // 新请求 aborts 旧请求；序号守卫丢弃过期响应
       abortRef.current?.abort();
@@ -97,6 +101,8 @@ export default function ProductCharts({
       // C6b：新一次**用户主动**加载（rangeKey 非 fallback 触发）清掉上一轮的回落标注；
       // 回落调用自身传入 fallbackNote，不会被这里清掉（清完再设）。
       if (params.fallbackNote === undefined) setFallbackNote(null);
+      // CR9-43：只有回落调用会带 fallbackFrom；正常加载一律清空
+      setFallbackFrom(params.fallbackFrom ?? null);
       // C6b 的回落动作（抛错与"200 空序列"两种成因共用，见 CR9-13）
       const fallbackToDaily3M = () => {
         void load({
@@ -104,6 +110,8 @@ export default function ProductCharts({
           end: beijingToday(),
           interval: "1d",
           rangeKey: "3M",
+          // CR9-43：数据档是 3M，高亮留在用户按下的那一档
+          fallbackFrom: params.rangeKey ?? "1D",
           fallbackNote: "分钟线暂不可用，已显示近 3 个月日线",
         });
       };
@@ -308,7 +316,9 @@ export default function ProductCharts({
           }
         : undefined;
 
-      if (kline.valueOnly) {
+      if (kline.valueOnly || kline.flatOhlc) {
+        // CR9-42：仅有收盘价的序列（净值型品种，或降级到"只给分钟收盘价"的源）
+        // 画 K 线会得到 267 根零高度实体 = 一堆散点，用户读作"没数据"。
         series.push({
           name: valueLabel,
           type: "line",
@@ -428,7 +438,8 @@ export default function ProductCharts({
               onClick={() => applyPreset(p)}
               disabled={pending}
               className={`rounded px-2.5 py-1 text-xs font-medium transition-colors disabled:opacity-50 ${
-                rangeKey === p.key
+                // CR9-43：回落态下高亮跟随"用户按下的那一档"，不是数据档
+                (fallbackFrom ?? rangeKey) === p.key
                   ? "bg-blue-600 text-white"
                   : "bg-zinc-100 text-zinc-600 hover:bg-zinc-200"
               }`}
@@ -436,6 +447,14 @@ export default function ProductCharts({
               {p.label}
             </button>
           ))}
+          {fallbackFrom && (
+            <span
+              data-testid="fallback-chip"
+              className="rounded bg-amber-50 px-2 py-1 text-xs text-amber-700"
+            >
+              {fallbackFrom} 无分钟数据 · 已显示 3M 日线
+            </span>
+          )}
           <span className="ml-2 flex items-center gap-1 text-xs text-zinc-500">
             <input
               type="date"
@@ -505,7 +524,12 @@ export default function ProductCharts({
               </span>
             )}
             数据来源：{kline.source}
-            {kline.valueOnly ? "（该品种仅收盘值序列）" : ""}
+            {kline.valueOnly
+              ? "（该品种仅收盘值序列）"
+              : kline.flatOhlc
+                ? // CR9-42：不是"品种只有净值"，而是这个源/粒度只给收盘价——两种文案不能混用
+                  "（该序列仅有收盘价）"
+                : ""}
             {kline.interval === "1d" && kline.cachedDays > 0 && kline.fetchedDays > 0
               ? ` · 命中缓存 ${kline.cachedDays} 天 / 增量拉取 ${kline.fetchedDays} 天`
               : ""}

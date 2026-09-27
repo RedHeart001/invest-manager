@@ -5,6 +5,7 @@
 // - 回源失败时已有缓存照常返回（R10 优雅降级，note 标注）
 
 import { prisma } from "@/lib/prisma";
+import { isFlatOhlcSeries } from "@/lib/kline-shape";
 import { Lru } from "./lru";
 import { beijingToday } from "./time";
 import { dsGet } from "@/lib/data-service";
@@ -24,6 +25,10 @@ export type KlineResult = {
   code: string;
   interval: string;
   valueOnly: boolean;
+  // CR9-42：本响应里的 OHLC 是否"每根四值全相等"（净值型品种必然如此；降级到
+  // 只给分钟收盘价的源也如此）。为 true 时前端画收盘价折线而非 K 线——否则每根
+  // 实体高度为 0，分钟图会渲染成一堆"看起来像没数据"的散点。
+  flatOhlc: boolean;
   source: string;
   candles: Candle[];
   phases: ReturnType<typeof detectPhases>;
@@ -239,6 +244,9 @@ export async function getKlineRange(
       code,
       interval,
       valueOnly: Boolean(ds.valueOnly),
+      // CR9-42：分钟透传路径此前只看 ds 的 valueOnly，降级源（如腾讯分钟线只给
+      // 该分钟最后一笔价）的四值相等形态被漏掉 → 前端画成散点。
+      flatOhlc: isFlatOhlcSeries(ds.candles ?? []),
       source: ds.source,
       candles: ds.candles,
       phases: [],
@@ -271,6 +279,7 @@ export async function getKlineRange(
         code,
         interval: "1d",
         valueOnly: false,
+        flatOhlc: false,
         source: "--",
         candles: [],
         phases: [],
@@ -369,11 +378,16 @@ export async function getKlineRange(
     volume: r.volume,
   }));
 
+  // CR9-42：判据提为 isFlatOhlcSeries，语义与原来的 `length>0 && every(四值相等)`
+  // 逐字等价（日线路径行为不变），只是让分钟路径共用同一条规则。
+  const flat = isFlatOhlcSeries(candleList);
+
   return {
     type,
     code,
     interval: "1d",
-    valueOnly: rows.length > 0 && rows.every((r) => r.open === r.close && r.high === r.close && r.low === r.close),
+    valueOnly: flat,
+    flatOhlc: flat,
     source: rows.length > 0 ? (fetchedSource || rows[rows.length - 1].source) : "cache",
     candles: candleList,
     // P5：阶段划分随响应返回（vendor_adapter 研报与详情页归因同源）
