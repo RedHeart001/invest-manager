@@ -13,7 +13,7 @@
 | 类别 | 具体项 |
 |---|---|
 | LLM | `LLM_API_KEY`；`LLM_BASE_URL` 中的真实私有端点 |
-| 数据源 | `TAVILY_API_KEY` / `SEARCH_API_KEY`（Tavily）、`ALPHA_VANTAGE_API_KEY` |
+| 数据源 | `TAVILY_API_KEY` / `SEARCH_API_KEY`（Tavily） |
 | 落库回调 | `INGEST_TOKEN` |
 | 基础设施 | 真实代理凭据、含口令的数据库连接串、SSH 私钥、证书 |
 | 形态特征 | `sk-…`、`tvly-…`、`ghp_…`、`AKIA…`、以及赋给 `*_KEY/_SECRET/_TOKEN/_PASSWORD` 的长随机串 |

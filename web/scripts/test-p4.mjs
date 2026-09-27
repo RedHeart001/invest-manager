@@ -38,12 +38,70 @@ async function jsonOf(res, what) {
   }
 }
 
+/** 读完一条 SSE 流：返回正文、事件序列与 HTTP 状态。
+ *  原为 [4] 段私有，[5] 组合链也要用同一套读法 ⇒ 提到模块作用域，避免两份解析器各自腐烂。 */
+async function readAll(res, timeoutMs = 90_000) {
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let text = "";
+  const events = []; // CR9-38：断言要看事件流本身（有哪些事件、工具入参是什么）
+  let terminated = false;
+  const deadline = Date.now() + timeoutMs;
+  let pendingRead = null;
+  const readChunk = async () => {
+    if (!pendingRead) pendingRead = reader.read();
+    const winner = await Promise.race([
+      pendingRead.then((r) => ({ r })),
+      new Promise((r) => setTimeout(() => r(null), 500)),
+    ]);
+    if (winner) {
+      pendingRead = null;
+      return winner.r;
+    }
+    return null;
+  };
+  while (Date.now() < deadline && !terminated) {
+    const rr = await readChunk();
+    if (rr) {
+      const { value, done } = rr;
+      if (done) break;
+      if (value) buffer += decoder.decode(value, { stream: true });
+    }
+    while (true) {
+      const evIdx = buffer.indexOf("event:");
+      if (evIdx < 0) break;
+      const dataIdx = buffer.indexOf("data:", evIdx);
+      if (dataIdx < 0) break;
+      const evEnd = buffer.indexOf("\n", evIdx);
+      const dataEnd = buffer.indexOf("\n", dataIdx);
+      if (evEnd < 0 || dataEnd < 0 || dataEnd < evEnd) break;
+      const ev = buffer.slice(evIdx + 6, evEnd).trim();
+      const dataRaw = buffer.slice(dataIdx + 5, dataEnd).trim();
+      buffer = buffer.slice(dataEnd + 1);
+      // 帧内容不保证是完整 JSON（C3：LLM 流的尾帧常无换行结尾），解析不了就留空对象，
+      // 但事件名照常记账——CR9-38 的断言要看的是"有哪些事件、工具入参是什么"。
+      let data = {};
+      try {
+        data = JSON.parse(dataRaw) ?? {};
+      } catch {
+        /* 忽略坏帧 */
+      }
+      events.push({ ev, data });
+      if (ev === "delta") text += String(data.content ?? "");
+      if (ev === "error" || ev === "done") terminated = true;
+    }
+  }
+  return { text, events, status: res.status };
+}
+
 async function main() {
   console.log(`\n== P4 验收（部分）：BFF=${BASE}\n`);
 
   // ---------- 1. 会话持久化 ----------
   console.log("[1] 会话持久化");
   let sid = "";
+  let llmConfigured = false; // [2] 判定；[5] 组合链依赖 LLM，未配置时按设计整段跳过
   {
     const res = await fetch(`${BASE}/api/chat/sessions`, {
       method: "POST",
@@ -145,6 +203,7 @@ async function main() {
       ok("LLM 未配置 → 明确指引事件", String(errEv.message ?? "").includes("web/.env"));
       console.log("  （LLM 未配置，跳过 function calling E2E 断言）");
     } else {
+      llmConfigured = true;
       ok("收到 meta", byEv("meta").length > 0);
       ok("发生工具调用（status/tool_result）", byEv("status").length > 0 || byEv("tool_result").length > 0, `status=${byEv("status").length} toolResult=${byEv("tool_result").length}`);
       ok("收到流式正文（delta 非空）", deltaLen > 10, `deltaLen=${deltaLen}`);
@@ -198,61 +257,6 @@ async function main() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ sessionId: sid2, message: msg }),
       });
-
-    const readAll = async (res, timeoutMs = 90_000) => {
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-      let text = "";
-      const events = []; // CR9-38：断言要看事件流本身（有哪些事件、工具入参是什么）
-      let terminated = false;
-      const deadline = Date.now() + timeoutMs;
-      let pendingRead = null;
-      const readChunk = async () => {
-        if (!pendingRead) pendingRead = reader.read();
-        const winner = await Promise.race([
-          pendingRead.then((r) => ({ r })),
-          new Promise((r) => setTimeout(() => r(null), 500)),
-        ]);
-        if (winner) {
-          pendingRead = null;
-          return winner.r;
-        }
-        return null;
-      };
-      while (Date.now() < deadline && !terminated) {
-        const rr = await readChunk();
-        if (rr) {
-          const { value, done } = rr;
-          if (done) break;
-          if (value) buffer += decoder.decode(value, { stream: true });
-        }
-        while (true) {
-          const evIdx = buffer.indexOf("event:");
-          if (evIdx < 0) break;
-          const dataIdx = buffer.indexOf("data:", evIdx);
-          if (dataIdx < 0) break;
-          const evEnd = buffer.indexOf("\n", evIdx);
-          const dataEnd = buffer.indexOf("\n", dataIdx);
-          if (evEnd < 0 || dataEnd < 0 || dataEnd < evEnd) break;
-          const ev = buffer.slice(evIdx + 6, evEnd).trim();
-          const dataRaw = buffer.slice(dataIdx + 5, dataEnd).trim();
-          buffer = buffer.slice(dataEnd + 1);
-          // 帧内容不保证是完整 JSON（C3：LLM 流的尾帧常无换行结尾），解析不了就留空对象，
-          // 但事件名照常记账——CR9-38 的断言要看的是"有哪些事件、工具入参是什么"。
-          let data = {};
-          try {
-            data = JSON.parse(dataRaw) ?? {};
-          } catch {
-            /* 忽略坏帧 */
-          }
-          events.push({ ev, data });
-          if (ev === "delta") text += String(data.content ?? "");
-          if (ev === "error" || ev === "done") terminated = true;
-        }
-      }
-      return { text, events, status: res.status };
-    };
 
     // CR9-38（2026-09-27）：原来两条断言是"回答里有没有 600519"“有没有'股票/stock'"——
     // 那是拿**模型措辞**当验收，同一轮改动下批次跑 18/19、单跑 3 次里 2 次 19/19，
@@ -313,6 +317,54 @@ async function main() {
     }
 
     await fetch(`${BASE}/api/chat/sessions/${sid2}`, { method: "DELETE" });
+  }
+
+  // ---------- 5. 组合链（一轮 chat 触发 ≥2 次工具调用；原 scripts/b2-chain.mjs 并入） ----------
+  // 并入理由：b2-chain 不在 verify-all 的 7 套件内（`verify-all.mjs:7`），门境外跑＝会静默腐烂；
+  // 它唯一不可替代的覆盖是"一轮内多工具组合"，其余 6 条与 [2] 等价。
+  // 只搬 3 条结构化断言，**不搬** b2-chain 的 `get_hotspots || deltaLen > 50` 逃生门
+  //（模型凭记忆作答也能过＝CR9-38 判过的"没有判别力"）。
+  // deadline 300s：09-28 实测这一轮走完要 178.0s（done 事件时刻），而 b2-chain 原来的 180s
+  // 贴着上限——一旦超时就把它自己的正文/收尾/引用三条全判红，那是脚本的锅不是产品的锅。
+  console.log("[5] 组合链（热点 + 行情，一轮内多工具调用）");
+  if (!llmConfigured) {
+    console.log("  （LLM 未配置，跳过组合链断言）");
+  } else {
+    const mkc = await fetch(`${BASE}/api/chat/sessions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: "【测试】组合链" }),
+    });
+    const sid3 = (await jsonOf(mkc, "POST /api/chat/sessions（组合链）")).id;
+    const c = await readAll(
+      await fetch(`${BASE}/api/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sessionId: sid3,
+          message: "查一下最近的市场热点，然后帮我看看贵州茅台现在的行情怎么样",
+        }),
+      }),
+      300_000,
+    );
+    const toolNames = c.events.filter((e) => e.ev === "status").map((e) => e.data.name);
+    const evNames = c.events.map((e) => e.ev);
+    const tools = toolNames.join(",");
+
+    ok("组合链：一轮内发生 ≥2 次工具调用", toolNames.length >= 2, `count=${toolNames.length} tools=${tools}`);
+    ok(
+      "组合链：热点族与行情族工具各被调用",
+      toolNames.includes("get_hotspots") &&
+        (toolNames.includes("get_quote") || toolNames.includes("get_kline")),
+      `tools=${tools}`,
+    );
+    ok(
+      "组合链：走完（done 收尾、无 error、正文非空）",
+      evNames.includes("done") && !evNames.includes("error") && c.text.trim().length > 0,
+      `done=${evNames.includes("done")} error=${evNames.includes("error")} len=${c.text.trim().length}`,
+    );
+
+    await fetch(`${BASE}/api/chat/sessions/${sid3}`, { method: "DELETE" });
   }
 
   console.log(`\n== 结果：${passed} 通过 / ${failed} 失败 ==`);

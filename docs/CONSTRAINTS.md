@@ -20,7 +20,7 @@
 | **C1** | **空载荷保护**：`syncType` 全量替换（先删后插）前必须判空——上游返回空列表时**保留旧数据并返回 error**，禁止静默清库 | `web/lib/sync.ts` |
 | **C2** | **会话上下文取最近 200 条**：`getMessages` 必须 desc 取再反转时间序；asc+take 会静默丢弃最新对话 | `web/lib/chat.ts` |
 | **C3** | **LLM 流必须 flush 尾帧**：最后一帧常无换行结尾（可能携带 finish_reason/tool_calls 分片）；工具调用产出**只看累积结果**，不强依赖 `finish==="tool_calls"` | `web/lib/llm.ts` |
-| **C4** | **行情数值缺失一律 null**：禁止 `Number(null)===0` 式转换把"缺价"上报成"现价 0 元" | `web/lib/tools.ts#numOrNull`（**唯一防线，且至今无单测**，见 CR7-11） |
+| **C4** | **行情数值缺失一律 null**：禁止 `Number(null)===0` 式转换把"缺价"上报成"现价 0 元" | `web/lib/tools.ts#numOrNull`（**唯一防线**；**09-27 复核：单测已补** = `web/lib/tools-num.test.ts` 4 项，CR7-11/D1 交付，今日实跑全绿） |
 | **C5** | **`provider.get_news` 契约 = `list[dict]`**：研报采集链对 dict/list 双兼容（此前东财主源一旦真正返回新闻就 AttributeError 打挂整条研报任务，巨潮备源成死代码） | `data-service/app/research/adapter.py` |
 | **C6** | **限速器成功回报时机**：HTTP 状态码校验与 JSON 解析必须在 `_em_request` 闭包**内**完成——5xx/非 JSON 不得清零熔断计数 | `data-service/app/providers/akshare_provider.py` |
 | **C7** | **akshare 调用统一看门狗**：所有 provider 内 akshare 调用经 `_em_ak_request` / `_ak_request` 包装（上游挂死时按时返回降级，不永久占住线程池 worker） | `data-service/app/utils/timeout.py` |
@@ -43,7 +43,7 @@
 | **C19** | **研报订阅生命周期**：`researchWatchers` 必须挂 globalThis（C17 同类）；且 **failed 分支同样 `takeWatchers` 清理并向发起会话推送失败说明**——否则 Map 无界增长 + 发起会话收不到任何反馈 | `web/lib/research.ts` |
 | **C20** | **同步/采集必须单飞**：`syncType` 用**固定名暂存表**，同类型并发同步会互相清空对方暂存行 → 事务拷入不完整集合 → Product 数据丢失；已加按类型 in-flight 单飞；暂存表清理统一放 **finally**（失败路径同样 DROP） | `web/lib/sync.ts` |
 | **C21** | **数值序列化安全**：`to_float` 必须过滤**全部非有限值**（NaN 与 ±Inf，`math.isfinite`）；所有 provider 的数值字段（含 yfinance `fast_info` / K 线行）禁止裸 `float()`——非有限值进入 JSON 会因 `allow_nan=False` 抛 ValueError → 500，破坏"失败显式降级"契约 | `data-service/app/utils/num.py` |
-| **C22** | **恢复类操作的先验校验与回滚**：`backup_db.py restore` 必须①恢复前对备份做 `integrity_check` + 表结构校验（非法备份拒绝执行，防止把线上库"恢复"成空文件）②清理目标库的 `-wal/-shm` 残留（旧 WAL 会被误应用）③失败自动回滚原库 | `data-service/scripts/backup_db.py`（**全项目唯一破坏性覆盖线上库的脚本，却零自动化回归**，见 CR7-11） |
+| **C22** | **恢复类操作的先验校验与回滚**：`backup_db.py restore` 必须①恢复前对备份做 `integrity_check` + 表结构校验（非法备份拒绝执行，防止把线上库"恢复"成空文件）②清理目标库的 `-wal/-shm` 残留（旧 WAL 会被误应用）③失败自动回滚原库 | `data-service/scripts/backup_db.py`（**全项目唯一破坏性覆盖线上库的脚本**；**09-27 复核：自动化回归已补** = `tests/test_backup_db.py` 今日实跑 `===== 19/19 通过 =====`，含 CR9-15 去掉恒真断言后的失败路径实断，CR7-11/D1 交付。⚠️ 该脚本**无生产调用方**（compose/Dockerfile/web 均不引），只在容器内手工 `exec` 用——见 PLAN §D 与 CR9 的运维定位） |
 | **C23** | **测试脚本不得污染开发库**：测试内的 `deleteMany({})` 等批量清理**必须限定范围**（按测试会话/标题前缀），禁止无 where 的全库删除；验收断言不得写死单一数据源 `source` 值（多源链下降级属正确行为） | `web/scripts/test-*.mjs`、`data-service/tests/*.py` |
 
 ### 第三批（C24–C25，来自 CR3 / P7 落地，2026-09-14）
@@ -64,7 +64,7 @@
 | **C30** | **数值转换禁止裸 `float()`（C21 补漏）**：重申适用于 **sina_provider 的 K 线行 / crypto_provider 的 quote+kline / pipeline 板块涨跌幅**等此前漏网处；裸 `float()` 拦不住 NaN（`float(nan)` 不抛异常）会污染缓存与落库文本 | `data-service/app/providers/*.py` |
 | **C31** | **长驻进程不以 root 运行，但保持 exec 语义**：data-service 容器默认用户保持 root（`compose exec` 备份/恢复需写 `/backup`、`/data`），仅 **uvicorn 经 `setpriv` 降权到 uid 1000**（与 web 容器 node 用户同号）；`setpriv` 缺失时回退 root 直跑并告警。**⚠️ 此约束的镜像构建/运行验证尚未执行**（主人指示暂不推进 Docker），启用前必须先验证容器内进程 uid、两容器 healthy 与 `compose exec` 备份正常 | `data-service/Dockerfile` |
 | **C32** | **前端在途请求与定时器必须可取消**：① 加载型 fetch（图表区间/对比、搜索）必须用 `AbortController` + 请求序号守卫，**过期响应不得写入状态**，收尾 `setPending(false)` 仅限当前请求；② 轮询 `setInterval` 必须有清理路径与**次数上限**，且 effect 内 `await` 之后设置定时器前须检查 `cancelled` 标志；③ 轮询循环（如热点触发）须挂卸载标志 | `web/app/**/*.tsx` |
-| **C33** | **对外接口输入必须白名单校验**：路由层禁止信任 TS 类型（运行时无约束）——`sessions PUT` 的 `role`、`research/start` 的 `type`/`code`、`search` 的 `q` 长度一律显式校验（type 白名单、code `[\w.-]{1,20}`、q ≤100 字符）；`code`/`type` 会拼入研报推送的 markdown 链接，收紧字符集可抑制外链注入面。**⚠️ 已知覆盖不全**：`/api/kline`、`/api/quote` 两个 GET 端点仍无 code 校验（见 CR7-6） | `web/app/api/**/route.ts`、`web/lib/validate.ts`（**待建**） |
+| **C33** | **对外接口输入必须白名单校验**：路由层禁止信任 TS 类型（运行时无约束）——`sessions PUT` 的 `role`、`research/start` 的 `type`/`code`、`search` 的 `q` 长度一律显式校验（type 白名单、code `[\w.-]{1,20}`、q ≤100 字符）；`code`/`type` 会拼入研报推送的 markdown 链接，收紧字符集可抑制外链注入面。**✅ 09-27 复核已全覆盖**：`/api/kline`、`/api/quote` 自 CR7-6 起接线，`/api/events` 与内置工具入口自 CR9-10 起过 `checkSubject()`（**09-27 实测**：`web/app/api/kline/route.ts:5`、`web/app/api/quote/route.ts:3` 均 `import { CODE_SET, QUOTE_TYPES } from "@/lib/validate"`） | `web/app/api/**/route.ts`、`web/lib/validate.ts`（**已建，四路由 + events + 工具闸门共用**） |
 
 ### 第五批（C34，来自 CR5，2026-09-17）
 
@@ -90,9 +90,9 @@
 | **Prisma DateTime 在 SQLite 的存储** | Prisma 存的是 **Unix 毫秒整数**（实测 `typeof(date)='integer'`） | 原生 `INSERT` 若传 ISO 字符串，该行与 Prisma 生成的 `date >= ? / <= ?`（数字比较）**不匹配** → 带日期范围的查询**静默漏行**。V1 实测污染 3 行，导致 K 线图少一根、缓存天数虚高、R13 交叉验证失败。**规则：原生写入必须传 `dayStart(d).getTime()`** |
 | **北京时间口径** | web 侧用北京时间建/查 `(type,code,date)`；data-service 侧曾全部用**本地时区** `date.today()` | TZ≠Asia/Shanghai 时，北京时间 00:00–08:00 区间会出现"回调带 D-1 → D 行永久 running + D-1 重复行"与每日限额错位。**规则：data-service 一律用 `app/utils/timeutil.py` 的 `beijing_*()`，禁用 `date.today()`**（CR-06） |
 | **`/api/kline` 的 `phases` 字段** | 研报与详情页归因同源的契约（P5 落地定稿新增） | 改动 `/api/kline` 响应结构时须同步 `research/adapter.py` |
-| **provider 的 `currency` 字段** | provider 早已返回（hk=HKD / us=USD / sina-bond=CNY），但 `web/lib/data-service.ts` 的 `Quote` 类型**没有该字段**，全 web 侧 `grep currency` 零命中 | 港股在列表与详情页显示成无单位数字（`100` 实为 100 港币）。CR7-4（修复状态见 [FIX-LEDGER.md](FIX-LEDGER.md)；**09-26 复核：TS 契约已补，但备源侧仍不返回该字段 → 见下一条**） |
+| **provider 的 `currency` 字段** | provider 早已返回（hk=HKD / us=USD / sina-bond=CNY），但 `web/lib/data-service.ts` 的 `Quote` 类型**当时没有该字段**（发现当日全 web 侧 `grep currency` 零命中——**09-27 复核：已不成立，现 12 个文件命中**） | 港股在列表与详情页显示成无单位数字（`100` 实为 100 港币）。CR7-4（修复状态见 [FIX-LEDGER.md](FIX-LEDGER.md)；**09-26 复核：TS 契约已补，但备源侧仍不返回该字段 → 见下一条**） |
 | **备源的"标的身份"（09-26 实测）** | 腾讯 `qt.gtimg.cn` 的符号是 `sh/sz + 6 位数字`，**同一 6 位数字在基金与股票/转债两个空间指代两个品种**：`000001` 场外基金=华夏成长混合（净值 1.295）↔ `sz000001`=平安银行；`110022` 场外基金=易方达消费行业（净值 2.78）↔ `sh110022`=交易所品种（140+ 元级序列） | `tencent_provider.py:20-27 _symbol()` **只看数字前缀、不看 `type_`**，却被注册进 `fund` 备源链（`:286`）。主源（天天基金）一冷却就静默换标的返回，且 web 会把它 `upsert` 进 `KlineDaily(type,code,date)` → **持久污染**。**规则：任何按代码前缀猜交易所的映射，都必须先用该类型的权威判据收窄**——场内基金用 `akshare_provider.py:145-147 _is_exchange_traded_fund()`，参照 `sina_provider.py:18-23 _etf_symbol()` 的"不匹配即 `None` → `ProviderNotSupported`"写法。同文件 `_hk_symbol` 的注释早已点破"绝不能复用 `_symbol`"，但只在港股侧规避了。CR9-1 |
-| **降级不得丢语义字段** | 主源与备源返回的**字段集合不同**，09-26 实测三例：① `currency` 仅 hk/openbb/sina-bond 返回、腾讯不返回；② `timestamp` 三形态（akshare ISO、腾讯 A股 14 位紧凑串 `20260924161444`、腾讯港股斜杠带空格 `2026/09/18 16:08:32`）；③ 腾讯**日 K 不返回 `amount`** | 东财冷却（本机常态）时：港股价格退化成无单位数字、详情页时间戳变 14 位数字串、`test_p0` 的"volume/amount 非空"必挂。**①② 已于 09-26 在 provider 边界修掉（`000d721`：`CURRENCY_BY_TYPE` + `_ts_iso` 按"只取数字"归一）；③ 仍开放 = CR9-29**。**规则：新增/修改备源时逐字段核对是否与主源同形；展示层若依赖某字段，必须断言"备源路径下该字段仍非空"——只测纯函数等于没测**（CR9-6/7/29） |
+| **降级不得丢语义字段** | 主源与备源返回的**字段集合不同**，09-26 实测三例：① `currency` 仅 hk/openbb/sina-bond 返回、腾讯不返回；② `timestamp` 三形态（akshare ISO、腾讯 A股 14 位紧凑串 `20260924161444`、腾讯港股斜杠带空格 `2026/09/18 16:08:32`）；③ 腾讯**日 K 不返回 `amount`** | 东财冷却（本机常态）时：港股价格退化成无单位数字、详情页时间戳变 14 位数字串、`test_p0` 的"volume/amount 非空"必挂。**①② 已于 09-26 在 provider 边界修掉（`000d721`：`CURRENCY_BY_TYPE` + `_ts_iso` 按"只取数字"归一；**① 现由 `tencent_provider.py:25/144` 直接给腾讯补上 `currency`，"腾讯不返回"仅作为当时的实测事实保留**）；③ 也已于 09-26 批次三按"显式声明而非补齐"修掉（`tencent_provider.py:244` `"amount": None` 键恒在 + `:256` note 说明）＝**CR9-29 ✅，不再开放**。**规则：新增/修改备源时逐字段核对是否与主源同形；展示层若依赖某字段，必须断言"备源路径下该字段仍非空"——只测纯函数等于没测**（CR9-6/7/29） |
 | **`start/end` 在备源不一定生效** | 腾讯日 K 路径实测忽略请求窗口（要 2026-06 返回 2024 年起的序列） | 上层若信任备源的窗口参数就会静默拿到错区间。取数后须自行按 `start/end` 过滤，或断言返回区间。CR9-1 附带 |
 
 | **列表类降级也必须声明来源（09-27 CR9-31）** | `/products` 的响应契约是 `{type,count,products,source[,degraded,note]}`；provider 侧 `list_products()` 默认可继续返回裸 `list`，**内部自带主备切换的必须改返 `(items, meta)`**，由 `base.py:list_products_with_meta()` 归一（REST 与 MCP `list_products` 两条出口都走它） | 09-27 实测：东财冷却时债列表 1059→327，而响应里**没有任何字段说得出这是备源快照**——与"上游真只有 327 只"长得一模一样，BFF 的缩水保护只能写"疑似"，实网断言只能事后翻日志定性。**行情链路早就由 `chain_call` 写 `note`（`chain.py:31-35`），列表链路此前是漏的。规则：多源链的每一条出口都要能回答"这批数据来自哪个上游"**（C23 的另一半：验收断言按源分别取数） |
@@ -123,7 +123,7 @@
 | 腾讯 `fqkline` / `kline` | 转债 `day` 恒为空，不覆盖转债 K 线 |
 | 腾讯 `qt.gtimg.cn` | 格式兼容，但非交易时段恒为面值 100.000 / 零成交，不可靠 |
 | 新浪通用 K 线（`CN_MarketData.getKLineData`） | 转债返回 null |
-| 网易 `chddata` | 沙箱内 502 —— **本机环境待验证**，仍作为候选源记录在 PLAN，**非彻底排除** |
+| 网易 `chddata` | 沙箱内 502 —— **本机环境待验证，非彻底排除**（**09-27 复核**：本行原写"仍作为候选源记录在 PLAN"是**断指针**——`grep -n "网易\|chddata" docs/PLAN.md` = **0 命中**，PLAN 里没有这条候选。判"未排除"的效力只在本行，不在 PLAN） |
 
 ### C-2 依赖定版（`data-service/requirements.txt`，2026-09-20 逐条核对一致）
 
@@ -150,6 +150,8 @@
 
 ### C-4 主备源矩阵（各类别实测结论）
 
+> ⚠️ **计数红线（09-27，批次七 (d)(e) 定案的依据）**：数"有几个源"必须数**独立上游公司**，不能数我们的 provider 文件或 API 端点——**`openbb_provider` 的后端 `yfinance` 本身就是 Yahoo Finance 的非官方封装**，把"Yahoo 直连"与"yfinance"当成两源会做出一个**永远判定为"一致"的比对器**（同源同错也报一致）。同理：东财多 host（push2/push2delay/7.push2/72.push2）是**一家的四个节点**，不是一个源族里的四个源。**做任何"多源"设计前先回到本表数公司。**
+
 | 数据类别 | 主源 | 备源（已实测） |
 |---|---|---|
 | A股/场内基金 行情 | 东财 ulist | 腾讯 `qt.gtimg.cn`（✅ 实测 200） |
@@ -159,8 +161,11 @@
 | 可转债 行情 | 东财 | **新浪 `bond_zh_hs_cov_spot`**（详见 §C-1） |
 | 可转债 日K | 东财 | **确认无可用备源** → 限流时降级为显式缺口说明（R10 语义：可用或显式降级，均属正确行为） |
 | 可转债 列表 | 东财 `bond_zh_cov`（1052 只，含未上市） | **新浪 cov_spot（约 320 只在交易标的）**——覆盖度较低属降级可用。**09-27 起降级由响应自己声明**：`/products?type=bond` 恒带 `source`，走备源时另带 `degraded=true` + `note`（CR9-31），BFF 不再靠条数猜 |
+| 美股 行情 | **`yfinance`**（`openbb_provider.py:71 source = "yfinance"`；后端就是 Yahoo 的非官方封装，**不是 OpenBB SDK**） | **腾讯 `qt.gtimg.cn` us 分支（✅ 09-27 实测 6/6：`苹果~AAPL.OQ~341.07 / ts:'2026-09-25 16:00:01'`）**——**但 `_symbol_for` 目前无 `us` 分支，要用得先写映射**；**Yahoo 直连不构成第二源**（与主源同一家，比对必然"一致"） |
+| 美股 分时 | Yahoo chart（09-27 实测 `ok=6/6 bars:391`，单次 35KB，**需代理**） | **无独立第二源**：腾讯 us 分时实测 `day=`（空归属日）`bars=1` ⇒ 不可用。⇒ 批次七定案：**美股分时按 R16 显式标"仅一家可得、未交叉核对"**，不得显示成"已核对" |
+| **分时（1m）横向覆盖** | 东财 `klt=1`（全进程共享 12 次/分的桶 ⇒ 实时轮询禁用） | **只有腾讯一家注册了 `_minute_kline`，且完整覆盖仅 3/6**：stock／场内基金／hk ✅（267–332 根）；转债＝空壳（`今开0.000/成交量0/bars=1`，与 §C-1 那条 09-13 排除记录同向＝CR9-44）；美股＝形态异常；场外基金与加密＝`v_pv_none_match` |
 | 场外基金净值 | 东财天天基金（独立域名族，限流期间实测可用） | 待补（蛋卷/新浪需验证） |
-| 加密 | CoinGecko（R12 代理优先） | **⚠️ 本机实测（09-27）：CoinGecko 只能走代理，而 ds 启动即 `NO_PROXY=*`（`main.py:12`，为的是让国内源直连）——两者叠加＝海外源全部不可达**。可用配置：起 ds 时给 **`HTTPS_PROXY=http://127.0.0.1:7897`**（`crypto_provider._overseas_session()` 是 `trust_env=False` 的独立会话 + 显式 `proxies`，正是为此准备；`docker-compose.yml:74/103` 本来就透传该变量，只有本机手工启动会漏）。实测两档：不设 → `coingecko unreachable`（42s 才失败）；设 → `/products?type=crypto` **250 只**、同步落库、详情页 200。**这不是"外网不通"**（CR9-41） |
+| 加密 | CoinGecko（R12 代理优先）。**⚠️ 本机前置条件：ds 启动即 `NO_PROXY=*`（`main.py:12`，为让国内源直连）会连带屏蔽 Windows 注册表系统代理，而 CoinGecko 只能走代理 ⇒ 两处都不设时 `coingecko unreachable`（42s 才失败）、加密主数据 0 行；显式给 `HTTPS_PROXY` 后 `/products?type=crypto` **250 只**、详情页 200——这不是"外网不通"（CR9-41）** | **潜在第二源＝`yfinance` 的 `BTC-USD`（与 CoinGecko 确属不同公司，但 09-27 未实测）**；币安 `ok=0/6 ERR=['HTTP 451']`＝**地区封锁，换节点无用**；CoinGecko 自身 **10s 间隔即吃 `HTTP 429`**（09-27 实测 5/6）⇒ 高频轮询不可行。**批次七据此把加密移出首轮**（见 PLAN M3 (d)） |
 | 港股 行情 | 东财 `push2` 系（`clist/get` 多 host 降级） | **腾讯 `qt.gtimg.cn`（✅ 2026-09-20 实测：`hk00700` HTTP 200 / 78 字段，字段位置与 A 股一致）**——`tencent_provider` 注册为 hk 备源（position=1） |
 | 港股 日K | 东财 `push2his` 系（多 host 降级） | **腾讯 `web.ifzq.gtimg.cn/fqkline`（✅ 2026-09-20 实测：`hk00700,day,...` 返回 day 数组，行格式与 A 股同，`qfqday or day` 回退已覆盖）**；复权口径与主源一致（均前复权） |
 | 港股 列表 | 东财 `clist/get`（多 host 降级） | **确认无可用备源**（腾讯无全量港股列表接口）→ 显式降级：已有数据保留（C1 空载荷保护 + 降级缩水保护）+ 同步显式报错（R10 语义） |
@@ -196,6 +201,7 @@
 
 | 约束 | 内容 |
 |---|---|
+| **本机 dev 启动环境：data-service 到底读不读 `.env`** | **读两份**——`app/config.py:17-20` 的 `_ENV_FILES = [data-service/.env, ../web/.env]`，`load_env()` 在 import 期执行、用 `setdefault` 灌进 `os.environ`（真实环境变量优先）。**09-27 之前 PLAN 与 `web/.env.example` 写的"data-service 不加载任何 .env"是错的**（A7 探针：`import app.main` 后 web/.env 的 7 个键出现在进程环境；再把 `_ENV_FILES` 指向含 `HTTPS_PROXY=…` 的文件，`crypto_provider._proxies()` 立刻返回该代理）。⇒ `HTTPS_PROXY` 有**两条**生效路径：① 与 uvicorn 同行内联（端到端已实测）② 写进上述任一 `.env`（机制已证、端到端待验）。**改这条措辞时注意它同时存在于 PLAN 配置项与 `web/.env.example` 两处** |
 | **Python 版本必须与锁文件一致** | 镜像用 `python:3.12-slim`（对齐开发 venv）。实测教训：曾用 Windows/py3.12 venv 的 freeze 结果去装 3.11 镜像 → `numpy==2.5.3` 要求 Python ≥3.12 → 安装失败。**规则：`requirements-lock.txt` 必须在目标镜像内生成**（`docker run <image> pip install -r requirements.txt && pip freeze`），且不得混入 Windows 专属包（pywin32 等） |
 | **web 镜像的 base 阶段禁止设 `NODE_ENV=production`** | 会使 `npm ci` 跳过 devDependencies，而 `@tailwindcss/postcss`（构建必需）与 `prisma` CLI（运行时 `migrate deploy` 必需）都是 devDependency → 构建/启动失败。`NODE_ENV` 只在 runner 阶段设置 |
 | **基础镜像走国内镜像源** | docker.io 直连在当前网络被拦截（auth 502）→ 基础镜像走 `docker.m.daocloud.io` 前缀，经 `NODE_IMAGE` / `PY_IMAGE` build args 可覆盖；npm 走 npmmirror + 长超时；pip 走阿里源 + `--timeout 120 --retries 10` |
