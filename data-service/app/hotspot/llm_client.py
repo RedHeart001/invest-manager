@@ -36,10 +36,6 @@ def _cfg() -> tuple[str, str, str] | None:
     return (base.rstrip("/"), key, model)
 
 
-def configured() -> bool:
-    return _cfg() is not None
-
-
 def chat_json(system: str, user: str, timeout: int | float | None = None) -> dict | list | None:
     """请求 JSON 输出；失败返回 None（不抛异常，调用方降级）。"""
     cfg = _cfg()

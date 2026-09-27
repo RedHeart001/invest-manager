@@ -341,10 +341,3 @@ def collect_all(type_: str, code: str) -> tuple[dict, list[str]]:
         if not res.get("ok"):
             gaps.append(f"{dim}：{res.get('note', '不可用')}")
     return payload, gaps
-
-
-def research_date() -> str:
-    # CR-06：统一北京时间口径
-    from ..utils.timeutil import beijing_today
-
-    return beijing_today()
