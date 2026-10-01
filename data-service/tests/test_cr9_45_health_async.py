@@ -13,12 +13,16 @@
 反向对照（C34）：既断 `/health` 是协程端点，也断 `/quote` **仍是**同步端点——
 证明这条改动是定向摘除探针的池占用，而不是把全服务改异步（那会改变取数路径语义）。
 
+刀 4/G7（2026-10-01）追加：本端点还报 `ingestTokenConfigured`——入库鉴权"配没配"的状态位
+（只布尔、不回显值），让"只配了一侧 ⇒ 入库全 401 且静默丢失"这种失败一条 curl 就能查出。
+
 运行方式（无需任何服务在跑）：
     PYTHONPATH=. .venv/Scripts/python tests/test_cr9_45_health_async.py
 """
 
 import asyncio
 import inspect
+import json
 import os
 import sys
 
@@ -63,7 +67,7 @@ def test_health_endpoint_is_async() -> None:
 def test_health_response_shape_unchanged() -> None:
     body = asyncio.run(_endpoint("/health")())
     check(
-        "CR9-45①：返回体五键齐、status=ok（改 async 没动契约；②新增两个在飞字段）",
+        "CR9-45①：返回体键齐、status=ok（改 async 没动契约；②加了在飞两字段、刀 4 加了 ingestTokenConfigured）",
         isinstance(body, dict)
         and body.get("status") == "ok"
         and "version" in body
@@ -77,9 +81,52 @@ def test_health_response_shape_unchanged() -> None:
     )
 
 
+def test_ingest_token_flag_is_configured_state_only() -> None:
+    """刀 4/G7：`/health` 把"ds 侧配没配 `INGEST_TOKEN`"做成状态位——**只报布尔、不回显值**。
+
+    为什么要有这个位：入库回调带 token 的代码早就在（`hotspot/pipeline.py:652`、
+    `research/tasks.py:131`），开启鉴权只剩"两侧同名 env 填成同一个值"这一件事；配错的
+    表现是入库全 401 且热点/研报静默丢失，而 ds 的 `log.warning` 在 uvicorn 默认配置下
+    不一定看得见（#21 同族理由）。⇒ 一条 curl 就该能核对出来。
+    """
+    sentinel = "SENTINEL-DO-NOT-LEAK-123"
+    orig = os.environ.get("INGEST_TOKEN")
+    try:
+        os.environ["INGEST_TOKEN"] = sentinel
+        body = asyncio.run(_endpoint("/health")())
+        dumped = json.dumps(body, ensure_ascii=False)
+        check(
+            "刀4/G7：配了 INGEST_TOKEN ⇒ ingestTokenConfigured 为 True",
+            body.get("ingestTokenConfigured") is True,
+            str(body),
+        )
+        check(
+            "刀4/G7：这个位是布尔、不是 token 本身",
+            isinstance(body.get("ingestTokenConfigured"), bool),
+            str(body),
+        )
+        check(
+            "🔁 刀4/G7：返回体任何位置都不出现 token 值（观测位不得变成泄露口）",
+            sentinel not in dumped,
+            dumped[:160],
+        )
+    finally:
+        if orig is None:
+            os.environ.pop("INGEST_TOKEN", None)
+        else:
+            os.environ["INGEST_TOKEN"] = orig
+    body2 = asyncio.run(_endpoint("/health")())
+    check(
+        "🔁 刀4/G7：未配 INGEST_TOKEN ⇒ False（本机现状＝web 侧鉴权分支恒不生效）",
+        body2.get("ingestTokenConfigured") is False,
+        str(body2),
+    )
+
+
 if __name__ == "__main__":
     test_health_endpoint_is_async()
     test_health_response_shape_unchanged()
+    test_ingest_token_flag_is_configured_state_only()
     fails = [x for x in results if not x[1]]
     print(f"\n===== {len(results) - len(fails)}/{len(results)} 通过 =====")
     if fails:

@@ -95,6 +95,12 @@ async def health():
         # 三种状态分开——CR9-30 同族的观测隔离。
         "inflightWatchdogs": inflight_count(),
         "watchdogInflightCap": MAX_INFLIGHT_WATCHDOGS,
+        # 刀 4/G7（2026-10-01）：入库回调带 token 这件事**代码侧早就有了**（`hotspot/pipeline.py:652`、
+        # `research/tasks.py:131`），开启鉴权只欠 web 与 ds **两侧同名 env 填成同一个值**。要防的
+        # 失败形态是"只配了一侧 ⇒ 热点/研报入库全 401 且静默丢失"，而 ds 侧那声 `log.warning`
+        # 在 uvicorn 默认配置下不一定看得见（#21 同族理由）⇒ 做成状态位：**只报布尔、绝不回显值**，
+        # 主人填完 `.env` 一条 curl 就能核对两侧是否一致。
+        "ingestTokenConfigured": bool(os.environ.get("INGEST_TOKEN", "")),
     }
 
 
