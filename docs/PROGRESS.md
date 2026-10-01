@@ -496,4 +496,16 @@ O1–O12 全量落地，明细见 [history/2026-09-13-cr1-全项目审查与O系
 
 ⑥ **⑤ 改后探针＋一条 PID 形态**：`/sync/status running=false runs:0`、`/hotspots/status running=false`、`/research/status live=0` ⇒ 无在途才动手；`taskkill` venv 那个父进程（254800）后，监听者 155832 **连带消失**（对 155832 再补一刀返回"没有找到进程"）——这台机上 venv 的 `python.exe` 是启动器、真监听者是基础解释器子进程 ⇒ **重启后必须重新查监听 PID，不能沿用旧号**。重启（`SYNC_CATCHUP=off` 前缀）后监听 PID＝**198372**，`/health` 字面回 `{"status":"ok","version":"0.5.0","abandonedWatchdogs":0,"inflightWatchdogs":0,"watchdogInflightCap":12,"ingestTokenConfigured":false}`（旧进程无此键 ⇒ 新代码在跑着的进程里生效），cron 仍 `nextRun=2026-10-02 02:00`、`runs:0`；web `:3000` `200`。
 
-⑦ **本笔（步骤 3）提交内容**＝`data-service/app/main.py`、`data-service/tests/test_cr9_45_health_async.py` ＋ `docs/FIX-LEDGER.md`／`docs/PROGRESS.md`。**web 侧零改动 ⇒ ① 不重跑**（18:4x 已是 `tsc_exit=0`＋`Tests 239 passed (239)`，且步骤 1/2 也没碰 web），④ 不跑（本轮没碰 `web/**`，也不为一个 ds 观测位去花 p3 的一轮 pipeline）。**当前未提交项＝0**（`git status` 只剩已忽略的 `.out`）。剩下来的还是那四类：刀 3 甲/丙（等明晨数据）、`/api/sync` 要不要上 token（推荐不动）、#22(b) 文案、#22(d) 两条实网断言＋刀 5 的交易日窗口；`.env` 那一行由主人填。
+⑦ **本笔（步骤 3）提交内容**＝`data-service/app/main.py`、`data-service/tests/test_cr9_45_health_async.py` ＋ `docs/FIX-LEDGER.md`／`docs/PROGRESS.md`。**web 侧零改动 ⇒ ① 不重跑**（18:4x 已是 `tsc_exit=0`＋`Tests 239 passed (239)`，且步骤 1/2 也没碰 web），④ 不跑（本轮没碰 `web/**`，也不为一个 ds 观测位去花 p3 的一轮 pipeline）。**当前未提交项＝0**（`git status` 只剩已忽略的 `.out`）。剩下来的还是那四类：刀 3 甲/丙（等明晨数据）、`/api/sync` 的防护（19:3x 已升级为待拍板 **#23**，推荐＝不上 token、改当日幂等闸门）、#22(b) 文案、#22(d) 两条实网断言＋刀 5 的交易日窗口；`.env` 那一行由主人填。
+
+**同日续 27 · 主人"为我思考推荐处理方案"⇒ 纯推荐轮，零代码零出网，只把改判写进待拍板区（2026-10-01 19:3x）**
+
+① **本轮不碰一行生产代码**（他没给"改/跑"的字，只给了"思考/推荐"），做的事＝把推荐**落到账本该落的位置**（每个事实只有一个家：推荐进「待你拍板」，状态进「未闭环看板」，顺序进「批次划分」）。
+
+② **#20 追加三条改判**，其中两条是这一轮真正想清楚的：**(a) 甲有两种形状**——甲-1（只动 ds＋调度，第二个 cron 打已存在的 `POST /api/market/refresh?type=all`，那条 job 自己带约 2,400s 预算）／甲-2（把 web 的 refresh 改成"触发即忘＋状态位"，照 `/api/hotspots/run` 的模式）。推荐先甲-1。**(b) 关键洞见：甲并不消灭那 1,700s**，只是把它从"被别人判成超时"挪进"一个知道自己要跑 30 分钟的 job" ⇒ 正确的修法措辞是**每条腿各拿各的预算**（同步腿下调到覆盖纯取列表、刷新腿单独），而不是抬一条预算盖住两件事。**(c) 丙在甲之后基本不必要**——丙的立项理由本来就是"刷新挤占同步预算"，拆开后只剩"要不要花 1,700s 刷全量净值"这个纯成本问题，凌晨跑无害；所以**甲/丙不是对立选项**，丙只在"长尾场外基金净值要不要覆盖"这个**产品口径**上才需要他说话。
+
+③ **新登记 #23（`POST /api/sync` 的防护取向）**：复核 G7 时想明白的一件事——这个端点的真实危害不是写脏数据，而是**本机任意进程随时能触发一轮 30 分钟同步、烧东财额度**；而 token 挡不住这个（同机进程本来就摸得到 `.env`，只防假想攻击者、不防我自己手滑），还要三处同改。**推荐＝不上 token，改当日幂等闸门**：`lastDate` 的语义已有，但挂在内存态（重启即 `runs:0`），改成从 `Product.updatedAt` 反推"今天同步过没有"（磁盘态，正是刀 1 装 `snapshotAt` 之后才做得到的事），重复触发返回 `skippedReason="today already synced"`。改动面＝一个入口守卫＋`test_cr9_sync_status` 两条成对，零出网。
+
+④ **#22(b) 改成"正常态不出字、陈旧才说话"**：常驻一句"快照截至 X"在刷新成功时零信息量，还会给 UI 文案挂一条集成断言；只在某类 `MAX(snapshotAt)` 为 null 或早于昨日时提示"快照未更新"，设计语言与 CR8-1「产出说明」同族。**(d) 的 `/api/watchlist` 断言**给了他两口径选（推荐 (i)：测试码 POST→GET→DELETE 回环，跑完他自选仍是 0 行）。
+
+⑤ **顺带的 docs 自审（他要求的"检查下更新后的具体内容"口径）**：速览里那句"五道门禁全绿：① 233｜② 353"是**刀 1 时点**的数，容易被读成现值 ⇒ 就地标注"现值只读「验证门槛」"；批次划分八·刀 3 那格补了指针（形状与判据在 #20，不复述）。表格错位扫描 **0**。**本轮只动 `docs/FIX-LEDGER.md`／`docs/PROGRESS.md` 两个文件**，五道门禁都不需要重跑（代码零改动、零出网）。工作区在 `b50f92b` 之后本来也是干净的——**没东西可 add/commit 这件事我先实测再说**（`git status --porcelain`＝0、`dev` 相对 `origin/dev` 有 30 笔未推送）。
