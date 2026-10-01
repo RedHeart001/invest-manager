@@ -32,7 +32,13 @@ def check(name: str, cond, detail: str = "") -> None:
 
 
 def test_read_timeout_is_not_failure() -> None:
-    """① ReadTimeout → ok=True + 中性 note（非失败标记），error 保留原始异常。"""
+    """① ReadTimeout → **第三态**（`ok=None` ＋ `outcome="inconclusive"`）＋中性 note。
+
+    本条原编码为 `ok=True`（C3-③/CR7-9 的"读超时≠失败"）。刀 1（#20②，10-01）改判：
+    "不是失败"与"是成功"是两件事——10-01 实测健康态一轮 wall ≥1800s **正好打穿预算**，
+    那一轮真入库的只有 fund、三条腿 502，状态位却写 `ok:true` ⇒ 定时态下这个位会**恒真**，
+    CR9-28 要保住的"今天要不要补跑"判据失效。故改为第三态；`error` 与 lastDate 语义不动。
+    """
     def _boom(url, timeout=None, **kw):
         raise real_requests.exceptions.ReadTimeout("read timed out")
 
@@ -41,8 +47,14 @@ def test_read_timeout_is_not_failure() -> None:
     ss._state["running"] = True
     try:
         res = ss._execute("test")
-        check("C3：ReadTimeout 时 ok=True（非失败标记）", res.get("ok") is True, str(res)[:160])
-        check("C3：note 说明去向（查 /api/sync 或 updatedAt）", "Product.updatedAt" in (res.get("note") or ""), str(res.get("note"))[:160])
+        check("刀1：ReadTimeout 时 ok 是第三态 None（不再是 True）", res.get("ok") is None, str(res)[:160])
+        check("🔁 刀1 反向：既不是真也不是假（写回 True 或 False 本条即红）",
+              res.get("ok") is not True and res.get("ok") is not False, repr(res.get("ok")))
+        check("刀1：outcome=inconclusive（机器可读的第三态）",
+              res.get("outcome") == "inconclusive", str(res.get("outcome")))
+        check("C3：note 说明去向（查 updatedAt / snapshotAt）",
+              "Product.updatedAt" in (res.get("note") or "") and "snapshotAt" in (res.get("note") or ""),
+              str(res.get("note"))[:160])
         check("C3：error 字段保留原始异常供排查", "ReadTimeout" in (res.get("error") or ""), str(res.get("error")))
         check("C3：lastDate 已置位（今日不重跑）", ss._state.get("lastDate") is not None, str(ss._state.get("lastDate")))
     finally:

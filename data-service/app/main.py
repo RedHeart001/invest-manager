@@ -73,11 +73,29 @@ def _chain_call(type_: str, fn) -> dict:
 
 
 @app.get("/health")
-def health():
-    # CR-22：附带看门狗"已放弃存活线程"计数，供运维观测上游是否持续挂起
-    from .utils.timeout import abandoned_count
+async def health():
+    # CR-22：附带看门狗"已放弃存活线程"计数，供运维观测上游是否持续挂起。
+    #
+    # CR9-45①（2026-10-01，主人点头）：**必须是 `async def`**。本服务所有端点都是同步
+    # `def` ⇒ 它们共用 anyio 的默认 40 线程池（实测 `total_tokens == 40`）。同步版
+    # `/health` 也排在这个池里，于是上游挂满 40 个取数线程时，连"你还活着吗"都答不出
+    # （09-29 夜实测：补跑整轮 ≥29 分钟未收敛，`/health` 从 4.3s 涨到无响应）——
+    # **探针和它要监控的东西抢同一份资源**。async 端点跑在事件循环上、不占线程池，
+    # 永远能应答。函数体是一次廉价锁读，无需 await。
+    # （② 落地后本端点更是双保险：并发等待已被 `MAX_INFLIGHT_WATCHDOGS` 钉住，
+    #   取数线程"占满 40"这条路本身就不成立了。）
+    from .utils.timeout import MAX_INFLIGHT_WATCHDOGS, abandoned_count, inflight_count
 
-    return {"status": "ok", "version": app.version, "abandonedWatchdogs": abandoned_count()}
+    return {
+        "status": "ok",
+        "version": app.version,
+        "abandonedWatchdogs": abandoned_count(),
+        # CR9-45②：加"在飞/上限"两个数后，一次 curl 就能把
+        # "进程死"（连不上）/"线程池饿死"（inflight 顶到上限）/"上游慢"（abandoned 涨）
+        # 三种状态分开——CR9-30 同族的观测隔离。
+        "inflightWatchdogs": inflight_count(),
+        "watchdogInflightCap": MAX_INFLIGHT_WATCHDOGS,
+    }
 
 
 @app.get("/quote")

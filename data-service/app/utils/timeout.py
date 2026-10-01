@@ -7,6 +7,10 @@
 Python 无法强杀线程，因此本模块用"守护线程 + join 超时"让**调用方按时返回并降级**；
 被放弃的线程仍是 daemon，会在上游恢复/连接超时后自然结束（不会阻止进程退出）。
 
+CR9-45②（2026-10-01）再加一道**在飞上限**：并发等待达到上限后，新调用不起线程、
+不发外部请求、立即返回降级——把"上游挂起"能占住的线程池 worker 数钉死在上限内
+（见 `MAX_INFLIGHT_WATCHDOGS` 的取值理由）。
+
 用法：
     from .timeout import run_with_timeout
     value, err = run_with_timeout(lambda: ak.some_call(...), 30.0, "ak.some_call")
@@ -30,10 +34,41 @@ _abandoned_lock = threading.Lock()
 _abandoned = 0
 ABANDONED_WARN_THRESHOLD = 20
 
+# CR9-45②（2026-10-01，主人点头）：**在飞上限**。
+# `_inflight` 数的是"当前正卡在 t.join() 上的调用数"——FastAPI 的同步端点全部共用
+# anyio 默认 **40** 线程池，所以这个数**就是本模块正在占住的池 worker 数**。
+# 09-28 夜实测：上游挂起时 abandoned 计数爬到 102，期间连零外部依赖的 `/health`
+# 都拿不到 worker（`curl -m 8` 全 000）——观测通道与被观测对象抢同一份资源。
+# 上限取 **12**：按 sync 形态（一轮 5 类、分钟级占桶）留出的并发，
+# 40 − 12 = **28** 个 worker 永远留给"不经过本模块"的请求（含 `/health`）。
+# 超限的新调用**不起线程、不发外部请求**，立即返回降级——既不再占 worker，
+# 也不在上游已经挂起的时刻继续给它加请求量。
+# 为什么不需要"半开探测"：`_inflight` 由主线程在 join 返回时递减，
+# 而 join 最多等 `seconds` 秒 ⇒ 上游恢复后本闸门在 ≤seconds 内**自行打开**，
+# 不存在永久锁死。
+MAX_INFLIGHT_WATCHDOGS = 12
+_inflight_lock = threading.Lock()
+_inflight = 0
+_gate_warned = False
+
+
+class WatchdogOpenError(TimeoutError):
+    """在飞已达上限：本次未发起外部调用，直接降级。
+
+    继承 `TimeoutError` 是有意的——所有调用点（`_ak_request` / `_em_ak_request` /
+    `chain_call`）本来就按"超时即降级"处理，无需逐处改判定；子类身份只用来让
+    日志与测试能区分"真超时"和"闸门挡下"。
+    """
+
 
 def abandoned_count() -> int:
     """当前"已放弃等待但仍存活"的看门狗线程数（观测用）。"""
     return _abandoned
+
+
+def inflight_count() -> int:
+    """当前卡在超时等待中的看门狗调用数（= 被本模块占住的线程池 worker 数）。"""
+    return _inflight
 
 
 def run_with_timeout(
@@ -43,9 +78,10 @@ def run_with_timeout(
 ) -> Tuple[T | None, BaseException | None]:
     """在守护线程中执行 fn，最多等待 seconds 秒。
 
-    返回 (结果, 异常)：超时时返回 (None, TimeoutError)；fn 抛错时返回 (None, 原异常)。
+    返回 (结果, 异常)：超时时返回 (None, TimeoutError)；fn 抛错时返回 (None, 原异常)；
+    在飞已达上限时返回 (None, WatchdogOpenError) 且**不发起 fn**（不发外部请求）。
     """
-    global _abandoned
+    global _abandoned, _inflight, _gate_warned
     box: dict[str, Any] = {}
 
     def _runner() -> None:
@@ -62,9 +98,32 @@ def run_with_timeout(
                 if box.get("_abandoned"):
                     _abandoned = max(0, _abandoned - 1)
 
-    t = threading.Thread(target=_runner, name=name, daemon=True)
-    t.start()
-    t.join(seconds)
+    with _inflight_lock:
+        if _inflight >= MAX_INFLIGHT_WATCHDOGS:
+            if not _gate_warned:
+                _gate_warned = True
+                log.warning(
+                    "watchdog gate open：在飞 %d ≥ 上限 %d，其后的外部调用立即降级（不再发请求）",
+                    _inflight,
+                    MAX_INFLIGHT_WATCHDOGS,
+                )
+            return None, WatchdogOpenError(
+                f"{name} 未发起：看门狗在飞已达上限 {MAX_INFLIGHT_WATCHDOGS}（上游疑似持续挂起）"
+            )
+        _inflight += 1
+
+    try:
+        t = threading.Thread(target=_runner, name=name, daemon=True)
+        t.start()
+        t.join(seconds)
+    finally:
+        # 主线程离开 join 即归还名额：无论 fn 已完成、超时被放弃还是 start() 失败。
+        # 被放弃的线程仍在后台存活，但它不再占线程池 worker，只由 _abandoned 记账。
+        with _inflight_lock:
+            _inflight -= 1
+            if _inflight < MAX_INFLIGHT_WATCHDOGS:
+                _gate_warned = False
+
     if t.is_alive():
         # D2（CR7-12，2026-09-25）：置标志与计数必须在同一把锁内，并与 runner 的
         # finally 递减互斥——此前 `box["_abandoned"] = True` 在锁外先写、runner

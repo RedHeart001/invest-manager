@@ -47,16 +47,27 @@ type SnapshotResult = {
   updated: number;
   failedBatches: number;
   tookMs: number;
+  /** 本轮写入的快照时刻（ISO）；一批都没写成功时为 null（刀 1/#22(b)） */
+  snapshotAt: string | null;
 };
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-/** 构造批量快照 UPDATE 的 SQL 与绑定参数（纯函数，便于单测；CR-09） */
+/** 构造批量快照 UPDATE 的 SQL 与绑定参数（纯函数，便于单测；CR-09）
+ *
+ * 刀 1（#22(b)）：整批写一个**共享的 `snapshotAt` 时刻**。此前快照列没有任何
+ * "这是什么时候的价"的记号——`updatedAt` 是 Prisma 的 `@updatedAt`，只被 list 阶段的
+ * 整表删旧插新推动，而这里的 raw SQL 绕过 Prisma 所以根本不碰它 ⇒ 分类浏览的涨幅
+ * 排序可以长期吃陈旧价而无人可知（10-01 实测：库内 `600519 lastPrice=1275.16`，
+ * 同日实盘 1258.62，差 1.3%）。时刻由**调用方传入** ⇒ 一次刷新内所有批次同一标记，
+ * 并能与 `updatedAt`（list 阶段）对照出"哪一类只换了主数据、没刷到快照"。
+ */
 export function buildSnapshotUpdate(
   type: string,
   rows: { code: string; price: number | null; changePct: number | null }[],
+  snapshotAt: Date,
 ): { sql: string; params: unknown[] } {
   const codes = rows.map((r) => r.code);
   const placeholders = codes.map(() => "?").join(",");
@@ -68,28 +79,31 @@ export function buildSnapshotUpdate(
 
   const sql = `UPDATE "Product" SET
        "lastPrice" = COALESCE(CASE "code" ${caseOf(rows.length)} END, "lastPrice"),
-       "lastChangePct" = COALESCE(CASE "code" ${caseOf(rows.length)} END, "lastChangePct")
+       "lastChangePct" = COALESCE(CASE "code" ${caseOf(rows.length)} END, "lastChangePct"),
+       "snapshotAt" = ?
      WHERE "type" = ? AND "code" IN (${placeholders})`;
-  return { sql, params: [...params, type, ...codes] };
+  // 绑定顺序必须与 SQL 文本里的 ? 同序：price 组 → changePct 组 → snapshotAt → type → codes
+  return { sql, params: [...params, snapshotAt, type, ...codes] };
 }
 
 async function updateChunk(
   type: string,
   rows: { code: string; price: number | null; changePct: number | null }[],
+  snapshotAt: Date,
 ): Promise<void> {
   // CR6-P1-2（2026-09-18 review）：此前是"一个事务里跑 100 条 updateMany"，
   // 在 SQLite 单写锁下把锁窗口拉到秒级（timeout 120s），与页面读库并发时
   // 读请求会遭遇 SQLITE_BUSY。改为**整批一条 UPDATE**（CASE 表达式），
   // 锁窗口从秒级降到毫秒级——未命中的 code 不更新。
   //
-  // 参数上限：BATCH=100 → 100×2（price）+100×2（changePct）+1（type）+100（code）
-  // = 501 个绑定参数，低于 SQLite 默认 999 上限。
+  // 参数上限：BATCH=100 → 100×2（price）+100×2（changePct）+1（snapshotAt）+1（type）+100（code）
+  // = 502 个绑定参数，低于 SQLite 默认 999 上限。
   if (rows.length === 0) return;
   // CR-09（本轮 code review）：某字段缺失（null）时**保留旧值**——
   // 此前 CASE 会把该行另一为 null 的字段直接写成 NULL，覆盖上一轮有效快照。
   // 用 COALESCE(新值, 旧值)：新值为 null 时沿用旧值，避免部分降级把快照列擦空。
   // code/type 均来自库内白名单（products 表），无注入面；值一律走绑定参数。
-  const { sql, params } = buildSnapshotUpdate(type, rows);
+  const { sql, params } = buildSnapshotUpdate(type, rows, snapshotAt);
   await prisma.$executeRawUnsafe(sql, ...params);
 }
 
@@ -115,6 +129,9 @@ export function refreshSnapshot(type: string): Promise<SnapshotResult> {
 
 async function refreshSnapshotInner(type: string): Promise<SnapshotResult> {
   const started = Date.now();
+  // 一次刷新一个时刻（不是每批各取一次）⇒ 同批全部行可比对；写失败的批次不写，
+  // 所以 `snapshotAt` 表达的是"这一行的快照最早可能新到这个时刻"（刀 1/#22(b)）。
+  const snapshotAt = new Date();
   const products = await prisma.product.findMany({
     where: { type },
     select: { code: true },
@@ -122,7 +139,14 @@ async function refreshSnapshotInner(type: string): Promise<SnapshotResult> {
   });
   const total = products.length;
   if (total === 0) {
-    return { type, total: 0, updated: 0, failedBatches: 0, tookMs: Date.now() - started };
+    return {
+      type,
+      total: 0,
+      updated: 0,
+      failedBatches: 0,
+      tookMs: Date.now() - started,
+      snapshotAt: null,
+    };
   }
 
   let updated = 0;
@@ -147,7 +171,7 @@ async function refreshSnapshotInner(type: string): Promise<SnapshotResult> {
         // 当成正常成功，分类浏览的排序数据长期陈旧却无任何标注。
         failedBatches += 1;
       } else {
-        await updateChunk(type, rows);
+        await updateChunk(type, rows, snapshotAt);
         updated += rows.length;
       }
     } catch {
@@ -157,7 +181,14 @@ async function refreshSnapshotInner(type: string): Promise<SnapshotResult> {
       await sleep(EM_BATCH_DELAY_MS);
     }
   }
-  return { type, total, updated, failedBatches, tookMs: Date.now() - started };
+  return {
+    type,
+    total,
+    updated,
+    failedBatches,
+    tookMs: Date.now() - started,
+    snapshotAt: updated > 0 ? snapshotAt.toISOString() : null,
+  };
 }
 
 export async function refreshAll(types: string[]): Promise<SnapshotResult[]> {

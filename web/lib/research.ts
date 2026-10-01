@@ -251,7 +251,7 @@ export async function ingestResearch(payload: IngestPayload): Promise<ReportRow>
   if (data.status === "done") {
     // 代码审查修复：定向推送（含会话归属）
     const sessionIds = takeWatchers(payload.type, payload.code);
-    const text = `📄 深度研究报告已完成：**${payload.code}** 评级「${data.rating ?? "中性"}」\n\n${data.summary ?? ""}\n\n[查看完整研报 →](/product/${payload.type}/${payload.code}#research)`;
+    const text = `📄 深度研究报告已完成：**${payload.code}** 评级「${data.rating ?? "中性"}」\n\n${data.summary ?? ""}\n\n[查看完整研报 →](/product/${payload.type}/${payload.code}?from=chat#research)`;
     // ① 提示落库到发起会话：切走再回来也能看到（PLAN"任务完成后在同一会话推送"）
     for (const sid of sessionIds) {
       try {

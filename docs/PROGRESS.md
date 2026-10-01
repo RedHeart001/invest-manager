@@ -184,6 +184,52 @@
 
 ⑩ **环境交代**：ds（PID 22136）与 `next dev`（PID 17020）**全程未重启、未动**；本轮**产品代码零改动**（改动面＝1 个未跟踪产物、1 行 `.claude/rules`、2 个测试脚本、4 份 docs）；我未做任何直接写库操作，`b2-chain`/`test-p4`/探针建的会话各自 DELETE 收尾（**未做事前行数核对，故不写"零写入"**）。
 
+**同日续 18 · 门禁④补跑全绿（`PLANNED` p4=23 首验）＋四件待拍板重估（09-29 23:1x–09-30 00:0x，零代码）**：
+
+① **起点是纠正我自己**：09-28 夜我报"abandoned 停在 63 不再排空、等排空走不通"；09-29 23:1x 复测字面末 6 条 `66→63→45→44→45`（告警总条数 223）⇒ 它一直在排，**但排完的终点不是健康服务而是进程消失**（`ds-clean.log` 止于 09-28 00:59；`:8000` 与 `:3000` 均无监听、无 node/python 进程；netstat 已自证仪器可用＝559 行且其他 LISTENING 正常）。"等它自行排空后再跑"这条路因此自然终止，不再需要拍板。
+
+② **起干净 ds 的两个坑（均实测，配方已进 FIX-LEDGER 门槛⑤）**：(i) 23:1x 已过 23:00 排程点，照旧命令起 ds 会立刻触发补跑轮；判据 `sync_scheduler.py:190` 为 `(now.hour, now.minute) < (SYNC_HOUR, SYNC_MINUTE)`，而 `start_scheduler` 的 daily cron 用**同一组值**（`:247-251`）⇒ 唯一能压住补跑的设置 `SYNC_HOUR=23 SYNC_MINUTE=59` **同时把 cron 挪到 23:59** ⇒ 门禁必须在该时刻前跑完并停 ds（实际 23:45 停、余量 14 分钟；`/sync/status` 的 `jobs[0].nextRun = 2026-09-29 23:59:00+08:00` 字面证实耦合）。(ii) 热点补跑判据是 `>= 08:30`（`hotspot/scheduler.py:26,99`），23:1x 已满足 ⇒ 若 web 已在跑且当日无 digest，ds 一启动就会跑 300s pipeline；**规避＝先起 ds、后起 web**：web 不在时 `requests.get` 抛 `WinError 10061` 走 `catch-up check failed`（`:141-142`）只置 `catchUpResolved`。ds 日志字面：`catch-up check failed: HTTPConnectionPool(host='localhost', port=3000): … [WinError 10061]`。
+
+③ **门禁④ 字面（23:39–23:44，7 套件全 exit=0，逐套件抄录）**：db 18/18｜p1 20/20｜p2 41（40|41 档，本次 41）｜p3 27/27｜**p4 23/23**｜p6 24/24｜p5 17（17|21 档，本次 17）。**p4 23/23 = 本轮 `PLANNED` 20→23 的首验**，§5 组合链三条字面全 OK（`一轮内发生 ≥2 次工具调用`／`热点族与行情族工具各被调用`／`走完（done 收尾、无 error、正文非空）`）；该段 `用时 25s` —— 与 09-28 实测的 **178.0s** 构成**双峰**（LLM 延迟主导），账本按两档记、不得只留一个数。
+
+④ **归因三证（结果无污染）**：`/sync/status` = `runs:0, lastRun:null`（23:59 cron 未插进门禁窗口）；ds 日志 `watchdog abandoned` = **0** 条 ⇒ **④ 的负载不触发 CR9-45**，触发器集合收窄为同步/补跑/重探针这类分钟级占东财桶的负载＝**每晚 02:00 的 daily sync 本身**；跑期间 `web/**` 零编辑（CR9-47）。
+
+⑤ **收尾**：23:45 `taskkill //PID 9084 //F` 停 ds（`:8000` 监听数 0；后台任务回执 exit 1 即这次 kill 的正常回执），23:59 那轮同步未发生、东财额度未烧；web（PID 9208）留跑。`git status --short` 空、HEAD `45db14e`、`origin/dev..dev` = 26 未 push；④ 的唯一产物 `web/verify-suites.txt` 被 `.gitignore:33` 覆盖、不入库。
+
+⑥ **四件待拍板重估（只评估、未落盘；判定与登记进 FIX-LEDGER「待你拍板」16–19，论证进 CODE-REVIEW 追加十一）**：ds 生命周期（明天白天 ④→③ 同窗，`SYNC_CATCHUP=off` 作前置）；CR9-45 修法 ①→②（新论据＝触发器是每晚同步，故它是"ds 可无人值守过夜"的前置而非优化）；`/api/events` 登记措辞（新量出页面路径的守卫是 `page.tsx:63-66` 的 DB 存在性 `notFound()`，与路由路径的 `checkSubject` 不同类、互不冗余、不要统一）；CODE-REVIEW `:825-826` 的既有"缺陷"**复核定性下调**——825 是合法两格行、826 是紧跟其后的缩进 `>` 引用块 ⇒ 表格渲染没坏，坏的是源码观感与归属，修法二选一（补记改独立表格行／去缩进作表后正式段落）。
+
+**同日续 19 · 主人报"首页完全是乱的"→ 归因实测判定非回归 → 新增并当日修 CR8-8（09-30 19:4x–20:4x，代码面两处）**：
+
+① **先认一次答错方向**：我第一次回的是"首页我一行没动"（`git diff HEAD` 对四个生产文件为空、无 console 报错，事实没错），但**这答不了他的问题**——他要的是"为什么现在乱"。被打回后改测**库内按时间的内容分布**才得出可用结论。纪律已进用户级记忆：*"git diff 干净"回答不了"界面为什么乱了"*。
+
+② **归因实测（带 WAL 全表 41 批次）**：`relatedCodes` 含 退市/ST/北交所 的占比 **09-13 基线日就有 10.4%**（578 条里 60 条），`related` 峰值 ≥12 的批次 **30/41**，最早 09-13 00:28；异常样本与截图完全同一批名字（`创新药|600200|退市苏吴`、`黄金|600086|退市金钰`）⇒ **09-27 的 BK 缓存（`5371494`）与 09-17 的 `HotspotFeed` 改动都不是成因，没有任何改动导致它变乱**。今天被看见的两个真实原因：**(a)** 屏上这批（`2026-09-30 00:27`、`src=tavily`）是**我 00:24 跑门禁④ 时 `test-p3` 触发 `POST /api/hotspots/run` 产出的**，而当天 08:30 的正式盘前批次没产出（ds 00:29 起停到 19:40）；**(b)** 板块主题构成变了（09-26 前 top＝黄金/有色金属/石油，09-27 后＝创新药/锂电池/医药），密度随新闻内容浮动。⇒ **顺带钉住一条此前未被承认的副作用：门禁④ 不是只读测试，它会真跑一轮热点 pipeline 并写库。**
+
+③ **仪器错（"先疑仪器"同族第六次）**：按既有配方"复制 `web/prisma/dev.db` 只读打开"查库，最新批次停在 09-29 23:43，与 API 的 00:27 矛盾 ⇒ 差点上报"API 返回的批次不在库里"这个**不存在的数据完整性缺陷**。真因：**该库是 WAL 模式**，`dev.db-wal` 18 MB／mtime 09-30 00:29，主文件 mtime 09-29 23:43 ⇒ 只复制主文件＝读过期快照。**查库必须 `dev.db` ＋ `-wal` ＋ `-shm` 三件套一起复制到同一目录**（已写进 CODE-REVIEW 的 CR8-8 段与项目记忆）。
+
+④ **CR8-8 登记并当日修（P2）**：装配链实测为 `pipeline[:12] → web ingest 的 out.slice(0, 16) → 前端全渲染`，故两处下刀——**`web/lib/hotspots.ts`** 新增 `isDelistedName()` 并在 `resolveRelated` 成分股环节剔除（判据取 **Product 库内权威名**，不取成分表回传名）；**`web/app/HotspotFeed.tsx`** 新增 `RelatedChips`，默认 **6 个 ＋「+N 更多」展开/收起**（这一刀同时治存量）。**主人定的口径：只滤「退市」，ST/*ST 与北交所一律保留**——理由是可正常交易的标的该由他自己判断可投资性，软件不代判。
+
+⑤ **门禁**：`tsc --noEmit` **0 错**｜`vitest` **Tests 215 passed (215)／Test Files 32 passed (32)**（210＋5 条成对断言，门槛① 已更新）｜集成 ④ 20:26–20:34 **7 套件全 `exit=0`**：db 18/18｜p1 20/20｜p2 41｜p3 27/27｜p4 23/23｜p6 24/24｜**p5 21（17|21 档，本次高档）**；归因 `runs:0`、ds 日志 `abandoned` **0** 条、跑期间 `web/**` 零编辑。**「+N 更多」的交互本身零自动化覆盖**（本仓 vitest 全是 lib/API）⇒ 该半条验收＝主人实点。
+
+⑥ **另记一次撤销**：09-30 00:5x 我按待拍板 16/17 完整实施过 CR9-45（`/health` 改 async ＋ 看门狗在飞上限 12 ＋ `SYNC_CATCHUP=off` ＋ 新离线套件 26/26 含两次原地回退演练），主人一句**"回退你的改动，然后开始cr8"** ⇒ 全部手工回退（`git diff --stat` 证明代码面零差异、`compileall` 0 错、残留引用 0 处、新测试文件删除）。**故 16/17 仍是 ⏳、代码仍是"全端点同步 def＋无在飞上限"**，别假设已修，也别主动重做。
+
+⑦ **环境交代**：ds PID **5532** 按门槛⑤ 配方以 `SYNC_HOUR=23 SYNC_MINUTE=59` 起（副作用同前：**今晚 cron 落在 23:59，跑完须停**）；web PID 20272（:3000）。CR8 批次一的 5 处生产改动**仍未动**，`/ui-demo` 待主人看。
+
+**同日续 20 · CR8 批次一落地（CR8-2/4/5/6 四项一次做完，主人「照准」后执行；09-30 21:0x–22:5x）**：
+
+① **前置**：主人在浏览器看完 `/ui-demo` 的四组对照后给字"照准，执行批次一生产改动"⇒ 他自设的"先出可看的 demo 再落真改动"闸口已过。`/ui-demo` **暂不删**，留到他实点验收完（批次一的门槛本来就是人工点击验收）。
+
+② **五处生产改动**：`app/layout.tsx` header 加 `sticky top-0 z-40 shadow-sm`（CR8-4）｜`ResearchPanel.tsx` 的 `#research` 加 `scroll-mt-24`（CR8-4 连带回归，同批硬约束）｜`HotspotFeed.tsx` 文案「深度解读」→「去分析 {标的名}」（CR8-2，禁用态同步，跳转与接口零改动）｜4 处面包屑调用点**成对**删（`search/page`＋`search/loading`、`product/page`＋`product/loading`）＋`Skeleton.tsx` 面包屑占位删除（`pt-4`→`pt-8` 补留白）（CR8-5）｜新增 `app/components/PageBack.tsx` 并挂详情页标题区（CR8-6）。
+
+③ **`Breadcrumbs.tsx` 已删除**——删前实测：`grep -rn "Breadcrumbs" web` 只剩组件自身与 `/ui-demo` 的注释文字，**零代码消费者**；为此先把 `/ui-demo` 里对它的 import 换成等价静态复刻（demo 本就是 mock，不该让临时页吊着生产组件不放）。
+
+④ **集成断言锁步 4 条（等量替换 ⇒ `PLANNED` 不变，不触发 CR9-25 的计数维护）**：`test-p1:119` `搜索页含面包屑` → **负向**「不再有面包屑」｜`test-p1:124` `详情页面包屑含当前标的` → 「无面包屑 ＋ 有『← 返回』＋ 含标的名」｜`test-p3:183` `深度解读入口` → `去分析入口`（判据 `html.includes("去分析")`）｜`test-p2:340` **`R7 面包屑` 改名 `R7 顶部导航含一级入口（首页/搜索）`**——这条不会红，但它旧名字谎称了自己测的东西（判据一直是文本含"首页/搜索"，与面包屑无关），顺手纠正。
+
+⑤ **门禁字面**：`tsc --noEmit` **0 错**｜`vitest` **Tests 218 passed (218)／Test Files 32 passed (32)**（含 CR8-8 的 8 条）｜集成 ④ 22:5x **7 套件全 `exit=0`**：db 18/18｜p1 20/20｜p2 41｜p3 27/27｜p4 23/23｜p6 24/24｜p5 21（17|21 高档）；锁步 4 条字面 `[PASS] 搜索页不再有面包屑（CR8-5）`／`[PASS] 详情页无面包屑且有「← 返回」入口（CR8-5/CR8-6）`／`OK R7 顶部导航含一级入口（首页/搜索）`／`OK 去分析入口（CR8-2 改名后）`。归因：`/sync/status` `runs:0`、ds 日志 `abandoned` **0** 条、跑期间 `web/**` 零编辑（CR9-47）。
+
+⑥ **PLAN 同步 4 处**：R7 行、界面约定表的「面包屑」行与「返回入口」行（⬜→✅ 并写清落点），以及 M1 里那句**错误描述**——"『深度解读』入口（调统一 Agent 的 L2 工具出研报）"改为如实说明它只是锚点链接、不调 Agent（CR8-2 的发现本来就在纠正这句话）。
+
+⑦ **未收尾**：**批次一的验收＝主人浏览器实点**（本仓 vitest 全是 lib/API 测试，零 UI 组件覆盖，`tsc`/④ 都判不了"钉住没钉住、返回对不对"）；点完我再删 `/ui-demo`。ds（PID 5532）的 cron 被 `SYNC_HOUR=23:59` 挪到**今晚 23:59** ⇒ 收尾须停它，否则真起一轮同步。批次二（CR8-1/CR8-3＋OPT-2）未开始，其首步是按 09-26 拍板跑真实 pipeline 测 OPT-2 前置②（东财新闻改必调后的令牌获取率）。
+
 ### 2026-09-25 — CR7 全闭环：C0 实测 + C1/C3 收尾 + 批次 D + 终验全绿 ✅
 
 **C0 实测**（午间休市窗口）：全 5 类型同步 578s（9.6min）——fund 470s 占 81%、stock 当日东财不稳全 host 失败、**stock 熔断连坐 hk（4ms 被拒）当场实证 CR7-7 场景**；全成功日上限估 10-13min。**C1** 同步补跑让位热点（轮询 600s 上限，5/5）；**C3** maxDuration 800→1500 + ReadTimeout 记中性标注非失败（5/5）+ 注释勘误。**批次 D**（`776a6bd`）：D1 四模块回归盲区 33 项（**顺带修出 backup_db 损坏源裸崩溃的真实缺口**）、D2 `_abandoned` 计数竞态同锁互斥（贴边 50 次压测）、D3 hk 分页上限 100 页 + MCP list_products 看门狗（9/9）。观测脚本收编 `test-script/`（新目录，README 说明纪律）。
@@ -342,4 +388,96 @@ O1–O12 全量落地，明细见 [history/2026-09-13-cr1-全项目审查与O系
 
 09-14 由主人启动 Docker（v29.7.2）后 L2 镜像重建验证闭环；**后续任何 Docker 相关改动仍按主人指示暂缓**（含 C31 进程降权的镜像验证）。
 
+**同日续 21 · 来路驱动导航（新增 CR8-9）＋ CR8 批次二首刀重落 ＋ 刀三 #16/① ＋ 刀四 #18/#19（2026-10-01 00:0x–10:5x，主人逐条拍板后执行）**
+
+① **前置核实（零代码）**：主人 00:0x 实点首页后提三条——"点去分析还是跳到搜索页"/"原文没改"/"降级产出是什么"。逐条实测后定性：**(a)** 真实 DOM 里 `a.click()` 后 `location.href=/product/stock/600028#research`、`h1=中国石化`，14 张卡的「去分析」目标逐个 fetch **全 200 且 h1 与标的名一致** ⇒ 不是跳转，是 `Nav.tsx:13` 把 `/product` 归给「搜索」把顶栏点亮了；**(b)** 「原文」的根因在 ds `_topic_urls` 的 return 行丢 `n["title"]`（文档原记 `:553`，实测已漂到 `:595`）⇒ **纯前端改不了**；**(c)** 「降级产出」＝`run_pipeline` 把三件不相干的事 OR 成一个布尔（文档原记 `:628-629`，现 `:670-671`），他红框那条是 ③「新浪板块名称未匹配」＝几乎每轮都有的纯噪声，不是产品功能。
+② **中途一次完整回退**：我按"A 方案＋批次二"落完并全绿后，主人 01:5x 说"恢复你改动的文件，我重新生成回答"。逐文件手工回退（`data-service` 那两文件本轮开始前干净 ⇒ 用 `git checkout` 精确还原；带批次一未提交改动的 web/docs 一律手工）。回退证明：`git status` 与轮初快照逐行一致（`Nav.tsx`/`verify-all.mjs`/`data-service/**` 从 modified 列表消失）、`tsc` 0 错、`vitest` **218/218** 复现基线。
+③ **重新思考两轮（这是主人的两次否决）**：第一轮我推荐"来路只驱动返回"⇒ "不是非常认可"。第二轮先摆被推翻的前提：**我把"独立"读成"不需要高亮"，正撞他 09-24 写进 PLAN 的"需要一级区分"**；改为**同一个 `from` 同时驱动高亮与返回**，并纠掉我自己上一条事实错——**"刷新丢来路"不成立**（F5 保留 query），真无来路的只有裸 URL／新标签。他选 **(i) sessionStorage 兜底**、追问"会不会删导航栏/会不会丢高亮"，我答"都不删；四种来路各亮各的，只有无来路不亮"后批准执行。
+④ **刀一（CR8-9）**：新增 `web/lib/provenance.ts`（白名单 `search|home|chat` ＋ session 兜底 ＋ `hrefForFrom`）作单一来源；`Nav.tsx` 删前缀归属、产品页按 `from` 点亮；`PageBack.tsx` 按 `from` 出文案与目标；四个入口各带 `from`（`search-client.tsx:201`、`HotspotFeed.tsx:67` chips、`:329` 去分析、`ChatUI.tsx:154`＋`research.ts:254`）；`layout.tsx` 给 `<Nav/>` 加 `Suspense`（`useSearchParams` 的硬要求）。**一处对我所给方案的收窄（在此说明，非静默）**：返回动作**首选仍是 `router.back()`**，`from` 只决定文案与"无历史时"的确定目标——因为 push 重建的 `/search?q=` 会丢 `type/sort/page` 现场，而「搜索现场保留」是 PLAN 既有需求。SSR 六形态实测全中（`/`→首页、`/search`→搜索、`/chat`→助手、`from=search`→搜索＋「← 返回搜索」、`from=home`→首页、裸 URL→不点亮）。
+⑤ **刀二（CR8-3＋CR8-1）重落**：ds `_topic_urls` 返回 `{url,title}`（截 120）、`run_pipeline` 按成因分类 `reasons[]` 且 **③ 不再进 `degraded`/`note`**（`reasons` 只进运行结果，不落库——无消费方的分类字段就是 CR9-10 点名的"能力已在、消费侧无出口"）；web `toSourceRefs` 写侧＋读侧双归一（**无需 migration**）；前端删逐卡横幅、「相关文章」独立成行＋截断＋hover、页头「产出说明」一批≤2 条。🔁 回退复跑 **19/24、exit=1**（NG 原文含 `note='…新浪板块名称未匹配「地产链」'` 与 `{'degraded': True}`），恢复后 24/24、`grep DRILL=0`。
+⑥ **刀三**：**#16** `SYNC_CATCHUP=off` 落地（② `c1_catchup_yield` 13→**16**，含 🔁 反证"默认 on 同场景照常同步"与"off 不得改变 `_sync_hour_minute()`"）；**#17 只落 ①**（`/health` 改 `async def`，新离线套件 `test_cr9_45_health_async` **5 项**，含 🔁 反向"`/quote` 仍是同步端点"＝证明只把探针摘出线程池）。⑤ live：10:38（**已过**默认 02:00 调度点、`lastDate:null`）以 off 起 ds ⇒ `/sync/status` `runs:0` 且 `nextRun=2026-10-02 02:00`（cron 未被挪走）、PID **11204**、`10048` 计数 0 ⇒ **起干净 ds 从此不需要撒谎、也不需要记着停**（09-29/09-30 两夜手动 kill 的那类雷解除）。**#17 的 ②（看门狗在飞上限 12）仍待字**——它改取数失败语义，建议单独一刀。
+⑦ **刀四（零代码）**：#18 结论写进 CR9-10 行（守卫两类不统一、路由保留）；#19 把被 GFM 当续行吞掉的缩进 `>` 补记**升格为独立表格行**（实际位置 `CODE-REVIEW.md:862-863`，账上原记 `:825-826`＝行号已漂）。
+⑧ **门禁**：① `tsc` 0 错 + `vitest` **231/231（33 文件）**；② **17 套件 329 项**逐个 `exit=0`；④ 七套全绿**零缺口**（db 18｜p1 **23/23**｜p2 41｜p3 **30/30**｜p4 23｜p6 24｜p5 **21**）；⑤ 见 ⑥。**仍欠门禁③（`test_p0`/`test_p1` 实网）与 CR9-33 健康态全量耗时**——两者都要 ds 醒着且不怕烧额度，需主人排窗口。
+⑨ **两次进程回收（仪器层，值得记）**：web dev 与 ds 都会在回合间被回收（`:3000`/`:8000` 0 监听、日志无异常尾行）。我第一遍 SSR 探针把 `status=200` **写死在 echo 文案里没实测**，正撞上服务已死 ⇒ 差点把"进程没了"读成"`Suspense` 吞掉导航栏"。重测后六形态全对。**副作用顺带查清**：ds 死在 09:30 之前，那档 cron **没有真跑**（日志零同步痕迹）——主人第 3 条"晚点跑"未被违反。
+⑩ **未闭环**：**F4**＝`PLAN.md:311`/`:435`/`:439` 三处明文现在**与实现相反**（写的是"主人要求保留 /product 高亮"），未点头所以我没改；#17 的 ②；`OPT-2`（fusion＋源序＋`newsSource`→数组，前置②未测）；新观察「`sync_scheduler` 的 `log.info` 在 uvicorn 默认配置下完全不输出 ⇒ 三种跳过补跑的原因在 dev 日志里都看不见」待定是否立号；批次一的 UI 实点验收随本轮一并被主人实跑覆盖（他直接在生产页上提了问题）。
+⑪ **提交状态**：全部改动**未 add、未 commit**（4 个 docs + `web/**` 15 个文件含新增 `provenance.ts`/`provenance.test.ts`/`PageBack.tsx`、删除 `Breadcrumbs.tsx`、`data-service/**` 4 个文件含新套件），等主人审完再等 commit 的字。
+
 （其余暂无）
+
+**同日续 22 · F4 结清 ＋ CR9-45② 落地 ＋ 一次实网窗口把 CR9-33 的债还上（结论却推翻了预算前提）（2026-10-01 11:1x–12:2x，主人点头"关于 F4 改动我都认可，剩下的按你的推荐方案，现在开始执行；唯一注意请求外部数据源不要太频繁"）**
+
+① **F4（零代码）**：`PLAN.md` 四处明文按实现改写——`:311` 导航高亮判据换成"一级按前缀点亮；`/product/**` 无固定父级，点亮项＝入口带来的来路，无来路不点亮"、`:435` CR8-5 的"按主人要求保留"改成"当时保留、10-01 被 CR8-9 推翻"、`:439`「本批不改动项」把 `/product` 高亮移出（**蓝色板块标签那条原样保留，没动**）。**自查另补两处**（F4 登记时只数了三处）：`:25` 的 R7 行同样写着"按主人要求保留"；`:313`「返回入口」的无历史退化目标原文写"恒跳首页"而实现是"回来路页"。**只加状态校正、不动决策**：CR8-7 行"OPT-2 并入批次二同批实施"与事实不符（批次二只落了 CR8-1/CR8-3）⇒ 加 ⚠️ 指针指回看板。`CODE-REVIEW.md:693` 的 CR8-5 拍板原文按惯例不改，只加"已被 CR8-9 推翻"的指针。
+
+② **CR9-45②（唯一的生产改动）**：`utils/timeout.py` 加 `MAX_INFLIGHT_WATCHDOGS = 12` ＋ `WatchdogOpenError(TimeoutError)` ＋ `inflight_count()`；`run_with_timeout` 进 `join` 前领名额、`finally` 归还，到限的新调用**不起线程、不发外部请求、立即降级**；`/health` 加 `inflightWatchdogs`/`watchdogInflightCap`。**登记原文的歧义按实现纠正**：闸门数的是"当前卡在 `join` 上的调用数"（＝本模块占住的池 worker 数），**不是** `_abandoned`（那些线程早离开 join、不再占 worker，用它当闸门既挡不住饿死又会在上游永久挂死时锁死外部取数）；由此**不需要半开探测**——名额随 `join` 归还而 `join` 至多等 `seconds` ⇒ 闸门必然自行打开。调用点零改动（子类身份只给日志与测试用）。新离线套件 `test_cr9_45_inflight_cap` **14 项**含两条 🔁。
+
+③ **门槛② 的价值当场实证**：首跑 `test_p2_m8` 立刻红出我自己的 `UnboundLocalError: cannot access local variable '_inflight'`（`global` 少写一个名，只有走"真发起"路径才炸）——**是 17 个既有离线套件逮住的，不是新套件**。修后 18 套件逐个 `exit=0`。
+
+④ **实网窗口按主人的额度纪律排**：先跑一次**冷缓存全量同步**（这是 CR9-33 欠的那个健康态数字，也唯一需要它的事），同步期间只采样本地 `/health`＋`/sync/status`（64 次，零出网）；同步结束才跑 `p0`（15/15）→ 重启 ds 清掉**进程内冷却态** → `p1`（14/14、`exit=0`）→ 只补跑依赖 ds 的 `test-p4`（23/23、`exit=0`），**不重跑 `test-p3`**（它会真跑一轮 pipeline＝再花东财/Tavily 额度，10:4x 已全绿且本轮 `pipeline.py` 零改动）。两次 502 复探都在 **2ms** 返回本地冷却文案 ⇒ 未出网，没为"补 exit code"重跑任何套件。
+
+⑤ **CR9-33 还上了债，但结论与现预算的前提相反**：`tookMsTotal=1800030 / error=ReadTimeout / ok=true` ⇒ 健康态一轮 wall **≥1800s，正好打穿定时态预算**；访问日志计数 **5 条 `/products` vs 280 条 `/quotes?type=fund`（28,000 只场外基金净值快照，≈1,700s）** ⇒ 时间花在**快照刷新**，不在取列表；而账上"1800s＝实测 430s 的 4.2 倍"里的 430s 是"逐类 `tookMs` 合计"的**另一个口径**（差 4 倍 ⇒ `tookMs` 含不含快照刷新要先查）。按现口径**每晚 02:00 都会准时以"读超时（中性标注）"收尾**，`/sync/status` 的 `ok` 于是恒真 ⇒ CR9-28 要它保住的判据功能再次失效（同根、未覆盖的分支）。本轮真入库的**只有 fund**（`Product` 按类型 `max(updatedAt)`：fund=10-01 11:33:54／bond=09-25／crypto=09-27／stock=09-12，hk 0 行）。**新增待拍板 #20（三岔：预算/`ok` 语义/web 侧留痕，推荐"拆基金刷新→三态 ok→不新增表"）与 #21（`log.info` 在 uvicorn 下不打 ⇒ 能做成状态位的就别做成日志，建议不立 CR 号）**。
+
+⑥ **一条必须自报的仪器事故**：为按 C34 证明闸门有判别力，我把 `MAX_INFLIGHT_WATCHDOGS` 抬到 `10**6` 再跑新套件——**错在该套件第一行就是 `cap = to.MAX_INFLIGHT_WATCHDOGS`**，我改的不只是闸门、而是用例自己的并发数 ⇒ 它照着 10⁶ 起线程，3 分钟内涨到 **71,148 个 OS 线程**、日志刷到 `abandoned = 14,521`、输出文件 367,034 行。`taskkill //PID 20020 //F` 止血（ds 本体未受影响）。三条教训写进 CODE-REVIEW 追加十二：**被演练的量不能同时是用例的输入**；**C34 的反向证据套件内部已有**（🔁 两条），以后闸门类改动不再拿常数做演练；这次意外只是"无上限"字面代价的演示，**不当证据用**。
+
+⑦ **门禁**：① `tsc` 0 错 + `vitest` **231/231（33 文件，本轮未增删 web 用例）**；② **18 套件 343 项**逐个 `exit=0`（343＝旧 329＋新 14；`p6_mcp` 的 `[网络项]` 会真打一次腾讯 ⇒ "离线"名单里唯一的出网口，已写进门槛②）；③ `p0 15/15`、`p1 14/14 exit=0`；④ 只补 `test-p4 23/23 exit=0`（理由见④段）；⑤ 重启链 **11204 → 23292 → 345148**，`/health` 吐出 `inflightWatchdogs/watchdogInflightCap` 两字段＝新代码确实在跑着的那个进程里生效。**⚠️ 起 ds 的纪律补一条**：别再手动加 `NO_PROXY='*'`（dotenv 不覆盖已存在的变量，手动那份会顶掉 `.env` 口径；本轮两者恰好同值所以无差别，但我读不了 `.env` 来证明）。
+
+⑧ **提交状态**：本轮改动**全部未 add、未 commit**（`docs/PLAN.md`＋`docs/FIX-LEDGER.md`＋`docs/CODE-REVIEW.md`＋`docs/PROGRESS.md`＋`data-service/app/utils/timeout.py`＋`data-service/app/main.py`＋新套件 `test_cr9_45_inflight_cap.py`，连同 10-01 批次二/刀一/刀三/刀四尚未提交的 `web/**` 与 ds 改动），等主人给 commit 的字。**当前服务状态**：web `:3000` 在跑；ds 监听 PID **345148**、`SYNC_CATCHUP=off`、`runs:0`、cron `nextRun=2026-10-02 02:00` ⇒ **明日 02:00 那轮仍会按现预算（1800s）撞同一次超时**，这是 #20 的 deadline 性质，不是假设。**⚠️ 读状态前先知道这件事**：`/sync/status` 是**纯内存态**（CR9-28 那轮定过的口径），我为了跑 ③ 重启过 ds ⇒ 现在它显示 `runs:0 / lastDate:null`，**12:03 那轮的 `tookMsTotal=1800030 / ReadTimeout` 证据不会在页面上复现**，只存在于本节与 CR9-33 行的字面抄录里。要看它，得等下一次真实同步跑完（或手动 `POST /sync/run`，那就是再花一轮额度）。
+
+**同日续 23 · 全量测试轮（五道门禁全绿）＋ 手工功能探针挖出 5 条门禁够不到的问题 ＋ CR9-44 落地 ＋ 批次八方案落账（2026-10-01 12:1x–16:0x）**
+
+① **主人的三条字**：先"对整个项目依次彻底的全量测试、覆盖所有功能、有问题整理给我并推荐修复办法"；再"**先不要 commit 和修改代码**，先对发现的问题做处理方案的思考"；最后"**CR9-44 先补注释**"。⇒ 本轮只有 CR9-44 一处代码（注释）改动，其余全是测量与方案。
+
+② **五道门禁全绿（字面）**：① `tsc_exit=0`＋`Test Files 33 passed (33)`／`Tests 231 passed (231)`；② **18 套件逐个 `exit=0`、合计 343**；③ `===== 15/15 通过 ===== p0_exit=0`、`===== 14/14 通过 ===== p1_exit=0`；④ `test-db 18/18｜p1 23/23｜p2 41｜p3 30/30｜p4 23/23｜p6 24/24｜p5 21`＋`ALL DONE`＋`verify_all_exit=0`（**断言合计 180**）；⑤ 重启链 PID …→345148→**86732**，`/health` 五字段（含 `inflightWatchdogs`/`watchdogInflightCap:12`）。跑 ④ 期间 `web/**` 零编辑（CR9-47）。
+
+③ **手工功能探针（能不出网就不出网）**：7 条只读路由全 200（`/api/health` `{"status":"ok","db":"ok"}`、`tools/status`、`hotspots/status`、`search`、`events`、`chat/sessions`、`watchlist`）；守卫 5 条全对（`sync?type=bogus`→400、`sync` 跨站→403、`hotspots/run` 跨站→403、`events?code=..%2Fetc`→400、`watchlist type=bogus`→400）；**自选 CRUD 完整回环**（POST 带 name→GET 显示「贵州茅台」→DELETE→空→**库回 0 行**）；**双源核对端到端**（`source=akshare／crossChecked=true／verifyVerdict=agree／偏差 0.000%`，5.2s）；首页 SSR 计数（相关文章 9／去分析 9／降级产出 0／原文 0／产出说明 0）；数据面（Product 35,223；研报 29 篇全 `done`；今日热点 14 行 `degraded` 全 0；`KlineDaily` 最新一天＝09-30）。**全程只额外花了 2 个上游请求**（那一次双源核对），其余都是本地库/本地端口。
+
+④ **挖出 5 条门禁够不到的问题**（全部登记为**待拍板 #22**，按占号纪律未占 CR 号）：(a) `/api/research/ingest` 只判 `type` 非空 ⇒ 我 POST `type:"bogus"` 拿到 200 并真落库一行（已清）；(b) R14 快照**没有新鲜度列**且实测陈旧（库内 `600519=1275.16` vs 同日实盘 `1258.62`，差 1.3%；`bond` 只有 315/1059 有价）；(c) 不存在的标的返回 **HTTP 200**＋404 正文；(d) **6 条路由零断言**；(e) 「产出说明」页头零断言 ⇒ 当日 `degraded` 全 0，**证明不了它能显示**。推荐顺序：(a)(c)(d)(e) 并一刀 → (b) 的 `snapshotAt` 单独一刀 → 再按 #20 第一刀拿数据。
+
+⑤ **一条当场自纠（重要）**：我第一版把 (a) 的修法写成"复用 `QUOTE_TYPES` 加白名单"，读代码才发现 `route.ts:22-27` 有 **2026-09-14 的明文「不得限制 type 枚举」**（当年加白名单把 fund/bond/crypto/hk 的完成回调全 400 拒了 ⇒ 研报永久 running、前端无限轮询、静默丢失）⇒ **建议已撤回**，改成"语义白名单（查 `Product` 里 `(type,code)` 是否存在）"。同轮实测出的连带事实：我没带 `x-ingest-token` 也拿到 200 ⇒ **`INGEST_TOKEN` 未配置、鉴权分支恒不生效**，归 **G7**（不新开号）。**教训**：改既有行为前要 grep 的"保留决定"**包括代码注释**，不只是 docs。
+
+⑥ **CR9-44 落地（本轮唯一代码改动，只改注释）**：`tencent_provider.py` 的 `_minute_kline` docstring 首行删掉 `bond(转债)`，并补明三件事——bond 链备源是 `sina_bond_provider`、腾讯对转债是空壳形态（09-27 实测 今开 0.000／成交量 0／bars=1）、后果是"东财一熔断转债分时即无源，而 `chain_call` 只报无备源"；模块 docstring 的"不覆盖"行同步补上转债分时。`test_tencent_minute` **20/20 `exit=0`**（无断言盯 docstring ⇒ 零锁步改动）；全仓复查只剩历史发现原文，没有第二处把它当现行契约。
+
+⑦ **两条环境事实（不是缺陷，但影响验收）**：今日 **10-01 国庆休市**（实时价 `timestamp`＝09-30 16:11、`KlineDaily` 最新＝09-30）⇒ 批次七 OPT-3 的"分时序列日期==北京今日"与 CR9-7 陈旧时间戳**结构性不可验**，排到节后首个交易日；③ 的**源态取决于 ④ 有没有先跑**（11:3x 主源态 vs 12:3x 备源态，因 ④ 的 p3/p5 先吃掉东财桶）⇒ 全量测试固定分两窗（A＝①②④＋p0，B＝p1 主源态）。
+
+⑧ **方案落账（16:0x，主人指令"先不要执行刀 1，先把方案分类整合进 docs"）**：修复顺序定案写进 `FIX-LEDGER`「批次划分」**八**（新增一行：五刀各带改动面／断言面／门禁数字影响／边界，＋ 明确不做六条 ＋ 待字六项），速览加"未拍板不得实施"一行。**三条新事实按"每个事实只有一个家"分别归位**：**CR9-33 行**＝`tookMs` **含**快照刷新（读 `sync.ts:231`/`:238` 定案，零额度）⇒"差 4 倍之谜"结清，且健康态 wall 目前**只有今日 1 个样本**，不足以定新预算；**待拍板 #20**＝推荐顺序改序（原"先拆再三态"→ 现"先观测再定结构"）＋两条降险事实（**web 侧不消费产品同步的 `ok`**；`legs[]` 由必需降为可选，`SyncLog` 因此不必新增）；**#21/#22**＝只挂指向批次八的指针、不复述。**本轮零代码改动、刀 1 未动。**
+
+⑨ **提交状态**：**未 add、未 commit**。本轮新增改动＝`data-service/app/providers/tencent_provider.py`（两处注释）＋ `docs/FIX-LEDGER.md`／`docs/PROGRESS.md`（#22、门槛①②③④⑤ 的本轮记录、CR9-44 转 ✅、速览 4→3），叠加此前尚未提交的批次二/刀一/刀三/刀四与 ② 的全部改动（`git diff --shortstat` 见收尾汇报）。**服务状态**：web `:3000` 在跑；ds PID **86732**（`SYNC_CATCHUP=off`、`runs:0`、cron `nextRun=2026-10-02 02:00`）。**临时件**：`data-service/gate2-fulltest.out`、`gate3-p0.out`、`gate3-p1.out`、`gate4-fulltest.out` 是本轮原始输出，**未被 gitignore，commit 时不要 add**（`*.log` 三个已被忽略）。
+
+**同日续 24 · 批次八·刀 1 落地：三态 `ok` ＋ `Product.snapshotAt`（2026-10-01 16:4x–17:5x，主人"按推荐顺序推进，先切刀 1"）**
+
+① **主人的字序列**：先"按推荐顺序推进，先切刀 1"，随即打断为"**在你实际执行之前，先把你的方案分类整合进 docs**"（→ 同日续 23 的 ⑧），落完账后继续执行刀 1。⇒ 刀 1 的授权是明确的，但**先方案后动手**这条流程要求已记进工作纪律。
+
+② **改动清单（两半）**：**(a) ds 侧**——`sync_scheduler._execute` 的 ReadTimeout 分支不再写 `ok=True`，改 **`ok=None` ＋ `outcome="inconclusive"`**，并给所有出口统一带上 `outcome` 五态（`completed`/`partial_failed`/`rejected`/`failed`/`inconclusive`），不变量写进 docstring：**`ok` 只有在 web 真的回答了时才带真/假**；`note` 改为直说"本轮结果**未知**"并指出两处可查证据（`Product.updatedAt` / `snapshotAt`）。**(b) web 侧**——`Product` 新增 `snapshotAt DateTime?`，`buildSnapshotUpdate` 多绑一个**整批共享**的时刻参数（SET 子句内、绑定序在 changePct 组之后、type 之前），`refreshSnapshotInner` 一次刷新取一个时刻并回传给 `SnapshotResult.snapshotAt`。
+
+③ **一条先改账再写码的自纠**：我在批次八里把 🔁 不变量写成"list 写入**不动** `snapshotAt`"——**这是错的**：list 阶段是整表删旧插新，旧行连同快照时刻一起消失 ⇒ 正确不变量是"**list 阶段之后 `snapshotAt` 必为 null，只有刷新才写时刻**"。16:2x 先把账改对，再按对的语义写代码与断言（同一个 SQL 契约里还顺手核了 6 处 `product.findMany` 全部带显式 `select` ⇒ 新列不会漏进任何 API 载荷）。
+
+④ **`prisma migrate dev` 在本项目不可用（实测，会想删 FTS）**：它按 schema 反推漂移，认不得 `Product_fts`/`_config`/`_content`/`_data`/`_docsize`/`_idx` 这 6 张虚表，直接报 `You are about to drop the Product_fts table, which is not empty (35223 rows)`。非交互环境下它自己停了、**库未受损**（复核：FTS 35,223 行、列未变、无半成品迁移目录）。**绕行＝手写 `migrations/20261001000000_product_snapshot_at/migration.sql` ＋ `migrate deploy` ＋ `generate`**（与 `20260911041104_product_fts` 同一套路）；`deploy` 首次因 dev server 持有 DB 锁与引擎 DLL 而失败（`database is locked` / `EPERM rename query_engine...dll`）⇒ **短暂停 web dev 后一次成功**，已重启并复核 `GET /` 200。这条已写进迁移文件顶部注释，避免下一轮又去点 `migrate dev`。
+
+⑤ **一处验证被分类器拦下，换了等价做法**：我想用"真实行 UPDATE ＋ 事务内抛错回滚"证明写入路径，被安全分类器按破坏性操作拦掉（**与既有纪律同源：分类器会拦"回退＋跑测"组合**）。改为两步等价验证：**只读**证 `Date` 绑定往返（`SELECT ? AS s` → `bigint 1790843400000` → 同一 ISO）＋ Client 能 `select snapshotAt`（600519 现为 `null`、`lastPrice` 仍是 1275.16，未被改）；**真跑** `POST /api/market/refresh?type=bond` → `{"total":1059,"updated":315,"failedBatches":0,"snapshotAt":"2026-10-01T09:28:43.570Z"}`（11 个东财批次、59.8s），库内**只有 bond 的 315 行有值、其余四类全 0** ⇒ 一次跑同时证实"写路径通"与"list 不写快照时刻"。另有一条**零出网**早退探针：`?type=hk`（0 行）→ `total:0／snapshotAt:null／7ms`。
+
+⑥ **既有断言把旧契约钉死了，由全量跑逮住**：`test_c3_readtimeout` 里有一条 `C3：ReadTimeout 时 ok=True（非失败标记）`——刀 1 改语义后它立刻红（13/14）。**处置＝改断言而不是回退代码**，并把它升到 16/16：新增 `ok is None` ＋ 🔁"既不是真也不是假"＋`outcome=inconclusive`＋note 含 `snapshotAt`。教训与 memory 同条：**改契约前先 grep 测试有没有把旧行为写死**，而这条只有跑**全量 ②** 才会被撞出来（只跑新套件会静默放过）。
+
+⑦ **门禁（全在改后代码上跑）**：① `tsc` 0 错＋`vitest` **233/233（33 文件）**（231→233＝新增 2 条 snapshotAt 断言）；② **18 套件 353 项逐个 `exit=0`**（`c3_readtimeout` 14→16、`cr9_sync_status` 7→15）；④ 按需子集 `test-db 18/18`｜`test-p1 23/23`｜`test-p2 41`｜`test-p6 24/24` 各 `exit=0`，**不重跑 p3/p4/p5 的理由已写进门槛④**（这三套一条都不覆盖 `/api/sync` 与 `market/refresh`，而那正是 #22(d) 记着的零断言面）；⑤ 重启链 …→86732→**155832**，⑤ 探针见门槛⑤末段。③ 未重跑（本刀不动取数路径，且按额度纪律不重复打上游）。
+
+⑧ **额度账（主人点名要省的）**：本刀真实出网＝**bond 的 11 个东财批次（≈1 分钟桶占用）＋ ② 里 `p6_mcp` 自带的 1 次腾讯行情**；其余全是本地库/本地端口。没重跑 ③，没重跑 pipeline。
+
+⑨ **明晨 02:00 那轮要看什么（刀 1 的全部意义在此）**：`GET :8000/sync/status` 的 `lastResult.outcome` 落在哪一档、`tookMsTotal` 多少；然后只读比对 `SELECT type, MAX(updatedAt), MAX(snapshotAt) FROM Product GROUP BY type` ⇒ 若某类 `updatedAt` 是今晨而 `snapshotAt` 仍是 17:28 或 null，就说明**该类只换了主数据、快照没刷到**（这正是 bond 今天 315/1059 覆盖率的同类现象）。拿到这组数再进**刀 3** 的甲/丙选择。
+
+⑩ **提交状态**：**未 add、未 commit**；刀 1 新增改动＝`data-service/app/sync_scheduler.py`、`data-service/tests/test_c3_readtimeout.py`、`data-service/tests/test_cr9_sync_status.py`、`web/prisma/schema.prisma`、**新迁移目录** `web/prisma/migrations/20261001000000_product_snapshot_at/migration.sql`、`web/lib/market-snapshot.ts`、`web/lib/market-snapshot.test.ts` ＋ 四份 docs。**⚠️ migration 目录必须一起提交，否则别的环境起不来这一列。** 服务：web `:3000` 在跑（我停过一次、已重启）；ds PID **155832**（`SYNC_CATCHUP=off`、`runs:0`、cron `nextRun=2026-10-02 02:00`）。临时件新增 `gate2-knife1*.out`、`k1-test-*.out`、`web-dev-1001b.log`、`ds-1001-knife1.log`（后两个 `.log` 已被忽略，前四个 `.out` **未 gitignore，commit 时不要 add**）。
+
+**同日续 25 · 批次八·刀 2 落地：ingest 语义白名单 ＋ p2「守卫与状态位」段 ＋ p3「产出说明」成对断言（2026-10-01 17:5x–18:3x，主人"现在还有哪些任务没完成？继续执行"）**
+
+① **可执行范围先说清**：刀 3 要等明晨 02:00 那轮的 `outcome`/`snapshotAt` 数据（现在没有）；刀 4 要改 `.env`（我读不了也不该改，且是配错即全 401 的双侧握手）；刀 5 全是要额度/交易日的窗口。⇒ 本轮只推进**刀 2**。
+
+② **(a) ingest 守卫——落地形态与我原先报给你的推荐不同，这是读完整条链之后改的**：原推荐"回调时查 `Product` 里 (type,code) 是否存在"，**单独做这一条会重演 2026-09-14 那次事故**——`/research/start` 只校验枚举＋字符集，chat 工具路径可以为一个不在 Product 里的标的发起研报（`Product hk` 现在就是 0 行＝CR9-26② 现状），若 ingest 只认 Product，这类在途任务的回调会被 400 拒 ⇒ 行永远停在 running ⇒ 前端无限轮询、研报静默丢失。⇒ 实际形态＝**两条"或"**（有既有研报行必须照收 ｜ 否则要求标的在 Product 里），且**查库本身报错按放行**。新增 `app/api/research/ingest/route.test.ts` **6 条**（含 🔁"Product 查不到但有在途行 → 必须照收"、🔁"查库抛错 → 按放行"）⇒ ① 233→**239（34 文件）**。
+
+③ **(c)(d) p2 第 [10] 段「守卫与状态位」8 条，全部零出网**：health 的 `db` 位／`/api/sync` 白名单 400 与跨站 403／`/api/market/refresh` 白名单 400 与跨站 403／不存在标的的「HTTP 200 ＋正文 not-found」成对两条（把 #22(c) 那条"404 只能按正文判"钉成契约）／ingest 未知标的 400 ⇒ p2 **41→49**、`PLANNED` `[40,41]→[48,49]`。**没做的两条**：`/api/quote/verify`（要 2 个上游请求）与 `/api/watchlist`（集成断言要写主人的自选数据）。
+
+④ **(e) p3 借它本来就在造的合成行正面证明「产出说明」**：`有 degraded 行 ⇒ 页头出现横幅` ＋ `note 原文上屏`，清理后 🔁 `横幅出现 ⇔ 最新批次仍有 degraded 行`（实跑时 degraded=0 ⇒ 正确地不出现）＋ 🔁 `逐卡「降级产出」没被打回原形` ⇒ p3 **30→34**。这条把 #22(e) 从"证明不了能显示"变成有正反两向证据。
+
+⑤ **又踩一次加载时机（值得记）**：改完 route 后**第一次** POST 仍返回 200 并真写了一行——Next dev 是在那次请求里才编译新模块、当次用的还是旧 handler；清库后第二次复探才拿到预期的 400。⇒ **改 route 后的首次请求不能当"改后探针"**，与 09-27 那条 uvicorn `--reload` 教训同族；副产品：那次 200 恰好现场演示了"存在在途行 → 照收"这条 OR 分支真实生效。探针期间写入的垃圾行已删除，`ResearchReport` 回到 29 行。
+
+⑥ **额度账**：本刀真实出网 = p3 的一轮 pipeline（今日第三次）＋ p2 既有的行情/K 线请求；**新加的 12 条断言本身零出网**（守卫都在出网前拒绝）。没重跑 ③，没重跑 ②（ds 侧本轮零改动）。
+
+⑦ **门禁**：① `tsc` 0 错＋`vitest 239/239（34 文件）`；④ 只跑被改的两套 `p2 exit=0（49/49）`、`p3 exit=0（34/34）`，**不重跑 db/p1/p4/p5/p6 的理由已写进门槛④**（刀 2 的生产代码改动只有 ingest 一个路由，那五套都不打它）；② 未跑（ds 零改动）；⑤ 无需重启（web 侧）。docs 表格错位扫描仍为 **0**。
+
+⑧ **提交状态**：**未 add、未 commit**。本刀改动＝`web/app/api/research/ingest/route.ts`、新增 `web/app/api/research/ingest/route.test.ts`、`web/scripts/test-p2.mjs`、`web/scripts/test-p3.mjs`、`web/scripts/verify-all.mjs` ＋ `docs/FIX-LEDGER.md`／`docs/PROGRESS.md`。服务：web `:3000` 在跑、ds PID **155832**（cron `nextRun=2026-10-02 02:00`）。**下一个动作等明晨那轮的数据**：`/sync/status` 的 `outcome` ＋ `SELECT type, MAX(updatedAt), MAX(snapshotAt) FROM Product GROUP BY type`，用它定刀 3 的甲/丙。

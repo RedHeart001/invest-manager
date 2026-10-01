@@ -162,7 +162,9 @@ export default function ResearchPanel({
   const staleRunning = report ? isStaleRunning(report) : false;
 
   return (
-    <section id="research" className="mt-6 rounded-xl border border-zinc-200 bg-white p-5">
+    // CR8-4 连带补偿：顶部导航改为 sticky 后，`#research` 锚点跳转会落在固定头部
+    // 之下（标题被压住）。`scroll-mt-24` 给锚点留出导航高度。
+    <section id="research" className="mt-6 scroll-mt-24 rounded-xl border border-zinc-200 bg-white p-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h2 className="text-base font-semibold tracking-tight">深度分析</h2>
         {report?.status === "done" && report.rating && (

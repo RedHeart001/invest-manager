@@ -115,6 +115,107 @@ def test_run_pipeline_deadline_env() -> None:
         os.environ.pop("HOTSPOT_PIPELINE_TIMEOUT_S", None)
 
 
+def test_topic_urls_title_passthrough() -> None:
+    """CR8-3：来源链接必须带标题出 ds。
+
+    旧实现在 `return` 那一步丢掉 `n["title"]`（打分环节 `:588` 一直持有它），
+    于是 `sourceUrls` 存成裸 URL、前端只能渲染三个无差别的「原文」。
+    """
+    news_items = [
+        {"url": "https://a/1", "title": "芯片设备领涨", "summary": "半导体 板块"},
+        {"url": "", "title": "财联社电报条目（无链接）", "summary": "半导体"},
+        {"url": "https://a/2", "title": "另一条相关内容", "summary": "芯片 设备"},
+    ]
+    out = pl._topic_urls(
+        {"title": "芯片设备领涨科技分化", "boards": ["半导体"]}, news_items
+    )
+    check(
+        "CR8-3：返回 {url,title} 结构而不是裸字符串",
+        bool(out) and all(isinstance(x, dict) and {"url", "title"} <= set(x) for x in out),
+        str(out),
+    )
+    check(
+        "CR8-3：标题真的透传出来了（非空）",
+        any(isinstance(x, dict) and x.get("title") for x in out),
+        str(out),
+    )
+    check(
+        "CR8-3：写死空 url 的条目被滤掉（cls 电报没有链接，不是本层丢的）",
+        all(isinstance(x, dict) and x.get("url") for x in out) and len(out) == 2,
+        str(out),
+    )
+    check(
+        "🔁 CR8-3 反向：输入里确有 3 条、其中 1 条无链接 ⇒ 出 2 条不是测试自造空集",
+        len(news_items) == 3 and len(out) == 2,
+        str(out),
+    )
+
+
+def test_run_pipeline_reasons_split() -> None:
+    """CR8-1：三类成因不再被 OR 成一个 `degraded`、拼成一条 note。
+
+    旧实现 `degraded = news or engine=="keyword" or board_notes` 且把三类 note
+    一起拼串 ⇒ `web` 侧逐卡渲染「降级产出」，其中 ③ 板块名未命中几乎每轮都有，
+    是纯噪声。现在 ③ 只进运行结果 `reasons`，不进落库契约。
+    """
+    cap = {}
+    cap2 = {}
+    orig = (pl.fetch_news, pl.structure_topics, pl.build_items, pl.emit_ingest)
+    items = [
+        {"title": "t", "summary": "", "boardTags": [], "sourceUrls": [], "relatedCodes": []}
+    ]
+    board_note = "新浪板块名称未匹配「地产链」"
+
+    try:
+        # 场景 A：① 新闻源降级 + ③ 板块未命中 同时在场
+        pl.fetch_news = lambda **kw: {
+            "items": [],
+            "source": "eastmoney-news",
+            "note": "Tavily 不可用（Timeout），已降级国内新闻源",
+            "degraded": True,
+        }
+        pl.structure_topics = lambda items, **kw: {
+            "topics": [{"title": "t"}],
+            "engine": "llm",
+            "note": None,
+        }
+        pl.build_items = lambda topics, news, deadline=None: (items, [board_note])
+        pl.emit_ingest = lambda payload: (cap.update(payload), {})[1]
+        res = pl.run_pipeline(trigger="test")
+        check(
+            "CR8-1：① 新闻源降级仍进 note（该说的没说少）",
+            "Tavily" in (cap.get("note") or ""),
+            str(cap.get("note")),
+        )
+        check(
+            "CR8-1：③ 板块名未命中不再进 note",
+            "未匹配" not in (cap.get("note") or ""),
+            str(cap.get("note")),
+        )
+        check(
+            "CR8-1：运行结果按成因分类，③ 仍可观测",
+            [r["kind"] for r in res.get("reasons", [])] == ["news", "board"],
+            str(res.get("reasons")),
+        )
+
+        # 场景 B（🔁 反向）：只有 ③ 在场 ⇒ 不得判降级（旧实现会判 True 并满屏噪声）
+        pl.fetch_news = lambda **kw: {
+            "items": [],
+            "source": "tavily",
+            "note": None,
+            "degraded": False,
+        }
+        pl.emit_ingest = lambda payload: (cap2.update(payload), {})[1]
+        pl.run_pipeline(trigger="test")
+        check(
+            "🔁 CR8-1 反向：只有 ③ 时 degraded=False 且 note 为空（旧实现在此回归）",
+            cap2.get("degraded") is False and cap2.get("note") is None,
+            str({k: cap2.get(k) for k in ("degraded", "note")}),
+        )
+    finally:
+        pl.fetch_news, pl.structure_topics, pl.build_items, pl.emit_ingest = orig
+
+
 def test_board_code_shortcut() -> None:
     """CR9-3(a)：名称→BK 代码缓存让成分映射从 9 个东财请求降到 1 个。
 
@@ -194,6 +295,8 @@ def test_board_code_shortcut() -> None:
 if __name__ == "__main__":
     test_build_items_deadline_expired()
     test_build_items_within_deadline()
+    test_topic_urls_title_passthrough()
+    test_run_pipeline_reasons_split()
     test_board_code_shortcut()
     test_run_pipeline_deadline_env()
     fails = [x for x in results if not x[1]]

@@ -1,7 +1,7 @@
 "use client";
 
 // 热点卡片流（P3 / M1：dashboard + SSE 实时推送 + 手动触发）
-// R5：所有等待均有可见状态；降级状态在卡片与页头显式标注（R12/R10）
+// R5：所有等待均有可见状态；降级状态在页头显式标注一次（R12/R10，CR8-1 起不再逐卡重复）
 
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -45,6 +45,48 @@ const ENGINE_LABEL: Record<string, string> = {
   keyword: "关键词规则",
   none: "未结构化",
 };
+
+// CR8-8：单卡 related 实测最多 16 个（`lib/hotspots.ts` 的 `out.slice(0, 16)`），
+// 全渲染时一张卡占 4 行、长基金名（"广发创新药ETF联接A 012737"）把版面撑散。
+// 默认只出前 6 个、其余收进「+N 更多」⇒ 信息不丢（可展开）但密度可控。
+// 截断放在前端还有一层意义：**历史批次已落库的 16 个不必重写也会立刻变干净**。
+const RELATED_SHOWN = 6;
+
+function RelatedChips({ related }: { related: DigestRow["related"] }) {
+  const [open, setOpen] = useState(false);
+  const extra = related.length - RELATED_SHOWN;
+  const shown = open ? related : related.slice(0, RELATED_SHOWN);
+
+  return (
+    <div className="mt-3">
+      <p className="text-[11px] text-zinc-400">相关产品（板块成分映射 / 板块名基金匹配）</p>
+      <div className="mt-1.5 flex flex-wrap gap-2">
+        {shown.map((p) => (
+          <Link
+            key={`${p.type}:${p.code}`}
+            href={`/product/${p.type}/${p.code}?from=home`}
+            className="rounded border border-zinc-200 px-2 py-1 text-xs text-zinc-700 hover:border-zinc-400 hover:bg-zinc-50"
+          >
+            {p.name}
+            <span className="ml-1 text-zinc-400">{p.code}</span>
+            {p.type === "fund" && (
+              <span className="ml-1 text-[10px] text-blue-500">基金</span>
+            )}
+          </Link>
+        ))}
+        {extra > 0 && (
+          <button
+            type="button"
+            onClick={() => setOpen((v) => !v)}
+            className="rounded border border-dashed border-zinc-300 px-2 py-1 text-xs text-zinc-500 hover:border-zinc-500 hover:text-zinc-800"
+          >
+            {open ? "收起" : `+${extra} 更多`}
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
 
 export default function HotspotFeed({
   initialDate,
@@ -200,6 +242,17 @@ export default function HotspotFeed({
     return () => clearTimeout(t);
   }, [flash]);
 
+  // CR8-1：② 引擎退化 / ① 新闻源降级收进页头，一批只显示一次（旧版逐卡重复 N 条）。
+  // 存量行的 note 仍可能含 ③ 板块名未命中——读侧不靠文案猜成因，下一次真跑起才干净。
+  const batchNotes = Array.from(
+    new Set(
+      rows
+        .filter((r) => r.degraded)
+        .map((r) => r.note)
+        .filter((n): n is string => Boolean(n)),
+    ),
+  );
+
   return (
     <div>
       <div className="flex flex-wrap items-center gap-3 text-xs text-zinc-500">
@@ -230,6 +283,13 @@ export default function HotspotFeed({
           </button>
         </div>
       </div>
+
+      {batchNotes.length > 0 && (
+        <p className="mt-2 text-[11px] text-zinc-400" title={batchNotes.join(" / ")}>
+          产出说明：{batchNotes.slice(0, 2).join(" / ")}
+          {batchNotes.length > 2 ? ` 等 ${batchNotes.length} 条` : ""}
+        </p>
+      )}
 
       {flash && <p className="mt-2 text-xs text-blue-600">{flash}</p>}
       {error && <p className="mt-2 text-xs text-red-600">{error}</p>}
@@ -279,36 +339,18 @@ export default function HotspotFeed({
                 </div>
               )}
 
-              {r.related.length > 0 && (
-                <div className="mt-3">
-                  <p className="text-[11px] text-zinc-400">
-                    相关产品（板块成分映射 / 板块名基金匹配）
-                  </p>
-                  <div className="mt-1.5 flex flex-wrap gap-2">
-                    {r.related.map((p) => (
-                      <Link
-                        key={`${p.type}:${p.code}`}
-                        href={`/product/${p.type}/${p.code}`}
-                        className="rounded border border-zinc-200 px-2 py-1 text-xs text-zinc-700 hover:border-zinc-400 hover:bg-zinc-50"
-                      >
-                        {p.name}
-                        <span className="ml-1 text-zinc-400">{p.code}</span>
-                        {p.type === "fund" && (
-                          <span className="ml-1 text-[10px] text-blue-500">基金</span>
-                        )}
-                      </Link>
-                    ))}
-                  </div>
-                </div>
-              )}
+              {r.related.length > 0 && <RelatedChips related={r.related} />}
 
               <div className="mt-4 flex flex-wrap items-center gap-3 text-xs">
                 {(r.related ?? []).length > 0 ? (
                   <Link
-                    href={`/product/${r.related[0].type}/${r.related[0].code}#research`}
+                    href={`/product/${r.related[0].type}/${r.related[0].code}?from=home#research`}
                     className="rounded bg-zinc-900 px-3 py-1 font-medium text-white hover:bg-zinc-700"
                   >
-                    深度解读
+                    {/* CR8-2：原名「深度解读」名不副实——它只是跳 related[0] 详情页的
+                        #research 锚点，不触发分析、不带这条热点的上下文。拍板＝只改名，
+                        把目标标的写进按钮，接口与跳转一律不动。 */}
+                    去分析 {r.related[0].name}
                   </Link>
                 ) : (
                   <button
@@ -316,32 +358,39 @@ export default function HotspotFeed({
                     title="无相关产品，无法定位标的"
                     className="rounded bg-zinc-100 px-3 py-1 text-zinc-400"
                   >
-                    深度解读
+                    去分析
                   </button>
                 )}
-                {r.sourceUrls
-                  .slice(0, 3)
-                  .filter(isSafeUrl)
-                  .map((u) => (
-                  <a
-                    key={u}
-                    href={u}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="text-blue-600 hover:underline"
-                  >
-                    原文
-                  </a>
-                  ))}
-                {r.degraded && (
-                  <span
-                    className="rounded bg-amber-50 px-2 py-0.5 text-amber-700"
-                    title={r.note ?? ""}
-                  >
-                    降级产出{r.note ? `：${r.note.slice(0, 60)}${r.note.length > 60 ? "…" : ""}` : ""}
-                  </span>
-                )}
+                {/* CR8-1：逐卡「降级产出」横幅已删。旧契约把三类不相干成因 OR 成一条
+                    note 并复制到每张卡（同批次互相重复），③ 板块名未命中这类纯噪声
+                    因此满屏可见。现在 ①② 收进页头小字显示一次、③ 不再进落库契约。 */}
               </div>
+
+              {/* CR8-3：来源链接独立成行，用标题而不是三个无差别的「原文」。
+                  存量行没有标题（老契约只存 URL）⇒ 回退显示「原文」，不是回归。 */}
+              {r.sourceUrls.filter((s) => isSafeUrl(s.url)).length > 0 && (
+                <div className="mt-3">
+                  <p className="text-[11px] text-zinc-400">相关文章</p>
+                  <ul className="mt-1.5 space-y-1">
+                    {r.sourceUrls
+                      .filter((s) => isSafeUrl(s.url))
+                      .slice(0, 3)
+                      .map((s) => (
+                        <li key={s.url} className="min-w-0">
+                          <a
+                            href={s.url}
+                            target="_blank"
+                            rel="noreferrer"
+                            title={s.title || s.url}
+                            className="block truncate text-xs text-blue-600 hover:underline"
+                          >
+                            {s.title || "原文"}
+                          </a>
+                        </li>
+                      ))}
+                  </ul>
+                </div>
+              )}
             </li>
           ))}
         </ul>

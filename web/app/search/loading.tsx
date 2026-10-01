@@ -1,11 +1,10 @@
-import Breadcrumbs from "@/app/components/Breadcrumbs";
 import { ResultListSkeleton, Skeleton } from "@/app/components/Skeleton";
 
 export default function Loading() {
+  // CR8-5：与 search/page.tsx 成对删面包屑（只改 page 不改 loading，导航期间会闪一下）
   return (
     <main className="mx-auto max-w-3xl px-6 py-8">
-      <Breadcrumbs items={[{ label: "首页", href: "/" }, { label: "搜索" }]} />
-      <h1 className="mt-4 text-2xl font-bold tracking-tight">智能搜索</h1>
+      <h1 className="text-2xl font-bold tracking-tight">智能搜索</h1>
       <p className="mt-1 text-sm text-zinc-500">
         支持名称、代码、拼音、首字母、标签；结果按贴合度排序
       </p>

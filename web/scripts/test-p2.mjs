@@ -337,8 +337,14 @@ async function main() {
     ok("④ 变化解读区：阶段表格有数据行", (html.match(/→/g) ?? []).length >= 1);
     ok("⑤ 明细区：日线数据表", html.includes("日线数据（最近"));
     ok("⑥ 深度分析区（P5 已交付：研报面板或加载态）", html.includes("深度分析"));
-    ok("R7 面包屑", html.includes("首页") && html.includes("搜索"));
-    ok("R7 导航高亮 aria-current", html.includes('aria-current="page"'));
+    // CR8-5 删面包屑后改名：本条判据一直是"页面含一级入口文字"（顶部导航承担），
+    // 旧名字「R7 面包屑」谎称了它测的东西。
+    ok("R7 顶部导航含一级入口（首页/搜索）", html.includes("首页") && html.includes("搜索"));
+    // 来路驱动（10-01）：本条原样是 `html.includes('aria-current="page"')`，即**要求
+    // 产品页必须点亮某个一级导航**——它把"导航把 /product 硬编码归给搜索"这条谎锁成了
+    // 契约。断言随之反向（本段取的是不带 `from` 的裸 URL＝诚实态）；
+    // 带 from 的四种来路在 test-p1 逐条判。
+    ok("R7 产品页无来路时不点亮任何一级", !html.includes('aria-current="page"'));
     ok("免责声明", html.includes("不构成投资建议"));
     ok("来源标注", html.includes("数据来源："));
   }
@@ -379,6 +385,58 @@ async function main() {
       y.status === 200 && ((y.body.curve?.length ?? 0) > 0 || y.body.degraded === true),
       `n=${y.body.curve?.length} degraded=${y.body.degraded}`,
     );
+  }
+
+  // ---------- [10] 守卫与状态位（刀 2 / #22(c)(d)：全是**零出网**断言） ----------
+  // 这一节补的是"6 条 HTTP 路由此前零断言"里能免费锁住的部分：守卫必须在**出网之前**
+  // 拒绝，所以这些断言既不打东财也不打腾讯，任何窗口都能跑。
+  console.log("\n[10] 守卫与状态位（零出网）");
+  {
+    const h = await getJson(`${BASE}/api/health`);
+    ok("刀2：/api/health 200 且 db=ok（C31 容器健康检查读的就是这个体）",
+       h.status === 200 && h.body.status === "ok" && h.body.db === "ok", JSON.stringify(h.body));
+
+    const badType = await fetch(`${BASE}/api/sync?type=bogus`, { method: "POST" });
+    const badBody = await badType.json().catch(() => ({}));
+    ok("刀2：POST /api/sync 非法 type → 400（SYNC_TYPES 白名单在出网前拒）",
+       badType.status === 400 && /unsupported type/.test(String(badBody.error)),
+       `status=${badType.status} ${JSON.stringify(badBody)}`);
+
+    const crossSite = await fetch(`${BASE}/api/sync`, {
+      method: "POST",
+      headers: { Origin: "http://evil.example" },
+    });
+    ok("刀2：POST /api/sync 跨站 Origin → 403（CR-08 的 origin 守卫，早于 type 校验）",
+       crossSite.status === 403, `status=${crossSite.status}`);
+
+    const refreshCross = await fetch(`${BASE}/api/market/refresh?type=all`, {
+      method: "POST",
+      headers: { Origin: "http://evil.example" },
+    });
+    ok("刀2：POST /api/market/refresh 跨站 → 403（快照刷新同样是花钱的口子）",
+       refreshCross.status === 403, `status=${refreshCross.status}`);
+
+    const refreshBad = await fetch(`${BASE}/api/market/refresh?type=bogus`, { method: "POST" });
+    ok("刀2：POST /api/market/refresh 非法 type → 400（不进 refreshSnapshot）",
+       refreshBad.status === 400, `status=${refreshBad.status}`);
+
+    // #22(c)：**不存在的标的返回 HTTP 200、404 只体现在正文里**（loading.tsx 的 Suspense 壳
+    // 先流式落地，notFound() 在流里才生效）。这条断言把"只能按正文判 404"钉成契约——
+    // 谁想用 `status === 404` 判，就会被这条红字挡住。
+    const nf = await getText(`${BASE}/product/stock/999999`);
+    ok("刀2：不存在标的＝HTTP 200 ＋正文 not-found（404 判据只能按正文，不能按状态码）",
+       nf.status === 200 && /could not be found|not-found/i.test(nf.text),
+       `status=${nf.status} 正文命中=${/could not be found/i.test(nf.text)}`);
+    ok("刀2：🔁 反向——同一页正文里不含真实产品名（不是把 404 渲染成了详情页）",
+       !/贵州茅台/.test(nf.text) || !/could not be found/i.test(nf.text), "同时出现标的名与 404 文案");
+
+    const junkIngest = await fetch(`${BASE}/api/research/ingest`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "zzz_garbage", code: "600519", status: "done", summary: "x" }),
+    });
+    ok("刀2：研报回调的未知标的 → 400（语义白名单，不写库；09-14 的枚举禁令仍有效）",
+       junkIngest.status === 400, `status=${junkIngest.status}`);
   }
 
   // ---------- 结果 ----------

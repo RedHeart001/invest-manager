@@ -4,7 +4,8 @@
 - 日 K：`web.ifzq.gtimg.cn/appstock/app/fqkline/get`（前复权 qfq）
 - 分钟线：`ifzq.gtimg.cn/appstock/app/minute/query`（当日分时，C6a 2026-09-25；
   **累计量/额必须 diff 成增量**再返回——东财主源口径为每分钟增量）
-- 不覆盖：可转债日 K（实测返回空）、场外基金（无）、加密。
+- 不覆盖：可转债（日 K 实测返回空；**分时更是链上没注册本 provider**，且形态空壳＝CR9-44，
+  见 `_minute_kline` 的说明）、场外基金（无）、加密。
   **场外基金由 `_symbol_for` 按场内判据强制拒绝（CR9-1）**——否则同码不同品种
   （000001/110022）会把别家品种的序列当成该基金交付。
 """
@@ -259,7 +260,15 @@ class TencentProvider(BaseProvider):
     # ---------- 分钟线（C6a，2026-09-25） ----------
 
     def _minute_kline(self, type_: str, code: str) -> dict:
-        """当日 1 分钟分时（C6a 备源）。仅 stock/fund(场内)/bond(转债)/hk——us 走 yfinance 另议。
+        """当日 1 分钟分时（C6a 备源）。仅 stock/fund(场内)/hk——us 走 yfinance 另议。
+
+        **转债不覆盖（CR9-44，2026-10-01 修注释、不扩注册）**：文件末尾的 `register_chain`
+        只把本 provider 挂进 stock/fund 与 hk，bond 链的备源是 `sina_bond_provider` ⇒
+        转债分时**永远走不到这里**，只有东财一家；东财一熔断转债分时即无源，而 `chain_call`
+        报的是"无备源"，不会提示"注释里那个备源其实没注册"。即便走到也不可用：`_symbol_for`
+        对 bond 落到 `_symbol(code)` 兜底、接口能返回，但形态是空壳（09-27 实测南银转债：
+        今开 0.000／成交量 0／minute bars=1，与 `sina_bond_provider` 顶部 2026-09-13 的
+        排除记录同向）⇒ 扩注册是错的。
 
         接口 `ifzq.gtimg.cn/appstock/app/minute/query`（2026-09-25 实测形态）：
         - `data.<sym>.data.data`：["0930 1250.01 183 22875182.71", ...]（时间 HHMM、价、**累计**量（手）、**累计**额（元））

@@ -11,13 +11,36 @@ export type RelatedProduct = {
   board?: string;
 };
 
+/** CR8-3：来源链接从"裸 URL"升级为 `{url,title}`——标题在 ds 打分环节本就存在
+ *  （`pipeline.py:_topic_urls`），旧契约在返回时丢掉，前端无从渲染。 */
+export type SourceRef = { url: string; title: string };
+
+/** 归一化来源引用。**读侧必须兼容存量纯字符串行**：历史批次的 `sourceUrls` 里
+ *  只有 URL，不重写库就永远拿不到标题 ⇒ 老行回退 `title: ""`（前端显示「原文」）。
+ *  与 CR8-8 同一条教训：只改写侧会留下存量缺口。 */
+export function toSourceRefs(raw: unknown): SourceRef[] {
+  if (!Array.isArray(raw)) return [];
+  const out: SourceRef[] = [];
+  for (const it of raw) {
+    if (typeof it === "string") {
+      if (it) out.push({ url: it, title: "" });
+    } else if (it && typeof it === "object") {
+      const o = it as { url?: unknown; title?: unknown };
+      if (typeof o.url === "string" && o.url) {
+        out.push({ url: o.url, title: typeof o.title === "string" ? o.title : "" });
+      }
+    }
+  }
+  return out;
+}
+
 export type DigestRow = {
   id: string;
   date: string;
   title: string;
   summary: string;
   boardTags: string[];
-  sourceUrls: string[];
+  sourceUrls: SourceRef[];
   related: RelatedProduct[];
   newsSource: string | null;
   engine: string | null;
@@ -66,8 +89,14 @@ export function toDigestRow(r: DigestDbRow): DigestRow {
     title: r.title,
     summary: r.summary,
     boardTags: safeJson<string[]>(r.boardTags, []),
-    sourceUrls: safeJson<string[]>(r.sourceUrls, []),
-    related: safeJson<RelatedProduct[]>(r.relatedCodes, []),
+    sourceUrls: toSourceRefs(safeJson<unknown[]>(r.sourceUrls, [])),
+    // CR8-8：读侧也要剔退市——只加在 ingest 会留下**存量缺口**：历史行的
+    // `relatedCodes` 里已经存着摘牌股，不重写库就永远显示出来。
+    // 存量行的 name 同样是当年从 Product 取来的权威名（旧 `resolveRelated` 就这么写），
+    // 所以这里不需要再查库。只判 `type === "stock"` ⇒ 口径不扩大到基金。
+    related: safeJson<RelatedProduct[]>(r.relatedCodes, []).filter(
+      (p) => !(p.type === "stock" && isDelistedName(p.name)),
+    ),
     newsSource: r.newsSource,
     engine: r.engine,
     degraded: Boolean(r.degraded),
@@ -109,7 +138,7 @@ export type IngestItem = {
   title: string;
   summary?: string;
   boardTags?: string[];
-  sourceUrls?: string[];
+  sourceUrls?: unknown;
   relatedCodes?: RelatedProduct[];
 };
 
@@ -123,7 +152,18 @@ export type IngestPayload = {
   items: IngestItem[];
 };
 
-/** 板块成分股过滤（只保留库内存在的股票）+ 板块名匹配基金（基金无成分接口，采用名称关键词） */
+/**
+ * CR8-8：退市股判据。板块成分表（新浪/同花顺）含陈旧成员，`600200 退市苏吴`、
+ * `600086 退市金钰` 这类已摘牌标的会被当"相关产品"推荐，点进详情页是死路。
+ * Product 表没有上市状态字段 ⇒ **库内权威名的「退市」前缀是这里唯一可用的信号**。
+ * 主人 09-30 定口径：只滤退市；ST/*ST 与北交所**保留**（可正常交易，滤掉＝替用户
+ * 判断可投资性）。
+ */
+export function isDelistedName(name: string): boolean {
+  return name.includes("退市");
+}
+
+/** 板块成分股过滤（只保留库内存在、且非退市的股票）+ 板块名匹配基金（基金无成分接口，采用名称关键词） */
 async function resolveRelated(
   related: RelatedProduct[],
   boardTags: string[],
@@ -148,7 +188,7 @@ async function resolveRelated(
     for (const r of related) {
       if (r.type !== "stock") continue;
       const name = nameByCode.get(r.code);
-      if (name) push({ type: "stock", code: r.code, name, board: r.board });
+      if (name && !isDelistedName(name)) push({ type: "stock", code: r.code, name, board: r.board });
     }
   }
 
@@ -205,7 +245,7 @@ export async function ingestDigests(
           title: title.slice(0, 200),
           summary: String(item.summary ?? "").slice(0, 500),
           boardTags: JSON.stringify(boardTags),
-          sourceUrls: JSON.stringify((item.sourceUrls ?? []).slice(0, 5)),
+          sourceUrls: JSON.stringify(toSourceRefs(item.sourceUrls ?? []).slice(0, 5)),
           relatedCodes: JSON.stringify(related),
           newsSource: payload.newsSource ?? null,
           engine: payload.engine ?? null,

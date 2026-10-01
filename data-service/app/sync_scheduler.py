@@ -82,7 +82,13 @@ def _web_base() -> str:
 
 
 def _execute(trigger: str) -> dict:
-    """回调 web /api/sync 并收尾（调用方须已认领 running）。"""
+    """回调 web /api/sync 并收尾（调用方须已认领 running）。
+
+    状态位不变量（刀 1/#20②）：`ok` **只有在 web 真的回答了时才带真/假值**（CR9-28：
+    抄 web 的判定，不自己下结论）；web 没回答（读超时／连接失败／被拒绝）一律
+    `ok=None` ＋ `outcome` 说明是哪一种（`inconclusive` / `failed` / `rejected`）。
+    「不是失败」不等于「成功」，这个区别必须能被机器读出来。
+    """
     import requests
 
     started = time.time()
@@ -94,7 +100,12 @@ def _execute(trigger: str) -> dict:
     try:
         r = requests.post(f"{_web_base()}/api/sync", timeout=timeout_s)
         if r.status_code >= 300:
-            result = {"error": f"HTTP {r.status_code}", "body": r.text[:200]}
+            result = {
+                "ok": None,
+                "outcome": "rejected",
+                "error": f"HTTP {r.status_code}",
+                "body": r.text[:200],
+            }
             log.warning("daily sync rejected: status=%s body=%s", r.status_code, r.text[:200])
         else:
             body = r.json() or {}
@@ -104,7 +115,14 @@ def _execute(trigger: str) -> dict:
             # 此前这里硬写 `ok: True` → 5 类里 4 类失败也被记成"同步成功"
             # （09-26 实测：lastResult.ok=true，而 stock/bond/crypto/hk 全带 error）。
             # 状态失真会让"看 /sync/status 判断今天是否要补跑"这条唯一路径失效。
-            result = {"ok": bool(body.get("ok")), "tookMs": body.get("tookMs"), "results": results}
+            # 刀 1（#20②）：与 `ok` 并列一个 `outcome`——`ok` 只有真/假两值，表达不了
+            # "web 根本没回答"这种第三态（见下面的 ReadTimeout 分支）。
+            result = {
+                "ok": bool(body.get("ok")),
+                "tookMs": body.get("tookMs"),
+                "results": results,
+                "outcome": "partial_failed" if failed else "completed",
+            }
             if failed:
                 result["failedTypes"] = failed
                 # 失败类型不自动重试是有意取舍：整轮同步实测 9.6~13min，
@@ -120,20 +138,29 @@ def _execute(trigger: str) -> dict:
     except requests.exceptions.ReadTimeout as e:
         # C3-③（CR7-9，2026-09-25）：**读超时 ≠ 同步失败**——web 侧仍在后台执行
         # （ds 只是不再等结果），且 lastDate 已在下方置位不再重跑。此前把这种情况
-        # 记成 error 会与"实际已成功的同步"矛盾（状态失真）。改为中性标注：
-        # ok=True + note 说明 + error 字段保留原始异常供排查。
+        # 记成 error 会与"实际已成功的同步"矛盾（状态失真）。
+        #
+        # 刀 1（#20②，2026-10-01 主人点头改判）：中性标注**不再等于 `ok=True`**。
+        # 10-01 实测把这条语义逼到了台面上：健康态一轮 wall ≥1800s，**正好打穿定时态
+        # 预算**（`tookMsTotal=1800030`），而那一轮真入库的只有 fund（其余 3 条腿 502、
+        # bond 未写入）——状态位却写着 `ok:true`。也就是说"读超时可能仍会成功"这个
+        # 原意成立，但把它编码成 `ok=True` 会让 `/sync/status` 在定时态**恒为真**，
+        # CR9-28 要它保住的"今天要不要补跑"判据再次失效（同根、未覆盖的分支）。
+        # ⇒ 第三态：`ok=None`（未知，不是真也不是假）＋ `outcome="inconclusive"`，
+        #   error 字段照旧保留原始异常供排查。
         result = {
-            "ok": True,
+            "ok": None,
+            "outcome": "inconclusive",
             "note": (
                 f"回调读超时（本次预算 {int(timeout_s)}s，形态 {trigger}）"
-                "——同步可能仍在 web 侧完成，请查 /api/sync 结果或 "
-                "Product.updatedAt；本条非失败标记"
+                "——同步可能仍在 web 侧完成，也可能没有：本轮结果**未知**，"
+                "请查 Product.updatedAt / snapshotAt 或 web 侧日志；本条不是失败标记"
             ),
             "error": f"{type(e).__name__}: {e}",
         }
-        log.warning("daily sync callback read timeout (sync may still complete on web side): %s", e)
+        log.warning("daily sync callback read timeout (outcome inconclusive, sync may still complete on web side): %s", e)
     except Exception as e:  # noqa: BLE001 调度不因单次失败而中断
-        result = {"error": f"{type(e).__name__}: {e}"}
+        result = {"ok": None, "error": f"{type(e).__name__}: {e}", "outcome": "failed"}
         log.warning("daily sync failed: %s", e)
 
     with _lock:
@@ -171,6 +198,18 @@ def run_now(trigger: str = "manual") -> dict:
     return {"accepted": True, "note": "已提交后台执行，进度见 /sync/status"}
 
 
+def _catchup_disabled() -> bool:
+    """`SYNC_CATCHUP=off` 只关**启动补跑**，**不关**每日 cron（`:247` 仍按 SYNC_HOUR 触发）。
+
+    为什么需要它（待拍板 #16，主人 2026-10-01 点头）：补跑判据（`:190`）与 cron 时刻
+    （`:247-251`）读的是**同一组** `SYNC_HOUR/SYNC_MINUTE` ⇒ 过去想"起一个不会顺手补跑
+    同步的健康 ds"，唯一手段是把调度时刻撒谎到未来，而那一谎同时挪走了当晚的 cron，
+    还必须记得在撒谎到的时刻之前停服务（09-29、09-30 两夜都靠手动 kill 躲过）。
+    有了这个开关，起干净 ds 不再需要撒谎，也没有"忘了停就真跑一轮"的雷。
+    """
+    return os.environ.get("SYNC_CATCHUP", "on").strip().lower() == "off"
+
+
 def _catch_up_if_needed() -> None:
     """重启后若已过当日调度时刻且当日未同步 → 补跑一次。
 
@@ -184,6 +223,9 @@ def _catch_up_if_needed() -> None:
     热点结束后（或当日已有产出）再跑同步。轮询上限 10 分钟：热点侧自身有
     300s 预算 + 单飞，超上限按超时放弃本轮补跑（下个调度周期 02:00 再试）。
     """
+    if _catchup_disabled():
+        log.info("sync catch-up skipped: SYNC_CATCHUP=off（每日 cron 不受影响）")
+        return
     time.sleep(8)  # 等 web 就绪（web 侧迁移/启动）
     hour, minute = _sync_hour_minute()
     now = datetime.now(TZ)

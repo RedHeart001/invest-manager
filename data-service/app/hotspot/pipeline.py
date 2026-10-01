@@ -578,10 +578,16 @@ def _bigrams(text: str) -> set[str]:
     return {t[i : i + 2] for i in range(len(t) - 1)}
 
 
-def _topic_urls(topic: dict, news_items: list[dict], limit: int = 3) -> list[str]:
+def _topic_urls(topic: dict, news_items: list[dict], limit: int = 3) -> list[dict]:
     """CR4（P3）：按 topic 相关性挑选来源链接——此前所有 topic 都取相同的前 3 条
     新闻 URL（与各自 topic 无关联）。用 topic 标题+板块名的字二元组与新闻
-    title+summary 的重叠数打分取前 N；无命中时回退首 N 条（与旧行为一致）。"""
+    title+summary 的重叠数打分取前 N；无命中时回退首 N 条（与旧行为一致）。
+
+    CR8-3：返回 `{url, title}` 而不是裸 URL。打分环节（下面 `text`）本来就持有
+    `n["title"]`，旧实现在 `return` 那一步把它丢掉 ⇒ 前端只能渲染无差别的「原文」，
+    标题在链路上任何一处都再也拿不回来。财联社电报条目写死 `url=""`，被 `if` 滤掉
+    （所以 cls 批次的「相关文章」仍为空，这是来源本身没有链接，不是本层的缺陷）。
+    """
     key = " ".join([str(topic.get("title", "")), *[str(b) for b in topic.get("boards", [])]])
     grams = _bigrams(key)
     scored: list[tuple[int, dict]] = []
@@ -592,7 +598,11 @@ def _topic_urls(topic: dict, news_items: list[dict], limit: int = 3) -> list[str
             scored.append((score, n))
     scored.sort(key=lambda x: -x[0])
     picked = scored[:limit] if scored else [(0, n) for n in news_items[:limit]]
-    return [n["url"] for _, n in picked if n.get("url")]
+    return [
+        {"url": str(n["url"]), "title": str(n.get("title", ""))[:120]}
+        for _, n in picked
+        if n.get("url")
+    ]
 
 
 def build_items(
@@ -660,15 +670,30 @@ def run_pipeline(trigger: str = "manual") -> dict:
     news = fetch_news(deadline=deadline)
     struct = structure_topics(news["items"], deadline=deadline)
     items, board_notes = build_items(struct["topics"], news, deadline=deadline)
-    notes = [x for x in [news.get("note"), struct.get("note")] if x] + board_notes
+    # CR8-1：旧实现把三件不相干的事 OR 成一个 `degraded`、再把三类 note 拼成一条
+    # ≤500 字串，`web` 侧于是逐卡渲染「降级产出」横幅（一张卡一条、同批互相重复）。
+    # 现在按成因分类，只有 ①② 进入落库契约：
+    #   news   ① 新闻源降级（本机网络下是常态，产出可用）
+    #   engine ② 结构化引擎退化（真实能力损失；`struct["note"]` 已是它的成因文案）
+    #   board  ③ 板块名映射未命中（几乎每轮都有，纯噪声）⇒ 不再参与 `degraded`/`note`，
+    #          只留在运行结果 `reasons` 里供排查（"看不见的降级"由这条兜住）
+    # ① 靠源序反转/fusion 消灭属 `OPT-2`，不在本刀。
+    reasons: list[dict] = []
+    if news.get("note"):
+        reasons.append({"kind": "news", "text": str(news["note"])})
+    if struct.get("note"):
+        reasons.append({"kind": "engine", "text": str(struct["note"])})
+    for n in board_notes:
+        reasons.append({"kind": "board", "text": str(n)})
+    shown = [r["text"] for r in reasons if r["kind"] != "board"]
     payload = {
         # CR-06：digest 日期统一北京时间（与 web 侧 dayStart/beijingToday 同口径）
         "date": beijing_today(),
         "trigger": trigger,
         "engine": struct["engine"],
         "newsSource": news["source"],
-        "degraded": bool(news["degraded"] or struct["engine"] == "keyword" or board_notes),
-        "note": "；".join(dict.fromkeys(notes))[:500] or None,
+        "degraded": bool(news["degraded"] or struct["engine"] == "keyword"),
+        "note": "；".join(dict.fromkeys(shown))[:500] or None,
         "items": items,
     }
     result = {
@@ -679,6 +704,7 @@ def run_pipeline(trigger: str = "manual") -> dict:
         "engine": struct["engine"],
         "degraded": payload["degraded"],
         "note": payload["note"],
+        "reasons": reasons,
         "tookMs": int((time.time() - started) * 1000),
     }
     if items:

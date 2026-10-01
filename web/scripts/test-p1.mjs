@@ -116,13 +116,41 @@ try {
 
   // ---------- 5. UI 约定（SSR HTML） ----------
   const searchHtml = await (await fetch(`${BASE}/search?q=600519`)).text();
-  check("搜索页含面包屑", searchHtml.includes('aria-label="面包屑"'));
-  check("顶部导航高亮（aria-current）", searchHtml.includes('aria-current="page"'));
+  // CR8-5（2026-09-30）：面包屑已删（中间那级是硬编码谎报）。断言随之**反向**——
+  // 留着旧断言会让下一轮把"已按拍板删除"读成回归。
+  check("搜索页不再有面包屑（CR8-5）", !searchHtml.includes('aria-label="面包屑"'));
+  // 来路驱动（2026-10-01 拍板）：`/product` 不再并入「搜索」，产品页点亮哪一级由入口
+  // 带的 `?from=` 决定。旧的那条只判"页面里存在 aria-current"——导航把 /product 谎报成
+  // 搜索的子页时它照样绿，而那条谎正是主人把"点去分析"读成"跳到搜索页"的原因。
+  // 现在按**点亮的是哪一项**断，四种来路各种各判。
+  const lit = (html) =>
+    [...html.matchAll(/<a [^>]*aria-current="page"[^>]*href="([^"]*)"/g)].map((m) => m[1]);
+  const litJson = (h) => JSON.stringify(lit(h));
+  check("搜索页点亮「搜索」恰好一处", litJson(searchHtml) === '["/search"]', litJson(searchHtml));
+  const fromSearch = await (await fetch(`${BASE}/product/stock/600519?from=search&q=600519`)).text();
+  check(
+    "产品页 from=search → 点亮「搜索」且按钮写「← 返回搜索」",
+    litJson(fromSearch) === '["/search"]' && fromSearch.includes("← 返回搜索"),
+    litJson(fromSearch),
+  );
+  const fromHome = await (await fetch(`${BASE}/product/stock/600519?from=home`)).text();
+  check(
+    "产品页 from=home → 点亮「首页」（同一 URL 换来路就换高亮，前缀归属做不到）",
+    litJson(fromHome) === '["/"]',
+    litJson(fromHome),
+  );
 
   const productHtml = await (await fetch(`${BASE}/product/stock/600519`)).text();
   check(
-    "详情页面包屑含当前标的",
-    productHtml.includes('aria-label="面包屑"') && productHtml.includes("贵州茅台"),
+    "详情页无面包屑且有「← 返回」入口（CR8-5/CR8-6）",
+    !productHtml.includes('aria-label="面包屑"') &&
+      productHtml.includes("← 返回") &&
+      productHtml.includes("贵州茅台"),
+  );
+  check(
+    "产品页无来路（裸 URL／新标签）→ 不点亮任何一级（诚实态，不是缺陷态）",
+    litJson(productHtml) === "[]",
+    litJson(productHtml),
   );
   check("详情页流式骨架屏（loading.tsx 生效）", productHtml.includes("animate-pulse"));
 

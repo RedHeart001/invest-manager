@@ -151,7 +151,7 @@ export default function ChatUI() {
           ...prev,
           mkMsg(
             "assistant",
-            `📄 深度研究报告已完成：**${data.code}** 评级「${data.rating ?? "中性"}」\n\n${data.summary ?? ""}\n\n[查看完整研报 →](/product/${data.type}/${data.code}#research)`,
+            `📄 深度研究报告已完成：**${data.code}** 评级「${data.rating ?? "中性"}」\n\n${data.summary ?? ""}\n\n[查看完整研报 →](/product/${data.type}/${data.code}?from=chat#research)`,
           ),
         ]);
       } catch {

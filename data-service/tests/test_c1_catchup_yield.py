@@ -252,6 +252,35 @@ def test_cr9_35_before_schedule_gate_skips_without_polling() -> None:
         os.environ.pop("SYNC_MINUTE", None)
 
 
+def test_sync_catchup_off_switch() -> None:
+    """⑩ #16（2026-10-01 主人点头）：`SYNC_CATCHUP=off` 只关启动补跑，不关每日 cron。
+
+    这条开关存在的理由就是本套件反复踩的那个耦合：补跑判据与 cron 时刻读同一组
+    `SYNC_HOUR/SYNC_MINUTE` ⇒ 过去起一个"不顺手补跑"的 ds 只能撒谎挪时刻，而挪掉的
+    正是当晚那档 cron，还得记得在挪到的时刻前停服务。所以断言必须**两条一起**：
+    off 确实拦住补跑，且 off **没有**改变 cron 时刻。
+    """
+    fake = _FakeHotspot(running=False, resolved=beijing_today())
+    os.environ["SYNC_CATCHUP"] = "off"
+    os.environ["SYNC_HOUR"] = "3"
+    os.environ["SYNC_MINUTE"] = "30"
+    try:
+        r = _run_case(fake, at_hour=9, at_minute=0)
+        check("#16⑩：SYNC_CATCHUP=off → 已过调度点也不补跑（零轮询、不 sleep）",
+              r["n"] == 0 and r["polls"] == 0, str(r))
+        check("#16⑩：off 不得改变 cron 时刻（_sync_hour_minute 仍读配置）",
+              ss._sync_hour_minute() == (3, 30), str(ss._sync_hour_minute()))
+        # 🔁 反向：同一时刻同一状态，开关回到默认 on 必须照常补跑
+        os.environ.pop("SYNC_CATCHUP", None)
+        r2 = _run_case(fake, at_hour=9, at_minute=0)
+        check("#16⑩：不设开关（默认 on）同一场景照常同步（证明 off 不是恒假桩）",
+              r2["n"] == 1 and r2["polls"] == 0, str(r2))
+    finally:
+        os.environ.pop("SYNC_CATCHUP", None)
+        os.environ.pop("SYNC_HOUR", None)
+        os.environ.pop("SYNC_MINUTE", None)
+
+
 def main() -> int:
     test_yields_while_hotspot_running()
     test_proceeds_when_hotspot_resolved_with_output()
@@ -262,6 +291,7 @@ def main() -> int:
     test_cr9_4_never_resolved_still_syncs_at_cap()
     test_cr9_22_stale_resolved_from_previous_day()
     test_cr9_35_before_schedule_gate_skips_without_polling()
+    test_sync_catchup_off_switch()
     passed = sum(1 for _n, ok, _d in results if ok)
     fails = [x for x in results if not x[1]]
     for name, _ok, detail in fails:

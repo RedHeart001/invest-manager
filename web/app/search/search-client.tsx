@@ -198,7 +198,11 @@ export default function SearchClient() {
       body: JSON.stringify({ query: query || `browse:${type}`, type: r.type, code: r.code }),
       keepalive: true,
     }).catch(() => {});
-    router.push(`/product/${r.type}/${r.code}`);
+    // 来路驱动（`lib/provenance.ts`）：从搜索进的产品页亮「搜索」、返回回搜索现场。
+    // `q` 一并带上，供"没有可回退历史"时（新标签/直接敲 URL）重建返回目标。
+    router.push(
+      `/product/${r.type}/${r.code}?from=search${q ? `&q=${encodeURIComponent(q)}` : ""}`,
+    );
     // 兜底：导航异常时 2s 后恢复可点击
     setTimeout(() => setPendingKey(null), 2000);
   }

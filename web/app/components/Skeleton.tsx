@@ -37,10 +37,10 @@ export function ResultListSkeleton({ rows = 5 }: { rows?: number }) {
 /** 详情页骨架 */
 export function ProductDetailSkeleton() {
   return (
-    <main className="mx-auto max-w-4xl px-6 pt-4 pb-10" aria-busy="true" aria-label="详情加载中">
-      <Skeleton className="h-4 w-20" />
-
-      <div className="mt-4 flex items-baseline gap-3">
+    <main className="mx-auto max-w-4xl px-6 pt-8 pb-10" aria-busy="true" aria-label="详情加载中">
+      {/* CR8-5：原先这里是一条 h-4 w-20 的面包屑占位，随面包屑一起删；
+          顶部留白由 pt-4 提到 pt-8，与详情页 main 的 py-8 同量级。 */}
+      <div className="flex items-baseline gap-3">
         <Skeleton className="h-7 w-32" />
         <Skeleton className="h-4 w-16" />
         <Skeleton className="h-5 w-14 rounded" />

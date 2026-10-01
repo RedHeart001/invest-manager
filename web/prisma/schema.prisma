@@ -24,6 +24,11 @@ model Product {
   searchText     String? // 名称+中文二元组+拼音+首字母+代码+标签（FTS5 索引源）
   lastPrice      Float?  // 行情快照：同步/刷新任务写入（R14 分类浏览涨幅排序用）
   lastChangePct  Float?  // 行情快照：同上；展示仍以实时富集为准
+  // 刀 1（#22(b)）：这批快照**是什么时候取到的**。此前只有 lastPrice/lastChangePct
+  // 两列、没有任何新鲜度记号（updatedAt 由 list 阶段的全量替换推动，raw SQL 的快照
+  // 写入根本不碰它），于是分类浏览可以长期吃陈旧价而无人可知——10-01 实测库内
+  // 600519=1275.16，同日实盘 1258.62，差 1.3%。null＝该行从未被快照刷新写过。
+  snapshotAt     DateTime?
   updatedAt      DateTime @updatedAt
 
   @@unique([type, code])

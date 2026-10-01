@@ -1,8 +1,8 @@
 import { notFound } from "next/navigation";
 import type { EChartsOption } from "echarts";
 
-import Breadcrumbs from "@/app/components/Breadcrumbs";
 import EChart from "@/app/components/EChart";
+import PageBack from "@/app/components/PageBack";
 import VerifyQuoteButton from "@/app/components/VerifyQuoteButton";
 import WatchButton from "@/app/components/WatchButton";
 import ProductCharts from "./ProductCharts";
@@ -237,13 +237,10 @@ export default async function ProductPage({
 
   return (
     <main className="mx-auto max-w-5xl px-6 py-8">
-      <Breadcrumbs
-        items={[
-          { label: "首页", href: "/" },
-          { label: "搜索", href: "/search" },
-          { label: `${product.name}（${product.code}）` },
-        ]}
-      />
+      {/* CR8-5：删面包屑——产品详情页没有固定父级，中间那级「搜索」是硬编码的谎报
+          （从首页热点点进来也显示「搜索」）。
+          CR8-6：删完它是页内唯一回指缺口，故补「← 返回」（客户端组件，无历史时退化跳首页）。 */}
+      <PageBack />
 
       {/* ① 身份区 */}
       <section className="mt-4">
