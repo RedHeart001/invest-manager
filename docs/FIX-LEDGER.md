@@ -88,7 +88,7 @@
 | **CR9-47** | 改 `web/**` 下**任何**文件（含 `web/scripts/`）都会触发 Next dev 重编译，**同一窗口内跑集成套件会读到 SSR 页面的瞬态 500** ⇒ 门禁出现假红（CR9-24 跑旧进程、CR9-34 假文件名、CR9-39 cwd 依赖同族：可复现性缺口） | P3（证据层） | ✅ **已处置（规矩已补，零代码）** | 实况：基线跑 `test-p4` 时 `[3] /chat` 四条全 OK；编辑 `web/scripts/test-p4.mjs` 之后复跑，同段变成 **`NG HTTP 200 — status=500`** ＋ 三条连带红。`web-dev.log` 对应位置字面 `⨯ SyntaxError: Unexpected end of JSON input at JSON.parse { page: '/chat' }`、`⨯ Failed to generate static paths for /api/chat/sessions/[id]`，紧跟一串 `✓ Compiled in 2xx ms (1265 modules)`。复探即证伪：`curl /chat` 连续三次 **200**（`0.564806s / 0.068096s / 0.057713s`）。**规矩**：跑集成套件期间不得编辑 `web/**`；SSR 页面出现 500 **必须先复探 3 次**再判定 |
 | **G3（CR6 遗留）** | R13 端点零调用方 | — | → 见 CR7-3 | 同一件事，状态不在本行复述 |
 | **G6 消费侧（CR6 遗留）** | 港股取数侧已闭环，消费侧仍断链 | — | → 见 CR7-4 | 同一件事，状态不在本行复述 |
-| **G7（CR6 遗留）** | 写接口完整身份鉴权 | — | ⬜ 未闭环 | **上云 / `WEB_PORT` 对外前必补**；当前单机无暴露面 |
+| **G7（CR6 遗留）** | 写接口完整身份鉴权 | — | 🟡 **token 链路代码侧已完工、欠配置**（10-01 步骤 3 复核，`d2f677f`） | **两条写回调两侧都在发／校 `x-ingest-token`**（发送侧 `hotspot/pipeline.py:652`／`research/tasks.py:131`；校验侧 `research/ingest/route.ts:11`／`hotspots/ingest/route.ts:10` 的"配了才校验"），`/health` 现报 `ingestTokenConfigured` ⇒ **剩下的只是主人在 `web/.env` 与 ds 那侧填成同一个值**（本机实测当前＝`false`，不带 token 也 200）。`POST /api/sync` 仍只有 `checkRequestOrigin`、不带 token（推荐不动，要动＝三处同改，待字）。**完整身份鉴权维持原决定：上云 / `WEB_PORT` 对外前必补**；当前单机无暴露面 |
 | **C31 验证** | Dockerfile 进程降权（`setpriv`）的镜像构建/运行验证 | — | ⏳ 未验证 | 主人指示暂不推进 Docker；启用前必须先验证容器内 uid、两容器 healthy、`compose exec` 备份正常 |
 | **C31 关联** | 任何 Docker 相关改动 | — | → 见 C31 验证 | 同一闸口（主人指示暂缓），状态不在本行复述 |
 
