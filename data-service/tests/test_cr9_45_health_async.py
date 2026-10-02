@@ -115,11 +115,28 @@ def test_ingest_token_flag_is_configured_state_only() -> None:
             os.environ.pop("INGEST_TOKEN", None)
         else:
             os.environ["INGEST_TOKEN"] = orig
-    body2 = asyncio.run(_endpoint("/health")())
+    # 🔁 反向态必须**用例自己制造**：10-03 之前 `orig` 恒为 None（本机确实没配），
+    # 于是下面的 finally 走 pop 分支、这次读就是 False——那时这条断言实际测的是
+    # "这台机没配"，而不是"未配 ⇒ False"。主人把值写进 `web/.env` 之后，`load_env()`
+    # 会把它灌进 os.environ ⇒ `orig` 非 None ⇒ 原样放回 ⇒ 假红（10-03 实测 13/14）。
+    # 与"演练不能改用例自己当输入读的那个常数"同族：判据只能由用例控制。
+    try:
+        os.environ.pop("INGEST_TOKEN", None)
+        body2 = asyncio.run(_endpoint("/health")())
+    finally:
+        if orig is None:
+            os.environ.pop("INGEST_TOKEN", None)
+        else:
+            os.environ["INGEST_TOKEN"] = orig
     check(
-        "🔁 刀4/G7：未配 INGEST_TOKEN ⇒ False（本机现状＝web 侧鉴权分支恒不生效）",
+        "🔁 刀4/G7：显式清空 INGEST_TOKEN ⇒ False（不依赖本机配没配）",
         body2.get("ingestTokenConfigured") is False,
         str(body2),
+    )
+    check(
+        "🔁 刀4/G7：用例结束后环境恢复原值（别的用例不得被污染）",
+        os.environ.get("INGEST_TOKEN") == orig or (orig is None and "INGEST_TOKEN" not in os.environ),
+        "restore mismatch",
     )
 
 

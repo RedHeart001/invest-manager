@@ -56,6 +56,45 @@ def _symbol(code: str) -> str | None:
     return None
 
 
+def _us_quote_symbol(code: str) -> str | None:
+    """美股**现价**符号（#26 甲，2026-10-03 实测）：腾讯形态是 `us`＋纯 ticker。
+
+    带交易所后缀的 `usAAPL.OQ` 实测**返回空** ⇒ 不接受那种写法；`usBRK.B` 的点号是
+    share class，原样保留。**只服务现价路径**——`_symbol_for` 不给 us，所以日K与分时
+    仍然在这里之外显式拒绝（定案 (e) 的分维：美股分时归 Yahoo；`test_tencent_minute`
+    把"us 不支持分钟线"钉成了契约，别用一条共享的映射把它掏空）。
+    """
+    s = (code or "").strip().upper()
+    if not re.fullmatch(r"[A-Z][A-Z.0-9-]{0,9}", s):
+        return None
+    return f"us{s}"
+
+
+_EXCH_SUFFIX = re.compile(r"\.[A-Z]{1,3}$")
+
+
+def _us_fields_match(code: str, f: list[str]) -> bool:
+    """串号守卫：腾讯美股的 f[2] 是 `AAPL.OQ`／`BRK.B.N` 形态，**交易所后缀是最后一段**，
+    去掉后必须等于请求的 ticker——不等就当作没这条数据（宁可缺，不冒领）。
+
+    ⚠️ 别改成按第一个点切：10-03 活体探针抓到那样会把 `BRK.B.N` 切成 `BRK`，
+    于是所有带 share class 点号的代码（BRK.B／BF.A…）永远拿不到备源。
+    """
+    returned = (f[2] or "").strip().upper()
+    base = _EXCH_SUFFIX.sub("", returned)
+    return base == (code or "").strip().upper()
+
+
+def _quote_symbol(type_: str, code: str) -> str | None:
+    """现价专用符号。**us 必须在 `_symbol_for` 之前判**——后者只对 hk/fund 有分支，
+    其余类型一律落到 `_symbol(code)` 兜底，而 `_symbol("1234")` 会因 `12` 前缀返回
+    `sz1234`（10-03 由新增用例抓出）⇒ 若先走兜底，一只深市证券的价格就能被当成美股
+    交付，且 `f[2]` 一致性守卫也拦不住（`1234` == `1234`）。这是 CR9-1 的串号形状。"""
+    if type_ == "us":
+        return _us_quote_symbol(code)
+    return _symbol_for(type_, code)
+
+
 def _hk_symbol(code: str) -> str | None:
     """腾讯港股符号：hk + 5 位代码（不足补零）。
 
@@ -147,17 +186,20 @@ class TencentProvider(BaseProvider):
         }
 
     def get_quote(self, type_: str, code: str) -> dict:
-        sym = _symbol_for(type_, code)
+        sym = _quote_symbol(type_, code)
         if sym is None:
             raise ProviderNotSupported(f"tencent does not support code: {code}")
         raw = self._fetch_quotes_raw([sym])
         f = raw.get(sym)
         if not f:
             raise ProviderError(f"tencent quote missing: {code}")
+        if type_ == "us" and not _us_fields_match(code, f):
+            # CR9-1 同族守卫：映射对了但内容不是这只标的，宁可报错也不能冒领
+            raise ProviderError(f"tencent us symbol mismatch: 请求 {code} 返回 {f[2]}")
         return self._fields_to_quote(type_, code, f)
 
     def get_quotes(self, type_: str, codes: list[str]) -> dict[str, dict]:
-        syms = [(c, _symbol_for(type_, c)) for c in codes]
+        syms = [(c, _quote_symbol(type_, c)) for c in codes]
         syms = [(c, s) for c, s in syms if s]
         if not syms:
             return {}
@@ -165,7 +207,7 @@ class TencentProvider(BaseProvider):
         out: dict[str, dict] = {}
         for code, s in syms:
             f = raw.get(s)
-            if f:
+            if f and (type_ != "us" or _us_fields_match(code, f)):
                 out[code] = self._fields_to_quote(type_, code, f)
         return out
 
@@ -344,3 +386,11 @@ register_chain(["stock", "fund"], _provider, position=1)
 # 主源为 hk_provider（东财多 host）；腾讯在其全节点不可达/限流时接管。
 # 注：港股**列表**无备源（腾讯无全量港股列表接口）→ 显式降级（R10）。
 register_chain(["hk"], _provider, position=1)
+# #26 甲（2026-10-03，主人拍板）：美股**现价**备源。定案 (e)「现价腾讯、分时 Yahoo」在
+# 09-27 拍板时并没有对应的实现（`_symbol` 只给 A股/场内 ⇒ us 一路 None），本轮补的就是
+# 这一段。主源仍是 openbb(Yahoo, position=0)，本条只在 Yahoo 不可达时接管（R15 failover），
+# 分时/日K 不挂——那两条路径继续走 `_symbol_for`，对 us 依旧抛 ProviderNotSupported
+# （test_tencent_minute 把该契约钉住了，而 (e) 本来就把美股分时判给 Yahoo）。
+# 实测依据：`us`＋纯 ticker 五个代码全中且 f[2] 交易所后缀去重后与请求一致（苹果/微软/
+# 伯克希尔B/特斯拉/英伟达）；`usAAPL.OQ` 这种带后缀写法返回空 ⇒ 不接受。不占东财桶。
+register_chain(["us"], _provider, position=1)

@@ -255,6 +255,86 @@ def test_minute_empty_raises() -> None:
     check("C6a：缺 date → ProviderError", _run_with(_RAW_ROWS, ""))
 
 
+def test_us_quote_backup_source() -> None:
+    """#26 甲（2026-10-03，主人拍板）：腾讯补上美股**现价**，但分时/日K 的门不许跟着开。
+
+    定案 (e)「现价腾讯、分时 Yahoo」在 09-27 拍板时没有对应实现（`_symbol` 只给 A股/
+    场内 ⇒ us 一路 None）。本轮补的是现价专用映射，日K/分钟线仍走 `_symbol_for`，
+    所以 `test_minute_unsupported_type_rejected` 那条契约必须**继续为真**——这正是
+    "改动前先 grep 谁把旧行为钉住了"要防的那件事。
+    """
+    check("#26：小写 ticker 归一为大写", tp._us_quote_symbol("aapl") == "usAAPL", str(tp._us_quote_symbol("aapl")))
+    check("#26：share class 的点号保留（BRK.B）", tp._us_quote_symbol("brk.b") == "usBRK.B", str(tp._us_quote_symbol("brk.b")))
+    check("#26：🔁 纯数字不是合法美股码 → None（不给误映射的机会）", tp._us_quote_symbol("1234") is None, str(tp._us_quote_symbol("1234")))
+    check("#26：现价路径认 us，分时路径仍不认（两条门是分开的）", tp._quote_symbol("us", "AAPL") == "usAAPL" and tp._symbol_for("us", "AAPL") is None)
+
+    def _payload(ticker: str = "AAPL", exch: str = "OQ", name: str = "苹果") -> str:
+        f = [""] * 40
+        f[0], f[1], f[2] = "200", name, f"{ticker}.{exch}"
+        f[3], f[4], f[5], f[6] = "333.76", "330.32", "333.26", "1234567"
+        f[30], f[31], f[32], f[33], f[34] = "2026-10-02 13:10:00", "3.44", "1.04", "334.50", "330.10"
+        return "v_us" + ticker + '="' + "~".join(f) + '"'
+
+    def _run_quote(code: str, ticker_in_response: str = "AAPL"):
+        calls = {"n": 0, "url": ""}
+
+        class _Resp:
+            status_code = 200
+            content = (_payload(ticker=ticker_in_response) + ";").encode("gbk", errors="replace")
+
+            def raise_for_status(self) -> None:
+                return None
+
+        def _get(url, params=None, **kw):
+            calls["n"] += 1
+            calls["url"] = url
+            return _Resp()
+
+        orig = tp.requests
+        tp.requests = types.SimpleNamespace(get=_get)
+        try:
+            try:
+                return tp._provider.get_quote("us", code), calls, None
+            except Exception as e:  # noqa: BLE001
+                return None, calls, e
+        finally:
+            tp.requests = orig
+
+    q, calls, err = _run_quote("AAPL")
+    check("#26：us 现价取到（一次请求，不冒领）", q is not None and err is None, f"{type(err).__name__ if err else ''}: {err}")
+    if q:
+        check("#26：现价字段按位置映射正确", q["price"] == 333.76 and q["prevClose"] == 330.32, str(q.get("price")))
+        check("#26：CR9-6 备源也带币种 ⇒ USD", q["currency"] == "USD", str(q.get("currency")))
+        check("#26：CR9-7 时间戳统一 ISO", str(q["timestamp"]).startswith("2026-10-02T"), str(q.get("timestamp")))
+        check("#26：source=tencent 且 code 回显请求值", q["source"] == "tencent" and q["code"] == "AAPL")
+    q2, _c2, err2 = _run_quote("AAPL", ticker_in_response="MSFT")
+    check("#26：🔁 f[2] 与请求不符 ⇒ 报错而不是把别家的价当真（CR9-1 同族）", isinstance(err2, tp.ProviderError), f"{type(err2).__name__}: {err2}")
+    # 交易所后缀是**最后一段**（10-03 活体探针抓到：`/quote?type=us&code=BRK.B` 因
+    # split(".")[0] 把 BRK.B.N 切成 BRK 而永远取不到备源）
+    def _f(t: str) -> list[str]:
+        return ["", "", t]
+
+    check("#26：share class 的点号不算后缀（BRK.B.N ↔ BRK.B）", tp._us_fields_match("BRK.B", _f("BRK.B.N")))
+    check("#26：AAPL.OQ ↔ AAPL", tp._us_fields_match("aapl", _f("AAPL.OQ")))
+    check("#26：🔁 只有后缀不同也不行（BRK.B ↔ BRK.A 不匹配）", not tp._us_fields_match("BRK.B", _f("BRK.A.N")))
+    q4, _c4, err4 = _run_quote("BRK.B", ticker_in_response="BRK.B")
+    check("#26：BRK.B 端到端取到备源（修完后缀规则后）", q4 is not None and err4 is None, f"{type(err4).__name__ if err4 else ''}: {err4}")
+    _q3, calls3, err3 = _run_quote("1234")
+    check("#26：🔁 非法 us 码零次请求（守卫在出网之前）", isinstance(err3, tp.ProviderNotSupported) and calls3["n"] == 0, f"{type(err3).__name__}: n={calls3['n']}")
+
+    for iv in ("1m", "1d"):
+        try:
+            tp._provider.get_kline("us", "AAPL", interval=iv)
+            check(f"#26：🔁 us 的 {iv} 仍显式拒绝", False, "未抛异常")
+        except tp.ProviderNotSupported:
+            check(f"#26：us 的 {iv} 仍 ProviderNotSupported（分时/日K 归 Yahoo）", True)
+        except Exception as e:  # noqa: BLE001
+            check(f"#26：🔁 us 的 {iv} 仍显式拒绝", False, f"{type(e).__name__}: {e}")
+
+    chain = [(p.source) for p in get_provider_chain("us")]
+    check("#26：us 链＝openbb 在前、tencent 为备（R15 failover 顺序）", chain[:2] == ["yfinance", "tencent"], str(chain))
+
+
 if __name__ == "__main__":
     test_minute_candles_cumulative_diff()
     test_minute_date_and_shape()
@@ -262,6 +342,7 @@ if __name__ == "__main__":
     test_minute_unsupported_type_rejected()
     test_minute_otc_fund_empty_raises()
     test_minute_empty_raises()
+    test_us_quote_backup_source()
     fails = [x for x in results if not x[1]]
     print(f"\n===== {len(results) - len(fails)}/{len(results)} 通过 =====")
     if fails:
