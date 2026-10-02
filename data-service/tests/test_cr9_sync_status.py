@@ -194,12 +194,170 @@ def test_http_rejection_still_error() -> None:
           r.get("ok") is not True and "HTTP 403" in str(r.get("error")), str(r))
 
 
+class _Legs:
+    """按 URL 分派的假 web（刀 3/甲-1 之后一轮有**两条腿**，不能再一份响应糊两次调用）。
+
+    记录每次调用的 (url, timeout)，让"刷新腿用的是它自己的预算"这件事可断言。
+    """
+
+    def __init__(self, sync_resp=None, sync_exc=None, refresh_resp=None, refresh_exc=None):
+        self.calls: list[tuple[str, object]] = []
+        self.running_during_refresh: list[bool] = []
+        self._sync_resp = sync_resp
+        self._sync_exc = sync_exc
+        self._refresh_resp = refresh_resp
+        self._refresh_exc = refresh_exc
+
+    def __call__(self, url, timeout=None, **kw):
+        self.calls.append((url, timeout))
+        if "market/refresh" in url:
+            # running 必须仍为 True：单飞要覆盖整轮两条腿，否则刷新中途能被再点一次同步
+            self.running_during_refresh.append(bool(ss._state["running"]))
+            if self._refresh_exc:
+                raise self._refresh_exc
+            return self._refresh_resp or _Resp({"tookMs": 10, "results": []})
+        if self._sync_exc:
+            raise self._sync_exc
+        return self._sync_resp or _Resp({"ok": True, "tookMs": 1, "results": []})
+
+
+def _run_two_legs(sync_resp=None, sync_exc=None, refresh_resp=None, refresh_exc=None):
+    """跑一次完整的 `_execute`（两条腿），返回 (同步腿结果, 刷新腿结果, 假 web 记录)。"""
+    legs = _Legs(sync_resp, sync_exc, refresh_resp, refresh_exc)
+    orig = requests.post
+    requests.post = legs  # type: ignore[assignment]
+    saved = dict(ss._state)
+    try:
+        ss._state["running"] = True
+        ss._state["lastRefresh"] = None
+        r = ss._execute("unit-test")
+        return r, dict(ss._state.get("lastRefresh") or {}), legs
+    finally:
+        requests.post = orig
+        ss._state.clear()
+        ss._state.update(saved)
+
+
+def test_chain_refresh_fires_after_sync_leg() -> None:
+    """刀 3/甲-1：同步腿完成后**链式**触发刷新腿，且刷新腿用的是它自己的预算。"""
+    ok_body = _Resp({"ok": True, "tookMs": 61_000,
+                     "results": [{"type": "stock", "count": 5913}]})
+    r, refresh, legs = _run_two_legs(sync_resp=ok_body)
+    urls = [u for u, _t in legs.calls]
+    check("甲-1：一轮里有两条腿，第二条是 /api/market/refresh?type=all",
+          len(urls) == 2 and "market/refresh" in urls[1], str(urls))
+    check("甲-1：同步腿仍用 CR9-33 的形态预算（拆腿没顺手改它）",
+          legs.calls[0][1] == ss.SCHEDULED_CALLBACK_TIMEOUT_S, str(legs.calls[0]))
+    check("甲-1：刷新腿自带独立预算 2400s（≈ 实测基数 1,700s 的 1.4 倍）",
+          legs.calls[1][1] == ss.REFRESH_CALLBACK_TIMEOUT_S == 2400.0, str(legs.calls[1]))
+    check("甲-1🔁：两条腿的预算**不同**（相同就等于没拆——一件事又去盖另一件事）",
+          ss.REFRESH_CALLBACK_TIMEOUT_S != ss.SCHEDULED_CALLBACK_TIMEOUT_S)
+    check("甲-1：刷新腿的结果单独成家（lastRefresh，不污染 lastResult）",
+          refresh.get("outcome") == "completed" and refresh.get("ok") is True, str(refresh))
+    check("甲-1：`running` 覆盖整轮两条腿 ⇒ 刷新中途不会被再点一次同步",
+          legs.running_during_refresh == [True], str(legs.running_during_refresh))
+    check("甲-1：_execute 返回的仍是**同步腿**那份（状态位各自归家）",
+          r.get("outcome") == "completed" and "refresh" not in r, str(r)[:160])
+
+
+def test_chain_refresh_also_fires_on_partial_failure() -> None:
+    """部分类型失败仍要刷：成功入库的那几类没有价，分类浏览就整类排序失效。"""
+    body = _Resp({"ok": False, "tookMs": 1, "results": [
+        {"type": "stock", "error": "eastmoney cooling down"},
+        {"type": "fund", "count": 27954},
+    ]})
+    _r, refresh, legs = _run_two_legs(sync_resp=body)
+    check("甲-1：同步腿 partial_failed ⇒ 刷新腿照常触发（不是只在 full success 才刷）",
+          len(legs.calls) == 2 and refresh.get("outcome") == "completed", str(refresh))
+
+
+def test_chain_refresh_skipped_when_sync_leg_unanswered() -> None:
+    """🔁 反向：web 没把列表这件事收尾 ⇒ **不刷**。
+
+    两条理由不同（都写进 skippedReason）：
+      · inconclusive（读超时）＝web 可能还在 DELETE＋INSERT 换表，此刻刷价格会把结果
+        写进即将被删的行（`web/lib/sync.ts` 的整表替换语义）；
+      · rejected/failed＝web 根本没接活，刷的仍是昨天那批行。
+    """
+    _r, refresh, legs = _run_two_legs(sync_exc=requests.exceptions.ReadTimeout("read timeout"))
+    check("甲-1🔁：同步腿读超时 ⇒ 刷新腿不触发（零第二次调用）",
+          len(legs.calls) == 1 and refresh.get("outcome") == "skipped", str(refresh))
+    check("甲-1：skipped 的理由说得出「会被删除的行」这个具体危害（R16）",
+          "即将被删除的行" in str(refresh.get("skippedReason") or ""),
+          str(refresh.get("skippedReason")))
+
+    _r2, refresh2, legs2 = _run_two_legs(sync_resp=_Resp({"error": "no"}, status=403))
+    check("甲-1🔁：同步腿被拒（4xx）⇒ 刷新腿也不触发",
+          len(legs2.calls) == 1 and refresh2.get("outcome") == "skipped", str(refresh2))
+    check("甲-1：被拒档的理由是「web 未接活」，与读超时档不同",
+          "未接活" in str(refresh2.get("skippedReason") or ""),
+          str(refresh2.get("skippedReason")))
+
+
+def test_refresh_leg_own_outcome_semantics() -> None:
+    """刷新腿继承同步腿那条不变量：`ok` 只在 web 真回答时带真假。
+
+    web 的 `/api/market/refresh` **不返回 ok**（只有 tookMs/results），所以 ds 侧的 `ok`
+    由逐类 `failedBatches` 导出——这不是"替 web 下结论"，而是"web 没给的绝不编造"：
+    任一类有失败批次即 `ok=False`，读超时仍是 `None`。
+    """
+    weak = _Resp({"tookMs": 1_700_000, "results": [
+        {"type": "fund", "total": 28000, "updated": 24069, "failedBatches": 3,
+         "snapshotAt": "2026-10-02T01:20:00.000Z"},
+        {"type": "stock", "total": 5913, "updated": 5902, "failedBatches": 0,
+         "snapshotAt": "2026-10-02T01:10:00.000Z"},
+    ]})
+    _r, refresh, _legs = _run_two_legs(
+        sync_resp=_Resp({"ok": True, "tookMs": 1, "results": []}), refresh_resp=weak
+    )
+    check("甲-1：刷新腿按 failedBatches 判失败 ⇒ ok=False／outcome=partial_failed",
+          refresh.get("ok") is False and refresh.get("outcome") == "partial_failed",
+          str(refresh))
+    check("甲-1：weakTypes 点名到类（fund 那 3 个失败批次不能只写成一句「部分失败」）",
+          refresh.get("weakTypes") == ["fund"], str(refresh.get("weakTypes")))
+    check("甲-1：逐类 results 原文保留（updated/total/snapshotAt 是可判据）",
+          len(refresh.get("results") or []) == 2, str(refresh.get("results"))[:160])
+    check("甲-1：刷新腿自己的预算也回写进状态（CR9-33 同族纪律）",
+          refresh.get("callbackTimeoutS") == 2400, str(refresh.get("callbackTimeoutS")))
+
+    _r2, refresh2, _l2 = _run_two_legs(
+        sync_resp=_Resp({"ok": True, "tookMs": 1, "results": []}),
+        refresh_exc=requests.exceptions.ReadTimeout("read timeout=2400.0"),
+    )
+    check("🔁 甲-1：刷新腿读超时 ⇒ ok=None＋inconclusive（与同步腿同一不变量，不是失败）",
+          refresh2.get("ok") is None and refresh2.get("outcome") == "inconclusive",
+          str(refresh2))
+
+
+def test_status_exposes_skip_and_refresh() -> None:
+    """#21＋甲-1：`/sync/status` 必须自己说得出"刷新腿这一轮去哪了"。"""
+    saved = dict(ss._state)
+    try:
+        ss._state.update({"skippedReason": None, "lastRefresh": None})
+        st = ss.status()
+        check("#21：status 带 skippedReason 键（None＝没有待说明的跳过，不是缺字段）",
+              "skippedReason" in st and st["skippedReason"] is None, str(st)[:120])
+        check("甲-1：status 带 lastRefresh 键", "lastRefresh" in st, str(st)[:120])
+        ss._set_skip("catchup: SYNC_CATCHUP=off（每日 cron 不受影响）")
+        st2 = ss.status()
+        check("#21：跳过原因写进状态位后可被 curl 读出（不必翻日志）",
+              "SYNC_CATCHUP=off" in str(st2.get("skippedReason")), str(st2.get("skippedReason")))
+    finally:
+        ss._state.clear()
+        ss._state.update(saved)
+
+
 def main() -> int:
     test_partial_failure_is_not_ok()
     test_full_success_is_ok()
     test_read_timeout_is_inconclusive_not_ok()
     test_lastdate_set_even_on_partial()
     test_http_rejection_still_error()
+    test_chain_refresh_fires_after_sync_leg()
+    test_chain_refresh_also_fires_on_partial_failure()
+    test_chain_refresh_skipped_when_sync_leg_unanswered()
+    test_refresh_leg_own_outcome_semantics()
+    test_status_exposes_skip_and_refresh()
     passed = sum(1 for _n, ok, _d in results if ok)
     for name, ok, detail in results:
         if not ok:

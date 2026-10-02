@@ -4,7 +4,6 @@
 import { randomUUID } from "node:crypto";
 
 import { dsGet } from "./data-service";
-import { refreshSnapshot } from "./market-snapshot";
 import { prisma } from "./prisma";
 import { buildSearchText } from "./search-text";
 
@@ -220,20 +219,19 @@ async function _syncTypeInner(type: string): Promise<SyncResult> {
     );
     // 暂存表清理统一放到 finally（成功/失败都要 DROP，避免失败时残留全量数据）
     await rebuildFts(type);
-    // R14：同步完成后刷新行情快照（分类浏览排序用；失败不影响同步结果）
+    // 刀 3/甲-1（2026-10-02）：**这里不再刷行情快照**。R14 的刷新曾是同步事务的收尾一步
+    // （旧 `:231` 紧邻 `refreshSnapshot(type)`），代价实测：10-01 一轮里 fund 的 280 个
+    // 净值批次单独吃掉 ≈1,700s，把整轮 wall 顶到 ≥1800s ＝ 打穿 ds 侧回调预算 ⇒ 每晚
+    // 02:00 都以"读超时（结果未知）"收尾。现在两条腿各拿各的预算：本端点只取列表，
+    // 刷新由 **ds 在同步腿收尾后链式触发** `POST /api/market/refresh?type=all`
+    // （预算 `sync_scheduler.REFRESH_CALLBACK_TIMEOUT_S`）。
+    // ⚠️ 拆腿带来的窗口（有意接受）：整表删旧插新 ⇒ 新行的 lastPrice/lastChangePct 必为
+    // null，直到刷新腿跑完才有价；这段时间分类浏览是"无价"而不是"陈旧价"。
     // CR9-31（R16）：载荷被上游声明为降级来源时，即便条数过了缩水闸门也要留痕——
     // 否则"327 只转债入库"与全量同步长得一模一样，分类浏览的覆盖面缺口没人说得清。
     let note: string | undefined;
     if (data.degraded) {
       note = `list degraded source=${data.source ?? "?"}${data.note ? `：${data.note}` : ""}`;
-    }
-    try {
-      const snap = await refreshSnapshot(type);
-      note =
-        `${note ? note + "；" : ""}snapshot updated=${snap.updated}/${snap.total}` +
-        ` failedBatches=${snap.failedBatches}`;
-    } catch (e) {
-      note = `${note ? note + "；" : ""}snapshot failed: ${e instanceof Error ? e.message : "unknown"}`;
     }
     return { type, count: rows.length, note, tookMs: Date.now() - started };
   } catch (e) {

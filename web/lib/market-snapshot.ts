@@ -1,7 +1,9 @@
 // 行情快照刷新（R14 分类浏览）：
 // 把全类型产品的最新价/涨跌幅批量写入 Product.lastPrice/lastChangePct，
 // 供"分类浏览"做全局涨幅排序（库内排序，避免对 3.4 万产品打实时行情）。
-// - 每日同步（lib/sync.ts）末尾自动执行；也可 POST /api/market/refresh 手动触发
+// - 触发形态（刀 3/甲-1，2026-10-02）：**不再挂在 lib/sync.ts 的同步事务末尾**，改由
+//   data-service 在同步腿收尾后链式调用 `POST /api/market/refresh?type=all`（两条腿各拿
+//   各的预算，理由与数字见 `app/sync_scheduler.py`）；手动触发是同一条路径
 // - 展示层仍以实时富集为准（P1 管线），快照只用于排序
 // - 限流友好：东财族批次间隔与源族桶放行速率同值（`EM_BATCH_DELAY_MS`，CR9-9）；
 //   任一批次失败不中断整体（R10），返回失败计数

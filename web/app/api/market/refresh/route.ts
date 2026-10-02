@@ -13,14 +13,20 @@ import { checkRequestOrigin } from "@/lib/request-origin";
 // ⇒ **11 批 51.7s（有效 4.7s/批，末批不尾延）且 updated=311 / failedBatches=0 照常产出**，
 // 据此折算全类型 ≈ **700s**，加场外净值整表首拉与 280 批写库 ≈ 750~900s
 // （与 CR7-9 当年"5 类串行 15 分钟起"的推算吻合，当年是拿推算当代测）。
-// 1500s = 实测上界的 1.7 倍，与 /api/sync 同值（每日同步末尾跑的就是同一份刷新）。
-// ⚠️ 上界要说清楚：熔断日单批仍可能被 ds 侧 `acquire` 排队卡满 20s ⇒ 全量刷新理论
-// 上界约 60 分钟，任何 maxDuration 都盖不住；自托管下本声明不强制执行，真正的护栏是
-// 源族桶的冷却与 ds 侧超时（见 docs/CONSTRAINTS.md C-5）。
-export const maxDuration = 1500;
+// 1500s = 实测上界的 1.7 倍。⚠️ 那个上界已被 10-01 实测推翻（fund 的 280 个净值批次单独
+// ≈1,700s ⇒ 全类型刷新真实基数 ≈2,300s，不是 850~900s）。刀 3/甲-1（2026-10-02）之后
+// **本端点就是每日刷新腿**（ds 在同步腿收尾后链式打 `?type=all`），所以按新实测把它抬到
+// 2400s，与 ds 侧 `sync_scheduler.REFRESH_CALLBACK_TIMEOUT_S` 同值——注意这是**对齐**不是
+// "修法"：真正的修法是把这 1,700s 从同步事务里拆出来各拿各的预算，抬一个数盖住两件事
+// 是账本里已经否掉过的做法（见「批次划分」八·明确不做）。
+// ⚠️ 上界仍要说清楚：熔断日单批可能被 ds 侧 `acquire` 排队卡满 20s ⇒ 全量刷新理论上界约
+// 60 分钟，任何 maxDuration 都盖不住；自托管下本声明不强制执行，真正的护栏是源族桶的冷却
+// （见 docs/CONSTRAINTS.md C-5）。
+export const maxDuration = 2400;
 
 // 行情快照刷新（R14）：把各类型最新价/涨跌幅写入 Product 快照列。
-// 低频任务：每日同步末尾自动执行；此处供手动触发。EM 通道已内置批次限速。
+// 触发形态（刀 3/甲-1，2026-10-02）：**不再挂在 lib/sync.ts 的同步事务末尾**，改由
+// data-service 在同步腿收尾后链式调用 `?type=all`；手动触发是同一条路径。EM 通道已内置批次限速。
 export async function POST(req: NextRequest) {
   // CR-08：拒绝浏览器跨站简单表单触发
   const blocked = checkRequestOrigin(req);

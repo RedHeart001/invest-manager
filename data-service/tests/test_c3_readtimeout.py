@@ -98,7 +98,9 @@ def test_callback_timeout_by_form() -> None:
             return {"ok": True, "tookMs": 1, "results": []}
 
     def _capture(url, timeout=None, **kw):
-        seen["timeout"] = timeout
+        # 刀 3/甲-1（2026-10-02）之后一轮有**两条腿** ⇒ 必须按 URL 分别记：只存"最后一次
+        # 调用"会读到刷新腿的 2400s，本套件的判据（同步腿按形态取预算）就变成在测刷新腿了。
+        seen["sync" if url.endswith("/api/sync") else "refresh"] = timeout
         return _Resp()
 
     orig_post = real_requests.post
@@ -112,7 +114,7 @@ def test_callback_timeout_by_form() -> None:
             ss._state["running"] = True
             res = ss._execute(trigger)
             check(f"CR9-33：形态 {trigger} 的回调预算 = {int(expected)}s",
-                  seen.get("timeout") == expected, f"got={seen.get('timeout')}")
+                  seen.get("sync") == expected, f"got={seen.get('sync')}")
             check(f"CR9-33：本次预算回写进状态（/sync/status 可判定）",
                   res.get("callbackTimeoutS") == int(expected), str(res)[:120])
     finally:
