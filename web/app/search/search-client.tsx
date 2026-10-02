@@ -6,6 +6,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { ResultListSkeleton } from "@/app/components/Skeleton";
 import { getCachedSearch, getLastSearch, setCachedSearch } from "@/lib/search-cache";
 import { priceWithCurrency } from "@/lib/currency";
+import type { StaleNote } from "@/lib/freshness";
 import type { SearchResult } from "@/lib/search";
 
 const TABS = [
@@ -57,6 +58,9 @@ export default function SearchClient() {
   // 浏览模式元信息（R14）
   const [browseTotal, setBrowseTotal] = useState(0);
   const [browsePages, setBrowsePages] = useState(1);
+  // #22(b)／#25：陈旧说明——后端只在"早于昨日"时给，正常态这里是空数组（不出字）
+  const [stale, setStale] = useState<StaleNote[]>([]);
+  const [staleMore, setStaleMore] = useState(0);
 
   const [pendingKey, setPendingKey] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -104,6 +108,8 @@ export default function SearchClient() {
           setResults((body.items ?? []) as Result[]);
           setBrowseTotal(body.total ?? 0);
           setBrowsePages(body.pages ?? 1);
+          setStale(Array.isArray(body.stale) ? (body.stale as StaleNote[]) : []);
+          setStaleMore(Number(body.staleMore) || 0);
           router.replace(
             `/search?type=${type}&sort=${sortSel}&page=${page}`,
           );
@@ -261,6 +267,24 @@ export default function SearchClient() {
           </select>
         </label>
       </div>
+
+      {/* #22(b)／#25 陈旧可见性（主人 10-02 定案文案「主数据未更新（股票：09-12 起）」）：
+          后端只在"早于昨日（北京日界）"时给说明 ⇒ **正常态这一段整体不渲染**，
+          因为那时这句话零信息量。设计语言沿用 CR8-1「产出说明」：小字、一批最多两条、按成因分类。 */}
+      {browseMode && stale.length > 0 && (
+        <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1" data-testid="stale-notes">
+          {stale.map((n) => (
+            <span key={`${n.type}:${n.kind}`} className="text-[11px] text-amber-700">
+              {n.kind === "list" ? "主数据未更新" : "价格快照未更新"}（
+              {TYPE_LABEL[n.type] ?? n.type}：{n.since.slice(5)} 起）
+            </span>
+          ))}
+          {/* 超过展示上限的：说"还有几条"，不静默丢掉（R16「看不见的降级」同族） */}
+          {staleMore > 0 && (
+            <span className="text-[11px] text-amber-700">另有 {staleMore} 类未更新</span>
+          )}
+        </div>
+      )}
 
       <div className="mt-3">
         {loading && <ResultListSkeleton rows={6} />}
