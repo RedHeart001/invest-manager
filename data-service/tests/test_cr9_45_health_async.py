@@ -139,7 +139,7 @@ def test_db_backup_flag_is_state_only() -> None:
         check("①：/health 带 dbBackup 位，且是 dict（不是裸布尔——'今天没跑过'与'跑失败'必须分得开）",
               isinstance(bb, dict), str(bb))
         check("①：从未跑过 ⇒ ok=None／lastRun=None（观测位不得把'没发生'渲染成'成功'）",
-              bb == {"lastRun": None, "ok": None, "runs": 0}, str(bb))
+              bb == {"lastRun": None, "ok": None, "runs": 0, "nextRun": None}, str(bb))
     finally:
         bs._state.clear()
         bs._state.update(saved)

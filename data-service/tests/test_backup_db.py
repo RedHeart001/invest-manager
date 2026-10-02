@@ -231,9 +231,14 @@ def test_backup_job_registered_and_rotates() -> None:
             check("①：daily-db-backup 已注册为 job", ids == ["daily-db-backup"], str(ids))
             check("①：下次触发时刻是 03:30（Asia/Shanghai）",
                   (nxt.hour, nxt.minute) == (3, 30), str(nxt))
+            check("①：/health 的 dbBackup 带得出下一档时刻（"
+                  "这样才能把'今天还没到 03:30'与'job 根本没注册'分开读）",
+                  "03:30" in str(bs.health().get("nextRun")), str(bs.health()))
         finally:
             bs.shutdown_scheduler()
         check("🔁 ①：shutdown 后调度器置 None（服务停了不会有 job 残留）", bs._scheduler is None)
+        check("🔁 ①：调度器停掉 ⇒ nextRun 变 null（不会被读成'还在等着跑'）",
+              bs.health()["nextRun"] is None, str(bs.health()))
 
         # ③ 份数轮换：只认 dev-<日期>-<时间>.db，别的文件永不碰
         keep_dir = os.path.join(tmp, "backups")
@@ -252,6 +257,24 @@ def test_backup_job_registered_and_rotates() -> None:
         check("🔁 ①：只删更旧的快照，最新 2 份与非快照文件一个不动",
               left == ["dev-20260923-010000.db", "dev-20260924-010000.db", "handmade.db"],
               str(left))
+        # 真产物会带 WAL sidecar（10-02 活体探针实测：在线备份 API 连源库的 journal mode
+        # 一起复制过来）⇒ 删一份快照必须连它自己的 -wal/-shm 一起删，否则目录里堆孤儿文件
+        with_sidecar = os.path.join(tmp, "with_sidecar")
+        os.makedirs(with_sidecar)
+        for stamp in ("20260920-010000", "20260921-010000"):
+            for suffix in ("", "-wal", "-shm"):
+                with open(os.path.join(with_sidecar, f"dev-{stamp}.db{suffix}"), "w",
+                          encoding="utf-8") as fh:
+                    fh.write("x")
+        removed2 = bs.rotate(with_sidecar, keep=1)
+        check("①：删掉的那份快照把自己的 -wal/-shm 一起带走（不留半套文件）",
+              removed2 == ["dev-20260920-010000.db", "dev-20260920-010000.db-wal",
+                           "dev-20260920-010000.db-shm"], str(removed2))
+        check("①：保留的那份 sidecar 一个都不动（它可能是未检查点的数据）",
+              sorted(os.listdir(with_sidecar)) == ["dev-20260921-010000.db",
+                                                   "dev-20260921-010000.db-shm",
+                                                   "dev-20260921-010000.db-wal"],
+              str(sorted(os.listdir(with_sidecar))))
         check("①：keep 大于现有份数 ⇒ 零删除", bs.rotate(keep_dir, keep=9) == [])
         check("①：BACKUP_KEEP 非法 ⇒ 回落 7 而不是清空目录", bs._keep() == 7, str(bs._keep()))
         os.environ["BACKUP_KEEP"] = "0"

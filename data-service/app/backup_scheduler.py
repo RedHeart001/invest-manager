@@ -106,7 +106,12 @@ def _hour_minute() -> tuple[int, int]:
 
 
 def rotate(outdir: str, keep: int) -> list[str]:
-    """按份数轮换：保留最新 `keep` 份，删除更旧的快照文件，返回被删的文件名。"""
+    """按份数轮换：保留最新 `keep` 份，删除更旧的快照文件，返回被删的文件名。
+
+    删主文件时**一并删它的 `-wal`/`-shm`**：备份产物本身是 WAL 库（在线备份 API 会连
+    源库的 journal mode 一起复制过来），只删 `.db` 会在目录里留下半套 sidecar，
+    而 `BACKUP_KEEP` 承诺的是"份数"，不是"主文件数"。
+    """
     if not os.path.isdir(outdir):
         return []
     names = sorted(f for f in os.listdir(outdir) if SNAPSHOT_NAME.match(f))
@@ -117,6 +122,15 @@ def rotate(outdir: str, keep: int) -> list[str]:
             removed.append(f)
         except OSError as e:  # Windows 上句柄未释放时会锁文件：删不掉≠备份失败
             log.warning("backup rotation could not prune %s: %s", f, e)
+            continue
+        for suffix in ("-wal", "-shm"):
+            side = os.path.join(outdir, f + suffix)
+            if os.path.exists(side):
+                try:
+                    os.remove(side)
+                    removed.append(f + suffix)
+                except OSError as e:
+                    log.warning("backup rotation could not prune %s: %s", side, e)
     return removed
 
 
@@ -212,10 +226,21 @@ def shutdown_scheduler() -> None:
 
 
 def health() -> dict:
-    """给 /health 的观测位：最后一次备份的时刻/成败/累计次数，**不回显路径**。"""
+    """给 /health 的观测位：最后一次备份的时刻/成败/次数 ＋ **下一档 cron 时刻**。
+
+    为什么必须带 `nextRun`：只看 lastRun/ok/runs 时，"今天还没到 03:30"与"job 根本没注册上"
+    在 curl 里长得一模一样（都是 null/0），而后者正是本位要防的那种静默失败。
+    **不回显绝对路径。**
+    """
     last = _state["lastResult"] or {}
+    next_run = None
+    if _scheduler is not None:
+        jobs = _scheduler.get_jobs()
+        if jobs:
+            next_run = str(jobs[0].next_run_time)
     return {
         "lastRun": _state["lastRun"],
         "ok": last.get("ok"),
         "runs": _state["runs"],
+        "nextRun": next_run,
     }
