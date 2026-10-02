@@ -67,7 +67,7 @@ def test_health_endpoint_is_async() -> None:
 def test_health_response_shape_unchanged() -> None:
     body = asyncio.run(_endpoint("/health")())
     check(
-        "CR9-45①：返回体键齐、status=ok（改 async 没动契约；②加了在飞两字段、刀 4 加了 ingestTokenConfigured）",
+        "CR9-45①：返回体键齐、status=ok（改 async 没动契约；②加了在飞两字段、刀 4 加了 ingestTokenConfigured、① 加了 dbBackup）",
         isinstance(body, dict)
         and body.get("status") == "ok"
         and "version" in body
@@ -123,10 +123,58 @@ def test_ingest_token_flag_is_configured_state_only() -> None:
     )
 
 
+def test_db_backup_flag_is_state_only() -> None:
+    """①（2026-10-02）：`/health` 的 `dbBackup` 观测位——形状稳定、未跑不谎报、不回显路径。
+
+    为什么挂在这里：本端点的返回体就是契约面（刀 4 的 `ingestTokenConfigured` 同族）。
+    备份 job 本身的行为断言在 `tests/test_backup_db.py`，这里只管"这个位能不能被一条 curl 读"。
+    """
+    import app.backup_scheduler as bs
+
+    saved = dict(bs._state)
+    try:
+        bs._state.update({"running": False, "lastRun": None, "lastResult": None, "runs": 0})
+        body = asyncio.run(_endpoint("/health")())
+        bb = body.get("dbBackup")
+        check("①：/health 带 dbBackup 位，且是 dict（不是裸布尔——'今天没跑过'与'跑失败'必须分得开）",
+              isinstance(bb, dict), str(bb))
+        check("①：从未跑过 ⇒ ok=None／lastRun=None（观测位不得把'没发生'渲染成'成功'）",
+              bb == {"lastRun": None, "ok": None, "runs": 0}, str(bb))
+    finally:
+        bs._state.clear()
+        bs._state.update(saved)
+
+    # 跑过一次（指向一个不存在的源库＝零写入、零出网的最便宜真实路径）
+    orig_db_path = os.environ.get("DB_PATH")
+    saved = dict(bs._state)
+    try:
+        os.environ["DB_PATH"] = "Z:/definitely/not/a/db/dev.db"
+        bs._state.update({"running": False, "lastRun": None, "lastResult": None, "runs": 0})
+        r = bs.run_once("unit-test")
+        body = asyncio.run(_endpoint("/health")())
+        bb = body.get("dbBackup") or {}
+        dumped = json.dumps(body, ensure_ascii=False)
+        check("①：失败轮 ⇒ dbBackup.ok 为 False（备份静默 no-op 必须变成可读的假）",
+              r.get("ok") is False and bb.get("ok") is False, f"{r} / {bb}")
+        check("①：跑过之后 lastRun 带时刻、runs 计数 +1",
+              bool(bb.get("lastRun")) and bb.get("runs") == 1, str(bb))
+        check("🔁 ①：返回体不出现源库路径（观测位不是文件系统清单）",
+              "Z:" not in dumped,
+              dumped[:200])
+    finally:
+        if orig_db_path is None:
+            os.environ.pop("DB_PATH", None)
+        else:
+            os.environ["DB_PATH"] = orig_db_path
+        bs._state.clear()
+        bs._state.update(saved)
+
+
 if __name__ == "__main__":
     test_health_endpoint_is_async()
     test_health_response_shape_unchanged()
     test_ingest_token_flag_is_configured_state_only()
+    test_db_backup_flag_is_state_only()
     fails = [x for x in results if not x[1]]
     print(f"\n===== {len(results) - len(fails)}/{len(results)} 通过 =====")
     if fails:

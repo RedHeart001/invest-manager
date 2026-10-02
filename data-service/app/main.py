@@ -19,7 +19,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from .hotspot import scheduler as hotspot_scheduler
-from . import sync_scheduler
+from . import backup_scheduler, sync_scheduler
 from .providers import (
     ProviderError,
     ProviderNotSupported,
@@ -44,9 +44,12 @@ async def lifespan(_app: FastAPI):
     hotspot_scheduler.start_scheduler()
     # G2（批次 D）：启动产品主数据每日同步调度（含启动补跑）
     sync_scheduler.start_scheduler()
+    # ①（2026-10-02）：启动 dev.db 每日备份调度（**无补跑**，错过一轮等下一夜）
+    backup_scheduler.start_scheduler()
     yield
     hotspot_scheduler.shutdown_scheduler()
     sync_scheduler.shutdown_scheduler()
+    backup_scheduler.shutdown_scheduler()
 
 
 app = FastAPI(title="invest-manager data-service", version="0.5.0", lifespan=lifespan)
@@ -101,6 +104,11 @@ async def health():
         # 在 uvicorn 默认配置下不一定看得见（#21 同族理由）⇒ 做成状态位：**只报布尔、绝不回显值**，
         # 主人填完 `.env` 一条 curl 就能核对两侧是否一致。
         "ingestTokenConfigured": bool(os.environ.get("INGEST_TOKEN", "")),
+        # ①（2026-10-02，主人"执行推荐方案"轮）：`dev.db` 此前**零备份**——脚本有、单测有，
+        # 但没有任何调度调它（10-01 审计实测 `backups/` 空）。现在它挂在 `backup_scheduler`
+        # 的每日 job 上，而"昨夜到底备份成没成"必须一条 curl 可读（#21 同族：日志会被回收，
+        # 状态位不会）。**只报时刻/成败/次数，不回显绝对路径。**
+        "dbBackup": backup_scheduler.health(),
     }
 
 
