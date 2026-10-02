@@ -378,6 +378,156 @@ def test_run_now_claim_clears_skip_reason() -> None:
         ss._state.update(saved)
 
 
+# ---------- #23 当日幂等闸门（主人 2026-10-02 拍板"两道叠加"；闸门本体在 web 侧） ----------
+#
+# 本套件要钉的是 ds 这一侧的三个契约，一个都不许"顺手多做"：
+#  1. web 把整轮都跳过 ⇒ `outcome="skipped"`（第六态）——不是 completed（没做事却记完成
+#     ＝ CR9-28 那个病重演），也不是 rejected（那才是 4xx）；原因必须挂进 `skippedReason`。
+#  2. 同步腿被跳过 ⇒ **刷新腿照常触发**："列表到位、快照没到位"恰恰是最需要补的形态；
+#     真没事可做时刷新腿自己会返回 skipped，代价只有两次毫秒级读库。
+#  3. `force` 只透传、不改判据；内存 `lastDate` **一字不动**（它管"同进程内当天只试一次，
+#     含失败轮"，正是 CR9-28 那条被测试钉住的取舍——所以本刀不需要改判任何既有断言）。
+
+def _skipped_body(types: list[str]) -> dict:
+    return {
+        "ok": True,  # web 的 ok 是 `results.every(r => !r.error)`——跳过不是 error，仍为真
+        "tookMs": 12,
+        "results": [
+            {"type": t, "skipped": True, "note": "今日已同步（列表时刻 2026-10-02 02:11）", "tookMs": 0}
+            for t in types
+        ],
+    }
+
+
+def _run_inline(body: dict, force: bool = False) -> tuple[dict, dict]:
+    """跑一次 `_execute`，并在**回滚状态之前**抓一份 `_state` 快照。
+
+    为什么要这个而不是复用 `_run_with`：顶层状态位（`skippedReason`／`lastDate`）是
+    `_execute` 写进 `_state` 的，而 `_run_with` 在 finally 里把 `_state` 复原了 ⇒
+    跑完再 `ss.status()` 读到的是**别人的**状态，断言会绿得没有内容（CR9-15 那类假覆盖）。
+    """
+    orig = requests.post
+    requests.post = lambda *a, **k: _Resp(body)  # type: ignore[assignment]
+    saved = dict(ss._state)
+    try:
+        ss._state.update({"running": True, "lastDate": None, "skippedReason": None,
+                          "lastRefresh": None})
+        r = ss._execute("unit-test", force)
+        return r, dict(ss._state)
+    finally:
+        requests.post = orig
+        ss._state.clear()
+        ss._state.update(saved)
+
+
+def test_gate_skipped_round_is_not_completed() -> None:
+    r, st = _run_inline(_skipped_body(["stock", "fund", "bond", "crypto", "hk"]))
+    check("#23：整轮被当日闸门挡下 → outcome=skipped（不是 completed，没做事不得记完成）",
+          r.get("outcome") == "skipped", str(r.get("outcome")))
+    check("#23：ok 仍抄 web 的真值（跳过不是失败，不得把它编码成 ok=False）",
+          r.get("ok") is True, repr(r.get("ok")))
+    check("#23：skippedReason 带 already-synced-today 与逐类清单（一条 curl 读得出）",
+          "already-synced-today" in str(r.get("skippedReason")) and
+          all(t in str(r.get("skippedReason")) for t in ["stock", "hk"]),
+          str(r.get("skippedReason")))
+    check("#23：同一条原因写进**顶层**状态位（与 #21 共用一个位，不另立字段）",
+          "already-synced-today" in str(st.get("skippedReason")), str(st.get("skippedReason")))
+
+
+def test_gate_partial_skip_keeps_other_outcomes() -> None:
+    """逐类粒度：只有 stock 被挡、其余照跑 ⇒ 不能整轮记 skipped，也不能把 stock 记成失败。"""
+    body = {
+        "ok": False,
+        "tookMs": 90_000,
+        "results": [
+            {"type": "stock", "skipped": True, "note": "今日已同步", "tookMs": 0},
+            {"type": "fund", "count": 27954, "tookMs": 61_000},
+            {"type": "hk", "error": "eastmoney cooling down", "tookMs": 4},
+        ],
+    }
+    r, st = _run_inline(body)
+    check("#23：部分类被挡 ⇒ outcome 仍按成败判（partial_failed，不被 skip 标记污染）",
+          r.get("outcome") == "partial_failed" and r.get("failedTypes") == ["hk"], str(r)[:200])
+    check("#23：被挡的那些类进 skippedTypes，且不混进 failedTypes（两种成因不同）",
+          r.get("skippedTypes") == ["stock"], str(r.get("skippedTypes")))
+    check("#23🔁 反向：只要有一类真跑了，顶层 skippedReason 必须为空（不得谎称整轮没做事）",
+          st.get("skippedReason") is None, str(st.get("skippedReason")))
+
+
+def test_gate_skipped_sync_leg_still_chains_refresh() -> None:
+    """甲-1 之后贵的腿在刷新侧 ⇒ 同步腿被跳过**不等于**今天没事可做，刷新照常问一次。"""
+    _r, refresh, legs = _run_two_legs(sync_resp=_Resp(_skipped_body(["stock", "fund"])))
+    urls = [u for u, _t in legs.calls]
+    check("#23：同步腿 skipped ⇒ 仍然发起刷新腿（两次调用）",
+          len(urls) == 2 and "market/refresh" in urls[1], str(urls))
+    check("#23：这一档的 skippedReason 不得写成『web 未接活』那一类危害说明",
+          "不触发" not in str(refresh.get("skippedReason") or ""), str(refresh)[:200])
+
+
+def test_gate_refresh_leg_reports_its_own_skip() -> None:
+    """刷新腿那一侧：web 逐类都带 skipped ⇒ lastRefresh 自己说 skipped，不说 completed。"""
+    body = {
+        "tookMs": 15,
+        "results": [
+            {"type": t, "total": 0, "updated": 0, "failedBatches": 0, "tookMs": 0,
+             "skipped": True, "snapshotAt": "2026-10-02T02:20:00.000Z"}
+            for t in ["stock", "fund", "bond"]
+        ],
+    }
+    _r, refresh, _legs = _run_two_legs(
+        sync_resp=_Resp({"ok": True, "tookMs": 1, "results": [{"type": "stock", "count": 1}]}),
+        refresh_resp=_Resp(body),
+    )
+    check("#23：刷新腿整轮被挡 → outcome=skipped（不是 completed）",
+          refresh.get("outcome") == "skipped", str(refresh.get("outcome")))
+    check("#23：刷新腿给出 already-refreshed-today ＋ 判据列名（可归因，R16）",
+          "already-refreshed-today" in str(refresh.get("skippedReason") or "")
+          and "snapshotAt" in str(refresh.get("skippedReason") or ""),
+          str(refresh.get("skippedReason")))
+    check("#23：被挡时 ok 仍为真（web 回答了，且没有失败批次）",
+          refresh.get("ok") is True, repr(refresh.get("ok")))
+
+
+def test_gate_force_reaches_both_legs() -> None:
+    """#23(vi) 的出口：force 必须一路带到两条腿的 URL 上，否则"就是要重跑"做不到。"""
+    _r, _refresh, legs = _run_two_legs(
+        sync_resp=_Resp({"ok": True, "tookMs": 1, "results": []}),
+        refresh_resp=_Resp({"tookMs": 1, "results": []}),
+    )
+    orig = requests.post
+    legs2 = _Legs(sync_resp=_Resp({"ok": True, "tookMs": 1, "results": []}))
+    requests.post = legs2  # type: ignore[assignment]
+    saved = dict(ss._state)
+    try:
+        ss._state["running"] = True
+        ss._state["lastRefresh"] = None
+        ss._execute("unit-test", True)
+        urls = [u for u, _t in legs2.calls]
+        check("#23🔁：force=True ⇒ 同步腿带 ?force=1", "?force=1" in urls[0], str(urls))
+        check("#23：force=True ⇒ 链式刷新腿也带 &force=1（一次决定，两条腿都越过闸门）",
+              "&force=1" in urls[1], str(urls))
+    finally:
+        requests.post = orig
+        ss._state.clear()
+        ss._state.update(saved)
+    check("#23🔁 反向：不带 force 时两条 URL 都不出现 force（默认必须走闸门）",
+          all("force" not in u for u, _t in legs.calls), str([u for u, _t in legs.calls]))
+
+
+def test_gate_lastdate_untouched_by_skip() -> None:
+    """「两道叠加」的另一半证明：本刀没把内存 `lastDate` 换成磁盘判据。
+
+    CR9-28 那条"失败轮仍置 lastDate（不重试是有意设计）"由 `test_lastdate_set_even_on_partial`
+    钉着；这里补的是**跳过轮**同样置位——若哪天有人想"跳过就别置位，好让它重试"，
+    本断言会红并要求同步改文档（同上一条的口径）。
+    """
+    _r, st = _run_inline(_skipped_body(["stock"]))
+    check("#23：被闸门跳过 ⇒ 内存 lastDate 仍照常置位（叠加而非替换，CR9-28 不改判）",
+          st.get("lastDate") == ss.beijing_today(), str(st.get("lastDate")))
+    check("#23：同一轮里顶层 skippedReason 也说得出被挡（两个判据各管各的、不互相覆盖）",
+          "already-synced-today" in str(st.get("skippedReason")), str(st.get("skippedReason")))
+
+
 def main() -> int:
     test_partial_failure_is_not_ok()
     test_full_success_is_ok()
@@ -390,6 +540,12 @@ def main() -> int:
     test_refresh_leg_own_outcome_semantics()
     test_status_exposes_skip_and_refresh()
     test_run_now_claim_clears_skip_reason()
+    test_gate_skipped_round_is_not_completed()
+    test_gate_partial_skip_keeps_other_outcomes()
+    test_gate_skipped_sync_leg_still_chains_refresh()
+    test_gate_refresh_leg_reports_its_own_skip()
+    test_gate_force_reaches_both_legs()
+    test_gate_lastdate_untouched_by_skip()
     passed = sum(1 for _n, ok, _d in results if ok)
     for name, ok, detail in results:
         if not ok:

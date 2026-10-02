@@ -29,6 +29,9 @@ const dsGet = vi.fn();
 vi.mock("@/lib/data-service", () => ({ dsGet: (...a: unknown[]) => dsGet(...a) }));
 // 刷新腿拆出去之后，本模块**不应再引用**它——留着 mock 是为了能断"没被调用"
 vi.mock("./market-snapshot", () => ({ refreshSnapshot: (...a: unknown[]) => refreshSnapshot(...a) }));
+// #23 当日幂等闸门的磁盘判据（`MAX(updatedAt)` 是否落在北京今日）——闸门语义的用例点名控制它
+const listSyncedToday = vi.fn();
+vi.mock("./freshness", () => ({ listSyncedToday: (...a: unknown[]) => listSyncedToday(...a) }));
 
 import { syncType } from "./sync";
 
@@ -61,6 +64,7 @@ describe("sync 列表腿与刷新腿拆分（刀 3/甲-1 契约）", () => {
     transaction.mockReset().mockResolvedValue(undefined);
     dsGet.mockReset();
     refreshSnapshot.mockReset();
+    listSyncedToday.mockReset().mockResolvedValue(null); // 默认：今日没同步过 ⇒ 闸门放行
   });
 
   it("列表写入的行：价格两列为 null，且根本不碰 snapshotAt", async () => {
@@ -113,5 +117,64 @@ describe("sync 列表腿与刷新腿拆分（刀 3/甲-1 契约）", () => {
     const [a, b] = await Promise.all([syncType("stock"), syncType("stock")]);
     expect(dsGet).toHaveBeenCalledTimes(1);
     expect(a).toBe(b);
+  });
+});
+
+// #23 当日幂等闸门（主人 2026-10-02 拍板"两道叠加"）——治的是"当天成功过之后，
+// 重启／手动／探针再来一整轮"。ds 侧那条内存 `lastDate` 保留不动，这里加磁盘这一条。
+describe("sync 当日幂等闸门（#23，同步腿这一侧）", () => {
+  beforeEach(() => {
+    count.mockReset().mockResolvedValue(0);
+    executeRawUnsafe.mockReset().mockResolvedValue(0);
+    transaction.mockReset().mockResolvedValue(undefined);
+    dsGet.mockReset();
+    refreshSnapshot.mockReset();
+    listSyncedToday.mockReset().mockResolvedValue(null);
+  });
+
+  it("今日已落过列表 ⇒ 跳过：零次取数、零条写库 SQL", async () => {
+    listSyncedToday.mockResolvedValue(new Date("2026-10-01T18:11:00.000Z")); // 北京 10-02 02:11
+    const r = await syncType("stock");
+    expect(dsGet).not.toHaveBeenCalled();
+    expect(executeRawUnsafe).not.toHaveBeenCalled();
+    expect(r.skipped).toBe(true);
+    expect(r.count).toBeUndefined();
+    expect(r.error).toBeUndefined(); // 跳过**不是**失败：web 的 `ok` 由 !error 导出，不得被它翻假
+  });
+
+  it("跳过时说得出「哪个时刻」＋「带 ?force=1 才能重跑」（#21：能做成状态位的别做成日志）", async () => {
+    listSyncedToday.mockResolvedValue(new Date("2026-10-01T18:11:00.000Z"));
+    const r = await syncType("fund");
+    expect(r.note).toContain("今日已同步");
+    expect(r.note).toContain("2026-10-02 02:11"); // 北京墙上时间，不是 UTC 那一份
+    expect(r.note).toContain("force");
+  });
+
+  it("🔁 反向：判据为 null（今日没跑过／昨天跑的）⇒ 照常整跑一轮，闸门不得饿死当天", async () => {
+    dsGet.mockResolvedValue({ count: 2, products: products(2) });
+    const r = await syncType("stock");
+    expect(dsGet).toHaveBeenCalledTimes(1);
+    expect(r.skipped).toBeUndefined();
+    expect(r.count).toBe(2);
+  });
+
+  it("🔁 反向：?force=1 越过闸门（主人手测前要重刷数据，不能被自己的闸门挡住）", async () => {
+    listSyncedToday.mockResolvedValue(new Date("2026-10-01T18:11:00.000Z"));
+    dsGet.mockResolvedValue({ count: 2, products: products(2) });
+    const r = await syncType("stock", { force: true });
+    expect(dsGet).toHaveBeenCalledTimes(1);
+    expect(r.skipped).toBeUndefined();
+    expect(listSyncedToday).not.toHaveBeenCalled(); // 带 force 时连那次读库都不该发生
+  });
+
+  it("闸门是逐类的：只挡今天跑过的那一类，失败过的类当天仍可单独重跑", async () => {
+    dsGet.mockResolvedValue({ count: 1, products: products(1) });
+    listSyncedToday.mockImplementation(async (t: unknown) =>
+      t === "stock" ? new Date("2026-10-01T18:11:00.000Z") : null,
+    );
+    const [stock, hk] = await Promise.all([syncType("stock"), syncType("hk")]);
+    expect(stock.skipped).toBe(true);
+    expect(hk.skipped).toBeUndefined();
+    expect(dsGet).toHaveBeenCalledTimes(1); // 只有 hk 那一次出网
   });
 });

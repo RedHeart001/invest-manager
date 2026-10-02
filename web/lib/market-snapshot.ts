@@ -9,7 +9,9 @@
 //   任一批次失败不中断整体（R10），返回失败计数
 
 import { fetchQuotes } from "./data-service";
+import { snapshotRefreshedToday } from "./freshness";
 import { prisma } from "./prisma";
+import { beijingStamp } from "./time";
 
 const BATCH = 100;
 
@@ -51,6 +53,11 @@ type SnapshotResult = {
   tookMs: number;
   /** 本轮写入的快照时刻（ISO）；一批都没写成功时为 null（刀 1/#22(b)） */
   snapshotAt: string | null;
+  /** #23 当日幂等闸门（甲-1 之后**贵的那条腿在这里**）：该类今日已刷过 ⇒
+   *  本轮零出网、零写库，`snapshotAt` 回填库里已有的那个时刻而不是新时刻 */
+  skipped?: boolean;
+  /** 被挡下时自己说清"哪一列、几点"（#21 同族：能做成状态位的别做成日志） */
+  skippedReason?: string;
 };
 
 function sleep(ms: number): Promise<void> {
@@ -121,12 +128,47 @@ const inflight: Map<string, Promise<SnapshotResult>> = ((
   globalThis as unknown as Record<symbol, Map<string, Promise<SnapshotResult>> | undefined>
 )[INFLIGHT_KEY] ??= new Map());
 
-export function refreshSnapshot(type: string): Promise<SnapshotResult> {
+export function refreshSnapshot(
+  type: string,
+  opts: { force?: boolean } = {},
+): Promise<SnapshotResult> {
   const hit = inflight.get(type);
   if (hit) return hit;
-  const p = refreshSnapshotInner(type).finally(() => inflight.delete(type));
+  const p = _refreshGated(type, opts.force === true).finally(() => inflight.delete(type));
   inflight.set(type, p);
   return p;
+}
+
+/** #23 当日幂等闸门（刷新腿这一侧＝**真正贵的那条**）
+ *
+ * 刀 3/甲-1 之后 `/api/sync` 只剩取列表（≈1 分钟、5 个桶位），那 ≈1,700s 的净值/行情批次
+ * 搬进了本模块 ⇒ "重复触发会烧额度"这件事的落点随之搬到这里（#23(v)）。
+ * 磁盘判据正好是刀 1 为 #22(b) 装的那一列 `snapshotAt`：**新鲜度标记与幂等判据是同一列**，
+ * 这是那条决定之外的第二个用途，也是"陈旧才说话"必须真实可信的原因——
+ * 一旦这句话能上屏，它同时就在给闸门当值。
+ *
+ * 跳过时 `updated/failedBatches` 都记 0（本轮确实一批都没发），`snapshotAt` 回填库里
+ * **已有**的那个时刻而不是新时刻：状态位不能因为"有人问了一次"就把自己说成刚刷过。
+ */
+async function _refreshGated(type: string, force: boolean): Promise<SnapshotResult> {
+  if (!force) {
+    const doneAt = await snapshotRefreshedToday(type);
+    if (doneAt) {
+      const reason =
+        `今日已刷新（快照时刻 ${beijingStamp(doneAt)}），本轮不重复取数；确要重刷带 ?force=1`;
+      return {
+        type,
+        total: 0,
+        updated: 0,
+        failedBatches: 0,
+        tookMs: 0,
+        snapshotAt: doneAt.toISOString(),
+        skipped: true,
+        skippedReason: reason,
+      };
+    }
+  }
+  return refreshSnapshotInner(type);
 }
 
 async function refreshSnapshotInner(type: string): Promise<SnapshotResult> {
@@ -193,10 +235,13 @@ async function refreshSnapshotInner(type: string): Promise<SnapshotResult> {
   };
 }
 
-export async function refreshAll(types: string[]): Promise<SnapshotResult[]> {
+export async function refreshAll(
+  types: string[],
+  opts: { force?: boolean } = {},
+): Promise<SnapshotResult[]> {
   const results: SnapshotResult[] = [];
   for (const t of types) {
-    results.push(await refreshSnapshot(t));
+    results.push(await refreshSnapshot(t, opts));
   }
   return results;
 }

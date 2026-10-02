@@ -31,7 +31,11 @@ export async function POST(req: NextRequest) {
     );
   }
   const started = Date.now();
-  const results = type ? [await syncType(type)] : await syncAll();
+  // #23 当日幂等闸门（主人 10-02 拍板"两道叠加"）：某类今日已成功落过列表 ⇒ 该类本轮
+  // 零出网、零写库，结果里带 `skipped:true`（**不是** error，所以 `ok` 仍为真）。
+  // 出口 `?force=1` 给"我今天就是要重跑一遍"（手测前刷数据、以及 ds 侧的透传）。
+  const force = req.nextUrl.searchParams.get("force") === "1";
+  const results = type ? [await syncType(type, { force })] : await syncAll(SYNC_TYPES, { force });
   return NextResponse.json({
     tookMs: Date.now() - started,
     results,

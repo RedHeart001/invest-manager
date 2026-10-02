@@ -42,9 +42,15 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: `unsupported type: ${type}` }, { status: 400 });
   }
   const started = Date.now();
+  // #23 当日幂等闸门：这一条腿才是甲-1 之后**真正贵的那条**（10-01 实测 fund 的 280 个
+  // 净值批次单独 ≈1,700s），判据＝该类今日有没有 `snapshotAt`；逐类各自判 ⇒
+  // "列表今天到位了、快照还没到位"这种最需要补的形态照常放行（`?force=1` 为总出口）。
+  const force = req.nextUrl.searchParams.get("force") === "1";
   try {
     const results =
-      types.length === 1 ? [await refreshSnapshot(types[0])] : await refreshAll(types);
+      types.length === 1
+        ? [await refreshSnapshot(types[0], { force })]
+        : await refreshAll(types, { force });
     return NextResponse.json({
       tookMs: Date.now() - started,
       results,

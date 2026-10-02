@@ -4,8 +4,10 @@
 import { randomUUID } from "node:crypto";
 
 import { dsGet } from "./data-service";
+import { listSyncedToday } from "./freshness";
 import { prisma } from "./prisma";
 import { buildSearchText } from "./search-text";
+import { beijingStamp } from "./time";
 
 // G6（批次 D）：新增 hk（港股）——data-service 已提供 provider 与列表接口
 export const SYNC_TYPES = ["stock", "fund", "bond", "crypto", "hk"] as const;
@@ -33,6 +35,10 @@ export type SyncResult = {
   error?: string;
   note?: string;
   tookMs: number;
+  /** #23 当日幂等闸门：该类**今日已成功落过列表** ⇒ 本轮不动它（零出网、零写库）。
+   *  刻意不算 `error`——web 的 `ok` 是 `results.every(r => !r.error)`，跳过不是失败；
+   *  data-service 侧则按"整轮都是 skipped"给出 `outcome="skipped"`（第六态）。 */
+  skipped?: boolean;
 };
 
 const CHUNK = 500;
@@ -87,7 +93,10 @@ async function ensureStageTable(type: string): Promise<string> {
   return table;
 }
 
-export async function syncType(type: string): Promise<SyncResult> {
+export async function syncType(
+  type: string,
+  opts: { force?: boolean } = {},
+): Promise<SyncResult> {
   // 并发保护（2026-09-13 code review）：分型暂存表名是固定的 Product_stage_<type>，
   // 两次同类型并发同步会互相清除对方写入的暂存行 → 事务可能只拷入不完整集合，
   // 造成 Product 表该类型数据丢失。`/api/sync` 可被定时任务与手动同时触发，故加单飞。
@@ -98,13 +107,45 @@ export async function syncType(type: string): Promise<SyncResult> {
   // （_syncTypeInner 内部已 try/catch 永不 reject，直接返回该 Promise 语义正确。）
   const inflight = syncInflight.get(type);
   if (inflight) return inflight;
-  const run = _syncTypeInner(type);
+  const run = _syncTypeGated(type, opts.force === true);
   syncInflight.set(type, run);
   try {
     return await run;
   } finally {
     if (syncInflight.get(type) === run) syncInflight.delete(type);
   }
+}
+
+/** #23 当日幂等闸门（同步腿这一侧，主人 2026-10-02 拍板"两道叠加"）
+ *
+ * 要治的形态：data-service 的 `lastDate` 是**内存**态且只管启动补跑那一条路，
+ * ⇒ 过了 02:00 之后每重启一次 ds 就会再补跑一整轮（10-01 为跑门禁重启五次就是这形态，
+ * 全靠 `SYNC_CATCHUP=off` 挡着，而那是测试开关、不是生产默认）。磁盘这一条补的是
+ * "当天已经成功落过 ⇒ 连重启、手动、探针都不再来一次"——**叠加**在内存那条之上，
+ * 所以 CR9-28「失败轮不自动重试」那两个被测试钉住的既有取舍不必改判。
+ *
+ * 判据取 `MAX(updatedAt)` 的**北京日**（`lib/freshness.ts`：list 阶段是整表删旧插新，
+ * 这一列因此是"这一类的主数据什么时候换过"的唯一痕迹；快照刷新走 raw SQL 刻意不碰它）。
+ * 逐类粒度还带来一个附带好处：一整轮里只有 stock 失败的日子，次日之前**单独**重跑 stock
+ * 仍然放行，而其他四类不会被陪着再烧一遍额度。
+ *
+ * 出口 `?force=1`（#23(vi)）：没有它，"我今天就是要重刷一遍"会撞上自己的闸门。
+ */
+async function _syncTypeGated(type: string, force: boolean): Promise<SyncResult> {
+  if (!force) {
+    const doneAt = await listSyncedToday(type);
+    if (doneAt) {
+      return {
+        type,
+        skipped: true,
+        note:
+          `今日已同步（列表时刻 ${beijingStamp(doneAt)}），本轮不重复触发取数；` +
+          "确要重跑带 ?force=1",
+        tookMs: 0,
+      };
+    }
+  }
+  return _syncTypeInner(type);
 }
 
 async function _syncTypeInner(type: string): Promise<SyncResult> {
@@ -287,10 +328,13 @@ export async function rebuildFts(type: string): Promise<void> {
   }
 }
 
-export async function syncAll(types: readonly string[] = SYNC_TYPES): Promise<SyncResult[]> {
+export async function syncAll(
+  types: readonly string[] = SYNC_TYPES,
+  opts: { force?: boolean } = {},
+): Promise<SyncResult[]> {
   const results: SyncResult[] = [];
   for (const t of types) {
-    results.push(await syncType(t));
+    results.push(await syncType(t, opts));
   }
   return results;
 }

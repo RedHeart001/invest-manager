@@ -15,6 +15,13 @@
 data-service 只负责"按时触发"。**刀 3/甲-1（2026-10-02）起一轮有两个动作**：同步腿
 `POST /api/sync`（只取列表）收尾后**链式**触发刷新腿 `POST /api/market/refresh?type=all`，
 两条腿各拿各的预算——理由与实测基数见下面 `REFRESH_CALLBACK_TIMEOUT_S` 那段。
+
+**当日幂等（#23，主人 2026-10-02 拍板"两道叠加"）**：闸门长在 web 侧（本服务无状态、
+不直连库，拿不到"今天落库过没有"这个事实），判据是 `Product` 的两列——
+列表看 `MAX(updatedAt)`、刷新看 `MAX(snapshotAt)`。本模块这边只做三件事：
+把 `force` 透传下去、认 web 回的行内 `skipped` 标记（整轮都跳过 ⇒ `outcome="skipped"`
+第六态 ＋ 一句可 curl 出的 `skippedReason`），以及**保持内存 `lastDate` 原样不动**
+（它管"同进程内当天只试一次，含失败轮"，正是 CR9-28 那条被测试钉住的取舍）。
 """
 
 from __future__ import annotations
@@ -70,8 +77,11 @@ CATCHUP_TRIGGER = "startup-catchup"
 REFRESH_CALLBACK_TIMEOUT_S = 2400.0
 REFRESH_URL_PATH = "/api/market/refresh?type=all"
 
-# 只有"web 真的回答完了列表"才值得接刷新腿（见 `_chain_refresh` 那段）
-CHAINED_OUTCOMES = ("completed", "partial_failed")
+# 只有"web 真的回答完了列表"才值得接刷新腿（见 `_chain_refresh` 那段）。
+# #23（主人 10-02 拍板"两道叠加"）之后 `skipped` 也进这一组，理由要说清：
+# 同步腿被当日闸门挡下＝**列表这件事今天已经收尾了**（web 用 `MAX(updatedAt)` 作证），
+# 而"列表到位、快照没到位"恰恰是最需要补的那一类 ⇒ 不能因为前一条腿跳过就连带废掉后一条。
+CHAINED_OUTCOMES = ("completed", "partial_failed", "skipped")
 
 
 def _callback_timeout_s(trigger: str) -> float:
@@ -111,20 +121,25 @@ def _web_base() -> str:
     return os.environ.get("WEB_BASE_URL", "http://localhost:3000")
 
 
-def _refresh_leg(trigger: str) -> dict:
+def _refresh_leg(trigger: str, force: bool = False) -> dict:
     """刷新腿（刀 3/甲-1）：`POST /api/market/refresh?type=all`，自带 2400s 预算。
 
     语义与同步腿同族、不另立一套：`ok` **只在 web 真的回答了时才带真/假**（CR9-28），
     读超时＝`ok=None` ＋ `outcome="inconclusive"`（C3-③：web 侧仍在写，不是失败）。
     差别只在判据来源——web 的这个端点**不返回 `ok`**，所以 `ok` 由逐类 `failedBatches`
     导出（任一类有失败批次即假），而不是替 web 下结论。
+
+    #23：web 侧对**逐类**各自判当日幂等（`snapshotAt` 那一列），整轮都被挡下时
+    `results` 里每行都带 `skipped` ⇒ 本腿给 `outcome="skipped"`，既不是 completed
+    （没跑却记完成＝撒谎，CR9-28 的同类病）也不是 rejected（那是 4xx）。
     """
     import requests
 
     started = time.time()
     timeout_s = REFRESH_CALLBACK_TIMEOUT_S
+    url = f"{_web_base()}{REFRESH_URL_PATH}" + ("&force=1" if force else "")
     try:
-        r = requests.post(f"{_web_base()}{REFRESH_URL_PATH}", timeout=timeout_s)
+        r = requests.post(url, timeout=timeout_s)
         if r.status_code >= 300:
             out: dict = {
                 "ok": None,
@@ -141,12 +156,26 @@ def _refresh_leg(trigger: str) -> dict:
                 for x in results
                 if isinstance(x, dict) and int(x.get("failedBatches") or 0) > 0
             ]
+            held = [
+                str(x.get("type"))
+                for x in results
+                if isinstance(x, dict) and x.get("skipped")
+            ]
+            all_held = bool(results) and len(held) == len(results)
             out = {
                 "ok": not weak,
                 "tookMs": body.get("tookMs"),
                 "results": results,
-                "outcome": "partial_failed" if weak else "completed",
+                "outcome": "skipped" if all_held else ("partial_failed" if weak else "completed"),
             }
+            if all_held:
+                out["skippedReason"] = (
+                    f"already-refreshed-today: {', '.join(held)}——web 的当日幂等闸门"
+                    "（判据 `Product.snapshotAt`＝今日）；确要重刷走 /sync/run?force=true"
+                )
+                out["note"] = out["skippedReason"]
+            if held and not all_held:
+                out["skippedTypes"] = held
             if weak:
                 out["weakTypes"] = weak
                 # 与同步腿同一取舍：只把缺口显式暴露，不自动重试（重试＝再占 40 分钟东财桶）
@@ -175,18 +204,21 @@ def _refresh_leg(trigger: str) -> dict:
     return out
 
 
-def _chain_refresh(trigger: str, sync_result: dict) -> dict:
+def _chain_refresh(trigger: str, sync_result: dict, force: bool = False) -> dict:
     """同步腿收尾后决定是否接刷新腿，并返回刷新腿的结果（刀 3/甲-1）。
 
     判据不是"成功才刷"这么简单，而是**"web 有没有把列表这件事收尾"**：
       · `completed` / `partial_failed` ⇒ 整表删旧插新已经结束，此刻刷价格写的是最终集合；
+      · `skipped`（#23 当日幂等闸门）⇒ 列表**今天已经收尾过**，照样得试刷新腿——
+        "列表到位、快照没到位"恰恰是最需要补的那一类；真没事可做时刷新腿自己返回
+        `outcome="skipped"`，代价只是两次毫秒级读库，一次网也不出；
       · `inconclusive`（读超时）⇒ web 可能还在写库，两个写事务叠在一起会把刷新结果
         写进**即将被删除的行**（`sync.ts` 的 list 阶段是 DELETE＋INSERT）；
       · `rejected` / `failed` ⇒ web 根本没接活，刷新的还是昨天那批行，等于白花额度。
     """
     outcome = sync_result.get("outcome")
     if outcome in CHAINED_OUTCOMES:
-        return _refresh_leg(trigger)
+        return _refresh_leg(trigger, force)
     return {
         "ok": None,
         "outcome": "skipped",
@@ -202,13 +234,16 @@ def _chain_refresh(trigger: str, sync_result: dict) -> dict:
     }
 
 
-def _execute(trigger: str) -> dict:
+def _execute(trigger: str, force: bool = False) -> dict:
     """回调 web /api/sync 并收尾（调用方须已认领 running）。
 
     状态位不变量（刀 1/#20②）：`ok` **只有在 web 真的回答了时才带真/假值**（CR9-28：
     抄 web 的判定，不自己下结论）；web 没回答（读超时／连接失败／被拒绝）一律
     `ok=None` ＋ `outcome` 说明是哪一种（`inconclusive` / `failed` / `rejected`）。
     「不是失败」不等于「成功」，这个区别必须能被机器读出来。
+
+    #23 加第六态 `skipped`：web 的当日幂等闸门把**整轮**都挡下时，"没跑"既不能记
+    completed（没做事却记完成＝撒谎，正是 CR9-28 那个病），也不是 rejected（那才是 4xx）。
     """
     import requests
 
@@ -218,8 +253,11 @@ def _execute(trigger: str) -> dict:
     # CR9-33（2026-09-27）：预算按**触发形态**取数（补跑态实测 ≥29min，会打穿 1800s），
     # 依据见上面 `SCHEDULED_CALLBACK_TIMEOUT_S` 一组常量；形态由 `trigger` 带进来。
     timeout_s = _callback_timeout_s(trigger)
+    # #23(vi)：`force` 由 `POST /sync/run?force=true` 一路透传到这里——没有这个出口，
+    # 主人"今天就是要重刷一遍"会撞上自己的闸门（闸门的用途是防手滑，不是防他）。
+    url = f"{_web_base()}/api/sync" + ("?force=1" if force else "")
     try:
-        r = requests.post(f"{_web_base()}/api/sync", timeout=timeout_s)
+        r = requests.post(url, timeout=timeout_s)
         if r.status_code >= 300:
             result = {
                 "ok": None,
@@ -232,6 +270,8 @@ def _execute(trigger: str) -> dict:
             body = r.json() or {}
             results = body.get("results") or []
             failed = [str(x.get("type")) for x in results if isinstance(x, dict) and x.get("error")]
+            held = [str(x.get("type")) for x in results if isinstance(x, dict) and x.get("skipped")]
+            all_held = bool(results) and len(held) == len(results)
             # CR9-28：web 侧返回的是真 ok（`results.every(r => !r.error)`），
             # 此前这里硬写 `ok: True` → 5 类里 4 类失败也被记成"同步成功"
             # （09-26 实测：lastResult.ok=true，而 stock/bond/crypto/hk 全带 error）。
@@ -242,8 +282,17 @@ def _execute(trigger: str) -> dict:
                 "ok": bool(body.get("ok")),
                 "tookMs": body.get("tookMs"),
                 "results": results,
-                "outcome": "partial_failed" if failed else "completed",
+                "outcome": "skipped" if all_held else ("partial_failed" if failed else "completed"),
             }
+            if all_held:
+                result["skippedReason"] = (
+                    f"already-synced-today: {', '.join(held)}——web 的当日幂等闸门"
+                    "（判据 `Product.updatedAt`＝今日，#23）；"
+                    "确要重跑走 POST /sync/run?force=true"
+                )
+            if held and not all_held:
+                # 逐类粒度：只有失败过的那一类当天还能重跑，成功过的不陪着再烧一遍额度
+                result["skippedTypes"] = held
             if failed:
                 result["failedTypes"] = failed
                 # 失败类型不自动重试是有意取舍：整轮同步实测 9.6~13min，
@@ -289,8 +338,10 @@ def _execute(trigger: str) -> dict:
         _state["lastDate"] = beijing_today()
         _state["lastResult"] = result
         _state["runs"] += 1
-        # #21：真跑起来了 ⇒ 上一条"为什么没跑"作废
-        _state["skippedReason"] = None
+        # #21＋#23：这一行同时管两件事——真跑起来了 ⇒ 上一条"为什么没跑"作废（None）；
+        # 整轮被 web 的当日幂等闸门挡下 ⇒ 把那条原因挂到同一个状态位上，
+        # `GET /sync/status` 一条 curl 就分得清"没到点／已经跑过／被闸门跳过"。
+        _state["skippedReason"] = result.get("skippedReason")
     result["tookMsTotal"] = int((time.time() - started) * 1000)
     # CR9-33：把本次实际生效的预算回写进状态，`GET /sync/status` 才说得出
     # "这轮用的是哪个形态的预算"（否则超时说明只能靠读代码对）。
@@ -300,14 +351,14 @@ def _execute(trigger: str) -> dict:
     # ⇒ 单飞（`run_now` 只看 `running`）自动覆盖整轮两条腿，刷新还在跑时再点同步会被挡。
     # 为什么不排成第二个 cron：拆腿后列表阶段会把新行的 lastPrice 抹成 null（整表删旧插新），
     # 两个固定时刻之间的间隔就是"分类浏览无价"的窗口——链式触发把它压到只剩一次 HTTP 往返。
-    refresh = _chain_refresh(trigger, result)
+    refresh = _chain_refresh(trigger, result, force)
     with _lock:
         _state["lastRefresh"] = refresh
         _state["running"] = False
     return result
 
 
-def run_now(trigger: str = "manual") -> dict:
+def run_now(trigger: str = "manual", force: bool = False) -> dict:
     """手动/补跑触发（C4/CR7-10 异步化，2026-09-25 拍板）。
 
     此前在请求线程内同步跑完整个同步（15min+ 级），HTTP 请求全程挂着；
@@ -317,6 +368,7 @@ def run_now(trigger: str = "manual") -> dict:
     进度观测：`GET /sync/status`（running 字段 + 最近一次 results）。
     ⚠️ 刀 3/甲-1 之后 `running` **覆盖整轮两条腿**（同步腿＋链式刷新腿）⇒ 刷新还在跑时
     这里同样返回未认领，这正是我们要的：手动补跑不会叠在一条正在写快照的腿上。
+    `force`（#23(vi)）＝越过 web 侧的当日幂等闸门，两条腿都带过去。
     """
     with _lock:
         if _state["running"]:
@@ -329,7 +381,9 @@ def run_now(trigger: str = "manual") -> dict:
         # 三条触发路径——cron／手动／启动补跑——都经过这里）
         _state["skippedReason"] = None
     try:
-        threading.Thread(target=_execute, args=(trigger,), name="sync-manual", daemon=True).start()
+        threading.Thread(
+            target=_execute, args=(trigger, force), name="sync-manual", daemon=True
+        ).start()
     except Exception:  # noqa: BLE001 CR4：线程启动失败要回滚 running，否则永久卡 True
         with _lock:
             _state["running"] = False

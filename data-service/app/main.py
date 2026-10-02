@@ -299,14 +299,19 @@ def hotspots_status():
 
 
 @app.post("/sync/run")
-def sync_run(trigger: str = Query("manual-ui", description="触发来源标注")):
+def sync_run(
+    trigger: str = Query("manual-ui", description="触发来源标注"),
+    force: bool = Query(False, description="越过 web 侧的当日幂等闸门（#23），两条腿都带过去"),
+):
     """手动触发产品主数据同步（G2：BFF 侧另有 /api/sync 直连入口，此为调度侧）。
 
     C4（CR7-10，2026-09-25）：异步化——认领后立即返回 `{accepted: true}`，
     同步由后台线程执行（15min+ 级）；进度见 `GET /sync/status`。
     已在跑时返回 `{accepted: false, note: ...}`（原 skipped 语义并入 accepted）。
+    `?force=true`（#23(vi)）：当天已经同步过一轮时，默认会被 web 的当日闸门跳过
+    （状态位里看得见原因）；确实要重跑才带这个参数，它透传到两条腿的 URL 上。
     """
-    return sync_scheduler.run_now(trigger=trigger)
+    return sync_scheduler.run_now(trigger=trigger, force=force)
 
 
 @app.get("/sync/status")

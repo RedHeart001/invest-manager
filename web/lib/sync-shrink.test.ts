@@ -18,6 +18,9 @@ vi.mock("@/lib/prisma", () => ({
 const dsGet = vi.fn();
 vi.mock("@/lib/data-service", () => ({ dsGet: (...a: unknown[]) => dsGet(...a) }));
 vi.mock("./market-snapshot", () => ({ refreshSnapshot: vi.fn() }));
+// #23 的当日闸门默认放行（本文件测的是缩水保护，不是闸门）：不 mock 它会去打
+// `prisma.product.findFirst`，而上面的 prisma 桩里没有这个方法。
+vi.mock("./freshness", () => ({ listSyncedToday: vi.fn(async () => null) }));
 
 import { syncType } from "./sync";
 
