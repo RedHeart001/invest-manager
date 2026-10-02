@@ -17,6 +17,7 @@
 
 import os
 import sys
+import time
 import types
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -347,6 +348,36 @@ def test_status_exposes_skip_and_refresh() -> None:
         ss._state.update(saved)
 
 
+def test_run_now_claim_clears_skip_reason() -> None:
+    """#21 的另一半：**认领成功**就清空上一条跳过原因（清空只放在这一个入口）。
+
+    三条触发路径（cron／手动／启动补跑）都经过 `run_now`，所以只在它认领的那一刻清。
+    后台线程由假 web 喂着跑完两条腿，`running` 到两条腿都收尾才放开（甲-1 的单飞口径）。
+    """
+    saved = dict(ss._state)
+    orig = requests.post
+    legs = _Legs(sync_resp=_Resp({"ok": True, "tookMs": 1, "results": []}))
+    requests.post = legs  # type: ignore[assignment]
+    try:
+        ss._state.update({"running": False, "skippedReason": "catchup: SYNC_CATCHUP=off",
+                          "lastRefresh": None})
+        out = ss.run_now("unit-test")
+        check("#21：run_now 认领成功 ⇒ 上一条 skippedReason 立即作废",
+              out.get("accepted") is True and ss._state.get("skippedReason") is None,
+              f"{out} / {ss._state.get('skippedReason')}")
+        for _ in range(200):  # 等后台线程把两条腿跑完（假 web 立即返回，不联网）
+            if not ss._state["running"]:
+                break
+            time.sleep(0.02)
+        check("甲-1：后台线程跑完**两条腿**才放开 running（单飞覆盖整轮）",
+              ss._state["running"] is False and len(legs.calls) == 2,
+              f"running={ss._state['running']} calls={len(legs.calls)}")
+    finally:
+        requests.post = orig
+        ss._state.clear()
+        ss._state.update(saved)
+
+
 def main() -> int:
     test_partial_failure_is_not_ok()
     test_full_success_is_ok()
@@ -358,6 +389,7 @@ def main() -> int:
     test_chain_refresh_skipped_when_sync_leg_unanswered()
     test_refresh_leg_own_outcome_semantics()
     test_status_exposes_skip_and_refresh()
+    test_run_now_claim_clears_skip_reason()
     passed = sum(1 for _n, ok, _d in results if ok)
     for name, ok, detail in results:
         if not ok:

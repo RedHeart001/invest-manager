@@ -281,6 +281,70 @@ def test_sync_catchup_off_switch() -> None:
         os.environ.pop("SYNC_MINUTE", None)
 
 
+def test_skip_reason_written_by_each_early_return() -> None:
+    """⑪ #21（10-01 提出、10-02 随刀 3 落地）：四条早退分支都要在状态位上留字面痕迹。
+
+    为什么不是日志：`sync_scheduler` 的 `log.info` 在 uvicorn 默认配置下**完全不打**
+    （10-01 实测整轮同步在 ds 日志里只剩四行启动信息＋访问日志），四条分支此前只能靠
+    `/sync/status` ＋ `Product.updatedAt` 反推。`GET /sync/status` 的 `skippedReason`
+    现在就是那四条答案的落点。
+    """
+    saved = dict(ss._state)
+    try:
+        # (a) SYNC_CATCHUP=off
+        os.environ["SYNC_CATCHUP"] = "off"
+        try:
+            ss._state["skippedReason"] = None
+            _run_case(_FakeHotspot(running=False, resolved=beijing_today()),
+                      at_hour=9, at_minute=0)
+            check("#21⑪：off 分支把原因写进状态位（不再只有一条打不出来的 log.info）",
+                  "SYNC_CATCHUP=off" in str(ss._state.get("skippedReason")),
+                  str(ss._state.get("skippedReason")))
+        finally:
+            os.environ.pop("SYNC_CATCHUP", None)
+
+        # (b) 未到调度时刻
+        ss._state["skippedReason"] = None
+        _run_case(_FakeHotspot(running=False, resolved=beijing_today()),
+                  at_hour=1, at_minute=30)
+        check("#21⑪：before schedule 分支写原因，并带出当前时刻与调度点（R16 可判定）",
+              "before schedule" in str(ss._state.get("skippedReason"))
+              and "01:30" in str(ss._state.get("skippedReason")),
+              str(ss._state.get("skippedReason")))
+
+        # (c) 当日已同步（lastDate 内存态）
+        ss._state["skippedReason"] = None
+        ss._state["lastDate"] = beijing_today()
+        try:
+            _run_case(_FakeHotspot(running=False, resolved=beijing_today()),
+                      at_hour=9, at_minute=0)
+            check("#21⑪：already synced today 分支写原因，并点明它是**内存态**"
+                  "（重启即失效＝待拍板 #23 要治的那个形态）",
+                  "already synced today" in str(ss._state.get("skippedReason"))
+                  and "内存态" in str(ss._state.get("skippedReason")),
+                  str(ss._state.get("skippedReason")))
+        finally:
+            ss._state["lastDate"] = None
+
+        # (d) 让位热点到上限放弃
+        ss._state["skippedReason"] = None
+        _run_case(_FakeHotspot(running=True, resolved=None))
+        check("#21⑪：热点从未结束 ⇒ 原因写\"让位热点\"（与前三条不同档，不能混读）",
+              "hotspot still running" in str(ss._state.get("skippedReason")),
+              str(ss._state.get("skippedReason")))
+
+        # 🔁 反向：真触发补跑的那条路径**不写**跳过原因（否则状态位会变成常驻噪声）
+        ss._state["skippedReason"] = None
+        r = _run_case(_FakeHotspot(running=False, resolved=beijing_today()),
+                      at_hour=9, at_minute=0)
+        check("🔁 #21⑪：照常补跑的路径不写 skippedReason（证明它不是恒填的桩）",
+              r["n"] == 1 and ss._state.get("skippedReason") is None,
+              f"{r} / {ss._state.get('skippedReason')}")
+    finally:
+        ss._state.clear()
+        ss._state.update(saved)
+
+
 def main() -> int:
     test_yields_while_hotspot_running()
     test_proceeds_when_hotspot_resolved_with_output()
@@ -292,6 +356,7 @@ def main() -> int:
     test_cr9_22_stale_resolved_from_previous_day()
     test_cr9_35_before_schedule_gate_skips_without_polling()
     test_sync_catchup_off_switch()
+    test_skip_reason_written_by_each_early_return()
     passed = sum(1 for _n, ok, _d in results if ok)
     fails = [x for x in results if not x[1]]
     for name, _ok, detail in fails:

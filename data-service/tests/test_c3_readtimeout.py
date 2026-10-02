@@ -129,6 +129,12 @@ def test_callback_timeout_by_form() -> None:
           ss.CATCHUP_CALLBACK_TIMEOUT_S > 29 * 60, f"{ss.CATCHUP_CALLBACK_TIMEOUT_S}s")
     check("CR9-33🔁：补跑态 trigger 与 _catch_up_if_needed 用的是同一个常量",
           ss.CATCHUP_TRIGGER == "startup-catchup")
+    # 刀 3/甲-1（10-02）：一轮两条腿 ⇒ 顺手钉住"刷新腿用的是它自己的预算、且不按形态分"
+    check("甲-1：刷新腿的预算恒为 REFRESH_CALLBACK_TIMEOUT_S（拆腿的目的就是各拿各的）",
+          seen.get("refresh") == ss.REFRESH_CALLBACK_TIMEOUT_S
+          and ss.REFRESH_CALLBACK_TIMEOUT_S not in
+          (ss.SCHEDULED_CALLBACK_TIMEOUT_S, ss.CATCHUP_CALLBACK_TIMEOUT_S),
+          str({k: v for k, v in seen.items() if k == 'refresh'}))
 
 
 if __name__ == "__main__":
