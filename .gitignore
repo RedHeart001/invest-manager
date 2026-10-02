@@ -36,6 +36,9 @@ verify-suites.txt
 # 上面第 11 行的 `out/` 只匹配目录，挡不住 `xxx.out`——10-01 那轮 `git status` 里
 # 因此躺着 9 个待跟踪项，一次手滑的 `git add` 就会把回执连同证据一起扫进仓库。
 data-service/*.out
+# 同族补齐（10-02 全量测试轮）：web 侧 ① 的回执（`tsc`/`vitest` 的字面输出）此前不在名单里
+# ⇒ 跑一次全量测试就在 `git status` 里留下两个待跟踪项，与上面那条防的是同一件事。
+web/*.out
 
 # npx skills 的"通用位"产物：只有 Codex 等其他 agent 读它，Claude Code 只读 .claude/skills/
 # 技能实体已落在 .claude/skills/<name>/，故此处忽略，避免同一份内容在仓库里存两份
