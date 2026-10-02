@@ -10,6 +10,8 @@
 //  8. 基金持仓 / 国债收益率曲线（降级容忍）
 // 纪律：失败最多重试 3 次（用户 2026-09-12 指示）；东财限流规避：节流间隔 + 空结果退避重试
 
+import { INGEST_TOKEN } from "./ingest-token.mjs";
+
 const BASE = process.env.TEST_BASE ?? "http://localhost:3000";
 const DATA = process.env.TEST_DATA ?? "http://localhost:8000";
 
@@ -432,7 +434,11 @@ async function main() {
 
     const junkIngest = await fetch(`${BASE}/api/research/ingest`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        // 配了才带：这条断言判的是"标的核验"那一层，不能被前置的 401 截住
+        ...(INGEST_TOKEN ? { "x-ingest-token": INGEST_TOKEN } : {}),
+      },
       body: JSON.stringify({ type: "zzz_garbage", code: "600519", status: "done", summary: "x" }),
     });
     ok("刀2：研报回调的未知标的 → 400（语义白名单，不写库；09-14 的枚举禁令仍有效）",

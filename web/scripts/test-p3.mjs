@@ -8,6 +8,8 @@
 
 import { PrismaClient } from "@prisma/client";
 
+import { INGEST_TOKEN } from "./ingest-token.mjs";
+
 const BASE = process.env.TEST_BASE ?? "http://localhost:3000";
 const DATA = process.env.TEST_DATA ?? "http://localhost:8000";
 const prisma = new PrismaClient();
@@ -136,8 +138,8 @@ async function main() {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        // 容器环境 INGEST_TOKEN 为必填（compose 用 ${VAR:?} 强制），本地无则跳过鉴权
-        ...(process.env.INGEST_TOKEN ? { "x-ingest-token": process.env.INGEST_TOKEN } : {}),
+        // 容器环境 INGEST_TOKEN 为必填（compose 用 ${VAR:?} 强制），本地从 web/.env 取
+        ...(INGEST_TOKEN ? { "x-ingest-token": INGEST_TOKEN } : {}),
       },
       body: JSON.stringify({
         date: today(),
