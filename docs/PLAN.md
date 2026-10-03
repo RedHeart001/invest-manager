@@ -40,7 +40,7 @@
 
 | 决策点 | 结论 |
 |---|---|
-| 市场范围 | 全部：A股 + 国内基金/债券 + 加密货币 + 美股/港股 |
+| 市场范围 | 全部：A股 + 国内基金/债券 + 加密货币 + 美股/港股。<br>**⚠️ 2026-10-04 校准（主人的字＝甲）**：**美股这一格现在是"部分达成"**——美股主数据按「甲＝先通入口、不要全量」落地（新浪名单**有界前 N 页 ≈300 只**，夜跑增量 ≤15 次请求），并**明确暂不给他开"美股"分类 tab**；剩余长尾（新浪盘子 18,241 只里的绝大多数）＝「乙」那 913 次请求要买的东西，等他看甲的实盘构成再判。⇒ 本格的"全部"在美股侧要按这个口径读，**别读成"美股已全量"**。港股侧见 CR9-26（列表卡上游），加密侧见 CR9-41 |
 | 技术栈 | Next.js 全栈（App Router + TypeScript）+ Python FastAPI data-service |
 | 数据库 | SQLite + Prisma（本地单文件，Docker 挂卷持久化） |
 | LLM | OpenAI 兼容接口（base_url / api_key / model 可配置）；目标选型**暂定 DeepSeek + GLM**（2026-09-12，P4 启动时双家 FC spike） |
@@ -217,6 +217,7 @@
 
 - `data-service/app/providers/openbb_provider.py` 封装为**美股 provider**（后端 yfinance）：已实现 `get_quote` / `get_quotes` / `get_kline` / `get_news`，`register_chain(["us"])` 挂入主备链。**未实现（登记为缺口，2026-09-24 核对）**：美股**基本面**、**宏观指标（FRED）**——原设计要求这两项，代码里不存在（全 `data-service/app` 无 `fred`/`macro`/基本面取数）；加密行情由独立的 `crypto_provider.py`（CoinGecko）承担，不经本 provider。
 - 字段映射到与 AkShare 相同的内部 schema，上层（搜索/图表/TradingAgents）无感知
+- **美股主数据（2026-10-04 定案＝甲，落地为 [FIX-LEDGER.md](FIX-LEDGER.md) `CR9-59`）**：此前 `us` 侧**只有行情链 provider、没有列表 provider** ⇒ 库里 `us` 长期只有 1 行，`/product/us/AAPL` 实测 404、搜索 0 结果（不是"数据旧"，是"从来没有过"）。甲的形态＝**新浪 `US_CategoryService.getList` 有界前 N 页**（该接口 `num` 被服务端硬截到 20 行/页 ⇒ N 页＝20N 只、单夜 N 次请求，域名是新浪**不占东财桶**）＋ **不进分类浏览的类型集合**（主人这轮明确"先不用开美股 tab"，因此美股没有排序/浏览入口，也就不需要给它配陈旧说明）。**已知不达成**：长尾美股仍搜不到（那是乙的全量 913 次请求）；`category`（行业）在样本里有 null ⇒ 板块标签对美股会偏薄，实测构成写进列表 note 后再判。**仍归主人的判**（本轮不替他定）：混进盘子的 ETF/合伙企业/畸形行按什么口径剔——代码只丢"结构上不可用"的行（无 `symbol`／无 `name`），**不按"算不算股票"筛**。
 - vendor 可插拔：yfinance 免费档起步，可选配 Alpha Vantage/FMP key 增强
 
 ### M7 扩展机制：Skills + MCP（支撑 M4，v2 预留挂点）
@@ -373,6 +374,7 @@ MCP_HTTP_HOST=127.0.0.1              # MCP HTTP 仅绑本机
 MCP_HTTP_PORT=8765
 RESEARCH_MAX_COLLECT_THREADS=4       # 研报采集并发线程上限（utils/timeout.py 信号量）
 RESEARCH_COLLECT_ACQUIRE_TIMEOUT=60  # 采集名额等待上限（秒，research/adapter.py）；信号量被挂起线程占满时超时降级，不永久阻塞
+US_LIST_PAGES=15                 # 美股名单每次取几页（CR9-59／甲）：新浪硬截 20 行/页 ⇒ 15 页≈300 只、单夜 15 次请求。上限刻意远小于全量的 913 页（盘子 18,241 只＝乙，等主人的字）
 ```
 
 > 完整模板见 `web/.env.example`（P6 已补全为全量清单）。
