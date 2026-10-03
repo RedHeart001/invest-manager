@@ -588,4 +588,16 @@ O1–O12 全量落地，明细见 [history/2026-09-13-cr1-全项目审查与O系
 
 ⑥ **顺手抓到门禁工具自己的第三种假绿**：p4 `exit=1` 而 harness 收尾 `ALL DONE ＋ verify_all_exit=0`——缺口被打印了却没编码成退出码，而门槛④ 历次都以这个 0 为凭。登记为**待拍板 #28**（推荐 `gaps>0 || failedSuites>0 ⇒ process.exit(1)`），**只登记不动码**：改门禁工具不在我自行扩权的范围。
 
-⑦ **额度账与纪律**：本窗出网＝② 里 `p6_mcp` 的 1 次腾讯行情 ＋ ③ 两套件 ＋ us 活体探针 4 次（Yahoo 均 429，不占东财桶）＋ ④ 的一轮真 pipeline ＋ sina 2 次（前置）**＝ 无一轮真同步**（`runs:0` 全程未动）；**没有为了"七套同序列再全绿一次"把 p3 重烧**。**02:00 的夜跑留给 03:00 的自动任务读数**，那之后我才会再动 ds 进程。当前 `dev` 领先 `origin/dev` **42 笔**；**(e) 甲这一批尚未提交**（等他一个字）＝6 个文件：`data-service/app/providers/tencent_provider.py`、`tests/test_tencent_minute.py`、`tests/test_cr9_45_health_async.py` ＋ 本轮第二次落账的三个 `docs/*.md`。
+⑦ **额度账与纪律**：本窗出网＝② 里 `p6_mcp` 的 1 次腾讯行情 ＋ ③ 两套件 ＋ us 活体探针 4 次（Yahoo 均 429，不占东财桶）＋ ④ 的一轮真 pipeline ＋ sina 2 次（前置）**＝ 无一轮真同步**（`runs:0` 全程未动）；**没有为了"七套同序列再全绿一次"把 p3 重烧**。**02:00 的夜跑留给 03:00 的自动任务读数**，那之后我才会再动 ds 进程。当前 `dev` 领先 `origin/dev` **42 笔**；**(e) 甲这一批他随后给了字，已按"一项一提交"分两笔入库**＝`6eb8a9b`（`data-service/app/providers/tencent_provider.py`＋`tests/test_tencent_minute.py`＋`tests/test_cr9_45_health_async.py`）与 `a4f4c36`（本轮第二次落账的三个 `docs/*.md`），提交后 `git status --porcelain`＝0、dev **44 笔**未推送（push 归主人）。
+
+**同日续 33 · 断电把 10-03 02:00 那轮两腿截在半路，取证与备份一起欠下（2026-10-03 09:3x，主人"检测当前任务进度，然后继续执行"＋"都带 `SYNC_CATCHUP=off` 起，今晚等 02:00"）**
+
+① **断电时间线（全部本地出处，零出网）**：`Win32_OperatingSystem.LastBootUpTime = 2026-10-03 09:18:05`，`data-service/ds-restart3.log` 最后写入 **02:07** ⇒ 断点在 02:07–09:18 之间。那份日志的字面顺序是：`daily sync partially failed: ok=false failedTypes=['stock', 'crypto', 'hk']` **之后紧跟 60 批 `GET /quotes?type=stock`** ⇒ **同步腿跑完并判 `partial_failed`，链式刷新腿确实被触发了**。这条本身有分量：**刀 3/甲-1 的"`partial_failed` ⇒ 照刷"在生产进程里第一次被实证**（此前只有离线断言），只是它没跑完。
+
+② **库内只读读数**（就地以 `readOnly` 打开 `web/prisma/dev.db`，时刻折算成北京时间）：`fund n=28015 / updatedAt 02:00:30`｜`bond n=1059 / 02:00:44`｜`stock n=5913 / updatedAt 仍是 09-12（列表腿失败）但 snapshotAt 02:01:46`｜`crypto 09-27`｜`us 1 行`；`KlineDaily MAX(date)=09-30` ⇒ **10-03 是周六＋国庆，休市，刀 5 的开市窗口今天仍不开**（沿用"不猜日历、看 `KlineDaily` 最新一天"那条判据）。**⚠️ 这条读数的口径要说满**：磁盘上还有 **15 MB 未检查点的 `dev.db-wal`（mtime 02:07）＋ 一个陈旧的 `-shm`（23:47）** ⇒ 我这个连接**有没有把 WAL 里最后几分钟的写进去，未证明**（`snapshotAt` 只到 02:01:46 而批次一直跑到 02:07，正好是可疑的形状）。正口径＝三个文件一起拷到临时目录再查（memory 里那条 WAL 教训），但**被权限分类器按"读 db 文件"拦下**，我没换写法绕。**回落路径**：web 一起来，SQLite 自己会做 WAL 恢复，届时复读一次就把这 3 分钟判清楚。
+
+③ **三条欠账要分开看**：**(a) 永久性**——`/sync/status` 的 `lastRefresh.outcome`／`tookMsTotal` 是**内存态**，进程随断电一起没了 ⇒ "02:00 那轮到底判成什么"这条**再也取不回来**，只能靠上面那行日志字面重建；这与 CR9-45/#21 那条"能做状态位就别只做日志"同族，但这次说明**状态位还得落盘**才谈得上"事后读"（断电不是重启）。**(b) 可恢复**——03:00 那条自动化**没产出**（`data-service/sync-0300.out` 不存在、回落的 `%LOCALAPPDATA%\Temp\invest-sync-0300.txt` 也不存在、任务列表已空），**03:30 的每日备份同样没跑** ⇒ `backups/` 里最新仍是 **10-02 16:14**，已欠 17 小时。**(c) 顺带**——08:30 热点批次未跑（页面会显示我 10-02 那轮造的批次）。
+
+④ **动作边界（这条是本轮唯一没执行成功的）**：他给的字是"**都带 `SYNC_CATCHUP=off` 起，今晚等 02:00**"，我把命令原文摊开在回执里（先 ds 后 web，`cd data-service && SYNC_CATCHUP=off .venv/Scripts/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000`），但**实际起进程被分类器以"用户尚未确认恢复方式"拦下**——按既有纪律不重试、不换写法，等一句直接指向"起"的字。**在起来之前我不碰任何上游、不跑任何实网门禁（③④⑤ 都不跑）**；本轮只做了只读取证与这一处 docs 落账。
+
+⑤ **同段自纠**：同日续 32 ⑦ 原写"(e) 甲这一批**尚未提交**（等他一个字）"——他随后给了字、两笔已入库，故在原句就地改写（不是改口径，是清已失效的状态描述），免得下一轮按它去做"还欠两笔提交"的错误判断。
