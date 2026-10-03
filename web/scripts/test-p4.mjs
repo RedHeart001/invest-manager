@@ -38,6 +38,22 @@ async function jsonOf(res, what) {
   }
 }
 
+// 待拍板 #31 的实测形态（10-03 22:5x 单跑撞到的字面）：对 `web/prisma/dev.db` 的写入会让
+// next dev 重编译，落进那个窗口的请求由 **Next 自己**回 500、`content-type=text/html`
+// （不是路由 catch 出来的 JSON）⇒ 套件"一个断言没跑完就崩"，正是 CR9-38 要治的那个形态换了触发源。
+// ⇒ 会话 CRUD 这类**零外部代价**的请求只对 `status===500` 复探三次；400/200 的语义一次不放过。
+// `/api/chat`（SSE，一轮 LLM＋工具调用）与页面 **刻意不重试**——那两处 500 要响亮地红。
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+async function fetch500(url, init) {
+  let last;
+  for (let i = 0; i < 3; i++) {
+    last = await fetch(url, init);
+    if (last.status !== 500) return last;
+    await sleep(900);
+  }
+  return last;
+}
+
 /** 读完一条 SSE 流：返回正文、事件序列与 HTTP 状态。
  *  原为 [4] 段私有，[5] 组合链也要用同一套读法 ⇒ 提到模块作用域，避免两份解析器各自腐烂。 */
 async function readAll(res, timeoutMs = 90_000) {
@@ -103,7 +119,7 @@ async function main() {
   let sid = "";
   let llmConfigured = false; // [2] 判定；[5] 组合链依赖 LLM，未配置时按设计整段跳过
   {
-    const res = await fetch(`${BASE}/api/chat/sessions`, {
+    const res = await fetch500(`${BASE}/api/chat/sessions`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ title: "【测试】P4 会话" }),
@@ -112,10 +128,10 @@ async function main() {
     sid = body.id ?? "";
     ok("创建会话", res.status === 200 && sid.length > 0, JSON.stringify(body).slice(0, 100));
 
-    const list = await jsonOf(await fetch(`${BASE}/api/chat/sessions`), "GET /api/chat/sessions（列表）");
+    const list = await jsonOf(await fetch500(`${BASE}/api/chat/sessions`), "GET /api/chat/sessions（列表）");
     ok("列表包含新会话", (list.sessions ?? []).some((s) => s.id === sid));
 
-    const put = await fetch(`${BASE}/api/chat/sessions`, {
+    const put = await fetch500(`${BASE}/api/chat/sessions`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ sessionId: sid, role: "user", content: "测试消息" }),
@@ -123,7 +139,7 @@ async function main() {
     ok("追加消息", put.status === 200);
 
     const detail = await jsonOf(
-      await fetch(`${BASE}/api/chat/sessions/${sid}`),
+      await fetch500(`${BASE}/api/chat/sessions/${sid}`),
       "GET /api/chat/sessions/:id（详情）",
     );
     ok("详情含消息", (detail.messages ?? []).some((m) => m.content === "测试消息"));
@@ -215,7 +231,7 @@ async function main() {
     }
 
     const detail = await jsonOf(
-      await fetch(`${BASE}/api/chat/sessions/${sid}`),
+      await fetch500(`${BASE}/api/chat/sessions/${sid}`),
       "GET /api/chat/sessions/:id（流式后回读）",
     );
     ok("用户消息已持久化", (detail.messages ?? []).some((m) => m.content === "贵州茅台现在多少钱？"));
@@ -234,8 +250,8 @@ async function main() {
 
   // ---------- 清理 ----------
   if (sid) {
-    await fetch(`${BASE}/api/chat/sessions/${sid}`, { method: "DELETE" });
-    const check = await fetch(`${BASE}/api/chat/sessions/${sid}`);
+    await fetch500(`${BASE}/api/chat/sessions/${sid}`, { method: "DELETE" });
+    const check = await fetch500(`${BASE}/api/chat/sessions/${sid}`);
     ok("删除会话", check.status === 404, `status=${check.status}`);
   }
 
@@ -243,7 +259,7 @@ async function main() {
   console.log("[4] 多轮上下文（第二轮指代第一轮主体）");
   {
     // 新会话：第一轮问茅台，第二轮用"它"指代
-    const mk = await fetch(`${BASE}/api/chat/sessions`, {
+    const mk = await fetch500(`${BASE}/api/chat/sessions`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ title: "【测试】多轮上下文" }),
@@ -277,7 +293,7 @@ async function main() {
     );
 
     const detail = await jsonOf(
-      await fetch(`${BASE}/api/chat/sessions/${sid2}`),
+      await fetch500(`${BASE}/api/chat/sessions/${sid2}`),
       "GET /api/chat/sessions/:id（多轮历史）",
     );
     const msgs = detail.messages ?? [];
@@ -316,7 +332,7 @@ async function main() {
       );
     }
 
-    await fetch(`${BASE}/api/chat/sessions/${sid2}`, { method: "DELETE" });
+    await fetch500(`${BASE}/api/chat/sessions/${sid2}`, { method: "DELETE" });
   }
 
   // ---------- 5. 组合链（一轮 chat 触发 ≥2 次工具调用；原 scripts/b2-chain.mjs 并入） ----------
@@ -330,7 +346,7 @@ async function main() {
   if (!llmConfigured) {
     console.log("  （LLM 未配置，跳过组合链断言）");
   } else {
-    const mkc = await fetch(`${BASE}/api/chat/sessions`, {
+    const mkc = await fetch500(`${BASE}/api/chat/sessions`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ title: "【测试】组合链" }),
@@ -364,7 +380,7 @@ async function main() {
       `done=${evNames.includes("done")} error=${evNames.includes("error")} len=${c.text.trim().length}`,
     );
 
-    await fetch(`${BASE}/api/chat/sessions/${sid3}`, { method: "DELETE" });
+    await fetch500(`${BASE}/api/chat/sessions/${sid3}`, { method: "DELETE" });
   }
 
   console.log(`\n== 结果：${passed} 通过 / ${failed} 失败 ==`);
