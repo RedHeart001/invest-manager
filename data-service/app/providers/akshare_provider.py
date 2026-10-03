@@ -176,6 +176,33 @@ def _sina_symbol_exchange(symbol: str) -> str:
     return ""
 
 
+# 交易状态前缀（#25 乙口径②，10-03 主人拍板）：XD/DR/XR＝当日除权除息，
+# N＝上市首日，C＝上市后前几日无涨跌幅限制。**它们是"今天发生了什么交易"的快照，
+# 不是名字的一部分**——明天就消失，而 `Product.name` 是整表覆盖写入的，于是同一个
+# 代码的库内权威名会随"这一批由哪家上游供数"来回抖（东财 f14 在除息日同样带 XD，
+# 新浪 hs_a 带得更频繁），搜索命中、拼音索引与 CR8-8 的"库内权威名"判据都跟着抖。
+# 刻意**不剥** `ST`/`*ST`：CR8-8 的既有口径是"只滤退市，ST/*ST 与北交所保留"
+# （主人 09-30 的字，`web/lib/hotspots.ts:159`）。
+_STATUS_PREFIXES = ("XD", "DR", "XR", "N", "C")
+
+
+def _is_cjk(ch: str) -> bool:
+    return "\u4e00" <= ch <= "\u9fff"
+
+
+def strip_status_prefix(name: str) -> str:
+    """剥掉交易状态前缀，返回可用于入库的名字；已是干净名时原样返回（幂等）。
+
+    要求前缀后紧跟一个汉字才剥——避免把真名里以拉丁字母开头的部分啃掉
+    （`TCL科技`／`CICC` 这类），也避免 `"XD"` 这种整条就是前缀的畸形行被清成空名。
+    """
+    s = name.strip()
+    for prefix in _STATUS_PREFIXES:
+        if s.startswith(prefix) and len(s) > len(prefix) and _is_cjk(s[len(prefix)]):
+            return s[len(prefix) :].strip()
+    return s
+
+
 def _pinyin_pair(name: str) -> tuple[str, str]:
     """返回（全拼, 首字母缩写），用于搜索匹配。"""
     return (
@@ -776,8 +803,8 @@ class AkshareProvider(BaseProvider):
     # ---------- 产品列表（P1 同步） ----------
 
     def list_products(self, type_: str) -> list[dict] | tuple[list[dict], dict]:
-        """产品列表。转债一条自带主备切换 ⇒ 按 CR9-31 以 `(items, meta)` 声明出网源，
-        stock/fund 单一上游 ⇒ 仍是裸 `list[dict]`（两种形态由 `list_products_with_meta` 归一）。
+        """产品列表。stock/bond 两条自带主备切换 ⇒ 按 CR9-31 以 `(items, meta)` 声明出网源，
+        fund 单一上游 ⇒ 仍是裸 `list[dict]`（两种形态由 `list_products_with_meta` 归一）。
         """
         if type_ == "stock":
             return self._list_stocks()
@@ -787,8 +814,76 @@ class AkshareProvider(BaseProvider):
             return self._list_convertible_bonds()
         raise ProviderError(f"unsupported list type: {type_}")
 
-    def _list_stocks(self) -> list[dict]:
-        """A 股全量列表：优先单次大分页，未拿全则回退分页抓取。"""
+    def _list_stocks(self) -> tuple[list[dict], dict]:
+        """A 股主数据列表：东财 `clist/get` 为主源，失败时降级到新浪 `hs_a` 快照（#25 乙，10-03 立项）。
+
+        为什么现在必须有备源（10-03 实测）：东财 `clist/get` 对三个 host、`pz=200` 与
+        `pz=10000` 一律 `RemoteDisconnected`＝列表链路**硬不可用**（行情/K 线仍正常，与
+        CR9-40 记的形态同款），`Product.stock` 因此停在 09-12 已经 21 天；此前这条链路只有
+        单家上游，失败即整轮 `partial_failed`，陈旧只能靠 `staleNotes` 说一句（#25 甲）。
+
+        覆盖面差异已按两份全量实测归因（10-03）：东财 5913 vs 新浪 5571，重叠 5570——
+        **库里多出、新浪没有的 343 只全是已摘牌/退市类代码**（其中名字含「退市」61 只、
+        `ST`/`*ST` 开头 112 只），新浪独有的只有 1 只（`920202` 北交所）；新浪侧含北交所
+        348 只，与 `_exchange()` 对 920 段的判定逐项一致 ⇒ 降级不是"少一块市场"（口径①）。
+        代价在名字列（写进 note，别让消费侧自己发现）：新浪的名称列是 ≤5 字符短名，
+        换源那夜约 1.81% 的行会被改写（实测当日 101/5570：44 行变短、41 行丢 `-U`/`-W`
+        后缀、4 行的 `ST` 标记暂时看不见）。
+        """
+        em_err = ""
+        try:
+            products = self._list_stocks_em()
+        except Exception as e:  # noqa: BLE001 主备切换的判据是"有没有拿到行"，异常一律收下转述
+            em_err = f"{type(e).__name__}: {e}"
+            logger.warning("stock list primary (em clist) failed: %s", e)
+            products = []
+
+        if products:
+            return products, {"source": "akshare"}
+
+        import akshare as ak
+
+        try:
+            df = _ak_request(ak.stock_zh_a_spot, 120.0, "ak.stock_zh_a_spot")
+        except Exception as e:  # noqa: BLE001
+            raise ProviderError(f"stock list unavailable: {e}") from e
+
+        out: list[dict] = []
+        for _, row in df.iterrows():
+            # 本机 akshare 的 stock_zh_a_spot 列名是中文（代码=带交易所前缀的 symbol），
+            # 与同版本 bond_zh_hs_cov_spot 的英文列名不一致 ⇒ 两种键名都读一次，不猜版本。
+            symbol = str(row.get("代码") or row.get("symbol") or "").strip().lower()
+            name = strip_status_prefix(str(row.get("名称") or row.get("name") or ""))
+            code = symbol[2:] if symbol[:2].isalpha() else symbol
+            if not code or not name:
+                continue
+            full, initials = _pinyin_pair(name)
+            out.append(
+                {
+                    "type": "stock",
+                    "code": code,
+                    "name": name,
+                    "pinyin": full,
+                    "pinyinInitials": initials,
+                    # CR-17 同口径：新浪 symbol 显式带 sh/sz/bj 前缀，不再靠数字前缀推断
+                    "exchange": _sina_symbol_exchange(symbol) or _exchange(code),
+                    "tags": [],
+                }
+            )
+        if not out:
+            raise ProviderError("stock list empty from all sources")
+        return out, {
+            "source": "sina-a-share-spot",
+            "degraded": True,
+            "note": (
+                f"东财 A 股列表不可用（{em_err or '未知原因'}），已降级至新浪 hs_a 快照："
+                f"本次 {len(out)} 只、天然仅含在交易标的（库里留存的已摘牌代码这次不会带来），"
+                "且新浪名称列是 ≤5 字符短名——带 XD/DR 状态前缀时更短、不含 -U/-W 后缀"
+            ),
+        }
+
+    def _list_stocks_em(self) -> list[dict]:
+        """A 股全量列表（东财主源）：优先单次大分页，未拿全则回退分页抓取。"""
         base_params = {
             "po": 1,
             "np": 1,
@@ -824,7 +919,9 @@ class AkshareProvider(BaseProvider):
         products = []
         for item in diff:
             code = str(item.get("f12") or "")
-            name = str(item.get("f14") or "")
+            # #25 乙第 1 步：东财 f14 在除息日也带 XD/DR 前缀 ⇒ 入库前先洗成权威名，
+            # 并且**拼音要用洗完的名字生成**（否则 `XD` 会被读成拉丁字母进拼音串）。
+            name = strip_status_prefix(str(item.get("f14") or ""))
             if not code or not name:
                 continue
             full, initials = _pinyin_pair(name)

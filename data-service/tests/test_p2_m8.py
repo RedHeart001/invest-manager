@@ -257,6 +257,171 @@ def test_list_products_meta() -> None:
         akp.EM_LIMITER.acquire, akp.EM_LIMITER.on_success, akp.EM_LIMITER.on_failure = orig_limiter
 
 
+# ---------- A 股名单名字清洗（#25 乙口径②） ----------
+
+
+def test_stock_name_status_prefix() -> None:
+    """交易状态前缀不是名字的一部分（10-03 主人拍板 #25 乙口径②）。
+
+    东财 `f14` 在除息日同样带 `XD`，新浪 `hs_a` 带得更频繁；而 `Product.name` 是
+    整表覆盖写入的 ⇒ 不洗的话同一个代码的库内权威名会随"这一批由哪家上游供数"来回变，
+    搜索/详情页跟着抖。更糟的是 `name` 还喂 `_pinyin_pair()` ⇒ 拼音串会变成
+    `XDanhuifeng`（实测值），前缀字母被拼进检索键与 FTS。
+    刻意**不剥** `ST`/`*ST`：CR8-8 的既有口径是"只滤退市，ST/*ST 与北交所保留"
+    （主人 09-30 定的字，`web/lib/hotspots.ts`）。
+    """
+    import app.providers.akshare_provider as akp
+
+    strip = akp.strip_status_prefix
+    check(
+        "乙②：XD/DR/XR/N/C 五种状态前缀剥掉",
+        [strip(x) for x in ("XD安徽凤", "DR贵州茅台", "XR中国平安", "N英诺", "C英诺")]
+        == ["安徽凤", "贵州茅台", "中国平安", "英诺", "英诺"],
+    )
+    check("乙②🔁：ST/*ST 刻意不剥（CR8-8 保留口径不被踩）",
+          strip("*ST华融") == "*ST华融" and strip("ST必康") == "ST必康")
+    check("乙②🔁：「退市」原样保留 ⇒ 仍被 CR8-8 的 includes('退市') 滤掉",
+          strip("退市金钰") == "退市金钰" and "退市" in strip("退市金钰"))
+    check("乙②🔁：不误啃拉丁真名／不整条清空",
+          strip("TCL科技") == "TCL科技" and strip("XD") == "XD" and strip("") == "")
+    check("乙②：幂等（已是干净名再过一次不变）",
+          strip(strip("XD安徽凤")) == "安徽凤")
+
+    # 端到端：东财主路径的产出面（零出网——直接喂 stub 的东财响应）
+    payload = {
+        "data": {
+            "total": 4,
+            "diff": [
+                {"f12": "920000", "f14": "XD安徽凤"},   # 新浪探针里的字面样本（bj 前缀）
+                {"f12": "600086", "f14": "退市金钰"},
+                {"f12": "000016", "f14": "*ST华融"},
+                {"f12": "301399", "f14": "N英诺"},
+            ],
+        }
+    }
+    orig_get = akp._em_get
+    akp._em_get = lambda path, params: payload  # type: ignore[assignment]
+    try:
+        items = akp._akshare._list_stocks_em()
+        check("乙②🔁：入库名是洗过的权威名，行序与条数不变",
+              [x["name"] for x in items] == ["安徽凤", "退市金钰", "*ST华融", "英诺"],
+              str(items))
+        check("乙②🔁：拼音由洗过的名字生成（不是 XDanhuifeng/XDahf）",
+              items[0]["pinyin"] == "anhuifeng" and items[0]["pinyinInitials"] == "ahf",
+              str(items[0]))
+        check("乙②：schema 面一处不多一处不少（含 tags 本来就是 []，口径③）",
+              all(
+                  x
+                  == {
+                      "type": "stock",
+                      "code": x["code"],
+                      "name": x["name"],
+                      "pinyin": x["pinyin"],
+                      "pinyinInitials": x["pinyinInitials"],
+                      "exchange": x["exchange"],
+                      "tags": [],
+                  }
+                  for x in items
+              )
+              and [x["exchange"] for x in items] == ["BJ", "SH", "SZ", "SZ"],
+              str(items[:1]),
+            )
+    finally:
+        akp._em_get = orig_get  # type: ignore[assignment]
+
+
+# ---------- A 股名单主备切换（#25 乙第 3 步） ----------
+
+
+def test_stock_list_backup_source() -> None:
+    """`_list_stocks()` 自带主备切换，且降级必须按 CR9-31 把覆盖面差异自己说清楚。
+
+    立项依据（10-03 实测）：东财 `clist/get` 对三个 host、`pz=200`/`pz=10000` 一律
+    `RemoteDisconnected` ⇒ 列表链路硬不可用，`Product.stock` 停在 09-12 已 21 天；
+    两份全量对比给出差集归因：东财多出的 343 只**全是已摘牌/退市类代码**（含「退市」61、
+    `ST`/`*ST` 112），新浪独有 1 只（`920202`），且新浪含北交所 348 只＝与主源同市场面。
+    """
+    import pandas as pd
+
+    import app.providers.akshare_provider as akp
+    from app.providers.base import ProviderError, list_products_with_meta
+
+    em_payload = {
+        "data": {
+            "total": 1,
+            "diff": [{"f12": "600519", "f14": "贵州茅台"}],
+        }
+    }
+    sina_df = pd.DataFrame(
+        {
+            "代码": ["sh600028", "sz000012", "bj920000", "sh600519"],
+            "名称": ["XD中国石", "南 玻Ａ", "XD安徽凤", "贵州茅台"],
+        }
+    )
+
+    orig_get = akp._em_get
+    import akshare as ak
+
+    orig_spot = ak.stock_zh_a_spot
+    sina_calls = []
+
+    def _sina_stub():
+        sina_calls.append(1)
+        return sina_df
+
+    ak.stock_zh_a_spot = _sina_stub  # type: ignore[assignment]
+    try:
+        # ① 主源正常 → 出网源声明为 akshare，**且一次都不碰备源**
+        akp._em_get = lambda path, params: em_payload  # type: ignore[assignment]
+        items, meta = list_products_with_meta(akp._akshare, "stock")
+        check("乙③：主源态 schema 与条数不变", len(items) == 1 and items[0]["code"] == "600519", str(items))
+        check("乙③：主源态 source=akshare 且不谎称降级",
+              meta.get("source") == "akshare" and "degraded" not in meta and "note" not in meta, str(meta))
+        check("乙③🔁：主源成功时备源一次都没被调用（不是「每次都先问一遍新浪」）",
+              sina_calls == [], str(sina_calls))
+
+        # ② 主源失败 → 降级到新浪快照，名字/交易所/拼音都按备源形态重建
+        def _em_down(path, params):
+            raise ProviderError("eastmoney request failed on all hosts: RemoteDisconnected")
+
+        akp._em_get = _em_down  # type: ignore[assignment]
+        items, meta = list_products_with_meta(akp._akshare, "stock")
+        note = meta.get("note") or ""
+        check("乙③🔁：备源去掉了 symbol 前缀、交易所按前缀显式解析（CR-17 同口径）",
+              [x["code"] for x in items] == ["600028", "000012", "920000", "600519"]
+              and [x["exchange"] for x in items] == ["SH", "SZ", "BJ", "SH"],
+              str(items))
+        check("乙③🔁：口径①——备源含北交所（bj 行存在，不是把 920 段丢掉）",
+              sum(1 for x in items if x["exchange"] == "BJ") == 1, str(items))
+        check("乙③🔁：备源名字同样过清洗（XD 不进库）＋拼音按干净名生成",
+              items[2]["name"] == "安徽凤" and items[2]["pinyin"] == "anhuifeng", str(items[2]))
+        check("乙③🔁：备源 source/degraded 声明到位",
+              meta.get("source") == "sina-a-share-spot" and meta.get("degraded") is True, str(meta))
+        check("乙③🔁：note 说得出主源错误原文＋本次条数",
+              "RemoteDisconnected" in note and f"本次 {len(items)} 只" in note, note[:200])
+        check("乙③🔁：note 说得出两处真实代价（摘牌代码不会带来／新浪短名≤5 字符与 -U 后缀）",
+              "已摘牌" in note and "短名" in note and "-U" in note, note[:260])
+
+        # ③ 两源皆失败 → 按既有契约抛 ProviderError，不静默交空表（C1 空载荷保护在上游）
+        ak.stock_zh_a_spot = lambda: (_ for _ in ()).throw(RuntimeError("sina hs_a timeout"))  # type: ignore[assignment]
+        try:
+            list_products_with_meta(akp._akshare, "stock")
+            check("乙③🔁：两源皆失败抛 ProviderError", False, "没抛错")
+        except ProviderError as e:
+            check("乙③🔁：两源皆失败抛 ProviderError", "stock list unavailable" in str(e), str(e)[:160])
+
+        # ④ 备源回来了但一行都没有 → 同样抛，不能让"0 只"伪装成一次成功同步
+        ak.stock_zh_a_spot = lambda: pd.DataFrame({"代码": [], "名称": []})  # type: ignore[assignment]
+        try:
+            list_products_with_meta(akp._akshare, "stock")
+            check("乙③🔁：备源空表也抛（不静默产出 0 只）", False, "没抛错")
+        except ProviderError as e:
+            check("乙③🔁：备源空表也抛（不静默产出 0 只）", "empty from all sources" in str(e), str(e)[:160])
+    finally:
+        akp._em_get = orig_get  # type: ignore[assignment]
+        ak.stock_zh_a_spot = orig_spot  # type: ignore[assignment]
+
+
 # ---------- 符号映射 ----------
 
 
@@ -776,6 +941,8 @@ if __name__ == "__main__":
     test_limiter_profile_single_source()
     test_akshare_out_of_bucket_observation()
     test_list_products_meta()
+    test_stock_name_status_prefix()
+    test_stock_list_backup_source()
     test_symbol_mapping()
     test_chain()
     test_tencent_parsers()
