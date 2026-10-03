@@ -118,6 +118,67 @@ def test_limiter_profile_single_source() -> None:
               fake not in limiter.PROFILES and fake not in limiter._LIMITERS)
 
 
+# ---------- 桶外 akshare 的观测族（#27 第一步，10-03） ----------
+
+
+def test_akshare_out_of_bucket_observation() -> None:
+    """#27 第一步：桶外那条 akshare 路只**数数**，一条都不拦。
+
+    红线是「OPT-3 不得动东财桶」，而 `_ak_request` 里若干处实际打的仍是 eastmoney 域名。
+    补限流之前先得有次数可看 ⇒ 观测族 `akshare-obs`。C34 成对：计数长在真实调用点上
+    ⇔ 观测不改行为（不走 `acquire`、不进冷却、不与东财族同实例）⇔ 老族参数一个没动。
+    """
+    from app.providers import akshare_provider as akp
+    from app.utils import limiter
+
+    obs = limiter.get_limiter("akshare-obs")
+    em = limiter.get_limiter("eastmoney")
+    check("#27：观测族与东财族是两个不同实例（共用＝把「不占东财桶」悄悄改掉）",
+          obs is not em and akp.AK_OBS_LIMITER is obs and akp.EM_LIMITER is em,
+          f"{id(obs)}/{id(em)}")
+    declared = limiter.PROFILES["akshare-obs"]
+    check("#27：观测族参数逐项等于 PROFILES（调参仍只有一个来源，CR9-18 同条纪律）",
+          {k: getattr(obs, k) for k in declared} == declared, str(obs.state()))
+
+    before = obs.state()
+    probe = "__cr9_27_probe"
+    for _ in range(200):
+        obs.observe(probe)
+    st = obs.state()
+    check("#27：observe 只加 seen，granted/denied 一个都不动（没走 acquire ⇒ 不可能拦）",
+          st["granted"] == before["granted"] and st["denied"] == before["denied"]
+          and obs._seen.get(probe) == 200, str(st))
+    check("🔁 #27：连记 200 次之后观测族仍不进冷却（纯计数，不产生任何拒绝路径）",
+          obs.in_cooldown() is False and obs.cooldown_remaining() == 0.0, str(st))
+    em_declared = limiter.PROFILES["eastmoney"]
+    check("🔁 #27：东财族六个参数逐项仍等于 PROFILES（新族没挪动真桶）",
+          {k: getattr(em, k) for k in em_declared} == em_declared, str(em.state()))
+
+    # 计数真的装在调用点上：本地 lambda ⇒ 零出网，但走的是生产那条 `_ak_request`
+    name = "ak.__cr9_27_callsite"
+    seen_before = akp.AK_OBS_LIMITER.state()["seenTotal"]
+    got = akp._ak_request(lambda: "ok", 5.0, name)
+    st2 = akp.AK_OBS_LIMITER.state()
+    check("#27：`_ak_request` 记了一笔且返回值原样通过（观测不改行为）",
+          got == "ok" and st2["seenTotal"] == seen_before + 1
+          and akp.AK_OBS_LIMITER._seen.get(name) == 1, str(st2))
+    try:
+        akp._ak_request(lambda: (_ for _ in ()).throw(RuntimeError("boom")), 5.0, f"{name}-fail")
+        raised = False
+    except akp.ProviderError:
+        raised = True
+    check("🔁 #27：上游抛错仍按原样变 ProviderError（观测位没把它吞成成功）", raised, "")
+
+    names = [s["name"] for s in limiter.snapshot_all()]
+    check("#27：/health 的读数面按字典序带出两族（纯观测也得一条 curl 读得到）",
+          names == sorted(names) and "eastmoney" in names and "akshare-obs" in names, str(names))
+
+    for k in (probe, name, f"{name}-fail"):
+        obs._seen.pop(k, None)
+    check("#27：探针样本已清（观测位不得把自己的计数留在别人读到的地方）",
+          probe not in obs.state()["seen"] and name not in obs.state()["seen"], str(obs.state()))
+
+
 # ---------- 列表来源元信息（CR9-31） ----------
 
 
@@ -713,6 +774,7 @@ def test_fund_holdings_missing_column_and_beijing_dates() -> None:
 if __name__ == "__main__":
     test_limiter()
     test_limiter_profile_single_source()
+    test_akshare_out_of_bucket_observation()
     test_list_products_meta()
     test_symbol_mapping()
     test_chain()

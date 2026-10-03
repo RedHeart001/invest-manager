@@ -25,6 +25,7 @@ import inspect
 import json
 import os
 import sys
+import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 for _s in (sys.stdout, sys.stderr):
@@ -145,7 +146,27 @@ def test_db_backup_flag_is_state_only() -> None:
 
     为什么挂在这里：本端点的返回体就是契约面（刀 4 的 `ingestTokenConfigured` 同族）。
     备份 job 本身的行为断言在 `tests/test_backup_db.py`，这里只管"这个位能不能被一条 curl 读"。
+    **#29（10-03 断电轮）之后这个位会回落读 `backups/state.json`** ⇒ 用例必须把 `BACKUP_DIR`
+    收进临时目录，否则这几条断言实际在测"这台机历史上备过没有"（与刀 4 那条"用例不得把本机
+    配置当输入常数"同族）。
     """
+    import app.backup_scheduler as bs
+
+    orig_backup_dir = os.environ.get("BACKUP_DIR")
+    with tempfile.TemporaryDirectory() as tmp:
+        os.environ["BACKUP_DIR"] = tmp
+        _phase_a_never_ran(tmp)
+        _phase_b_failed_round(tmp)
+        _phase_c_from_disk_after_process_death()
+    for _k, _v in (("BACKUP_DIR", orig_backup_dir),):
+        if _v is None:
+            os.environ.pop(_k, None)
+        else:
+            os.environ[_k] = _v
+
+
+def _phase_a_never_ran(tmp: str) -> None:
+    """从未跑过且磁盘无状态 ⇒ 全 null（观测位不得把"没发生"渲染成"成功"）。"""
     import app.backup_scheduler as bs
 
     saved = dict(bs._state)
@@ -155,13 +176,18 @@ def test_db_backup_flag_is_state_only() -> None:
         bb = body.get("dbBackup")
         check("①：/health 带 dbBackup 位，且是 dict（不是裸布尔——'今天没跑过'与'跑失败'必须分得开）",
               isinstance(bb, dict), str(bb))
-        check("①：从未跑过 ⇒ ok=None／lastRun=None（观测位不得把'没发生'渲染成'成功'）",
-              bb == {"lastRun": None, "ok": None, "runs": 0, "nextRun": None}, str(bb))
+        check("①：从未跑过且磁盘无状态 ⇒ ok=None／lastRun=None／fromDisk=False（#29 后形状多两键）",
+              bb == {"lastRun": None, "ok": None, "outcome": None, "runs": 0,
+                     "nextRun": None, "fromDisk": False}, str(bb))
     finally:
         bs._state.clear()
         bs._state.update(saved)
 
-    # 跑过一次（指向一个不存在的源库＝零写入、零出网的最便宜真实路径）
+
+def _phase_b_failed_round(tmp: str) -> None:
+    """跑过一次（指向不存在的源库＝零写入、零出网的最便宜真实路径）。"""
+    import app.backup_scheduler as bs
+
     orig_db_path = os.environ.get("DB_PATH")
     saved = dict(bs._state)
     try:
@@ -178,6 +204,8 @@ def test_db_backup_flag_is_state_only() -> None:
         check("🔁 ①：返回体不出现源库路径（观测位不是文件系统清单）",
               "Z:" not in dumped,
               dumped[:200])
+        check("🔁 #29：返回体也不出现状态目录路径（落盘不得开出新的文件系统面）",
+              tmp not in dumped, dumped[:200])
     finally:
         if orig_db_path is None:
             os.environ.pop("DB_PATH", None)
@@ -187,11 +215,53 @@ def test_db_backup_flag_is_state_only() -> None:
         bs._state.update(saved)
 
 
+def _phase_c_from_disk_after_process_death() -> None:
+    """#29 的正身：内存清空（＝进程死过一次的等价形态）后同一条 curl 仍读得到那一轮。"""
+    import app.backup_scheduler as bs
+
+    saved = dict(bs._state)
+    try:
+        bs._state.update({"running": False, "lastRun": None, "lastResult": None, "runs": 0})
+        bb = (asyncio.run(_endpoint("/health")()).get("dbBackup")) or {}
+        check("#29：内存清空 ⇒ 回落读磁盘那份、fromDisk=True 且 ok 仍是上轮的真值",
+              bb.get("fromDisk") is True and bb.get("ok") is False and bool(bb.get("lastRun")),
+              str(bb))
+        check("🔁 #29：回落读来的 runs 是那份文件累计的次数（不是本进程的 0，读数口径要说满）",
+              bb.get("runs") == 1, str(bb))
+    finally:
+        bs._state.clear()
+        bs._state.update(saved)
+
+
+def test_limiters_field_is_observable() -> None:
+    """#27 第一步：`/health` 的 `limiters` 是**纯观测位**——有数可读，但不拦任何东西。
+
+    挂在这里的原因与前两同一族：本端点的返回体就是契约面。要防的失败形态是"给桶外请求
+    补了个族，结果那条路开始被拒"，而这件事只有 granted/denied 两个数能一眼看出来。
+    """
+    body = asyncio.run(_endpoint("/health")())
+    lim = body.get("limiters")
+    check("#27：/health 带 limiters，且是 list（不是裸布尔——'没注册'与'注册了没被调'要分得开）",
+          isinstance(lim, list), str(lim))
+    names = [x.get("name") for x in lim or []]
+    check("#27：两个族都读得到：真桶 `eastmoney` ＋ 观测族 `akshare-obs`",
+          "eastmoney" in names and "akshare-obs" in names, str(names))
+    obs = next((x for x in lim or [] if x.get("name") == "akshare-obs"), {})
+    check("🔁 #27：观测族 granted 恒 0（它只 observe、从不 acquire ⇒ 不可能拦下一条请求）",
+          obs.get("granted") == 0 and obs.get("denied") == 0 and obs.get("cooldown") == 0.0,
+          str(obs))
+    dumped = json.dumps(lim, ensure_ascii=False)
+    check("🔁 #27：这个位不出现 URL／域名／绝对路径（计数面不是清单，别把观测做成新的泄露口）",
+          "http" not in dumped and ".com" not in dumped and "\\" not in dumped,
+          dumped[:200])
+
+
 if __name__ == "__main__":
     test_health_endpoint_is_async()
     test_health_response_shape_unchanged()
     test_ingest_token_flag_is_configured_state_only()
     test_db_backup_flag_is_state_only()
+    test_limiters_field_is_observable()
     fails = [x for x in results if not x[1]]
     print(f"\n===== {len(results) - len(fails)}/{len(results)} 通过 =====")
     if fails:

@@ -71,6 +71,9 @@ REQUEST_TIMEOUT = 15
 # CR9-18：桶参数不在这里调，唯一来源是 `utils/limiter.py` 的 `PROFILES["eastmoney"]`
 # （此处曾是"首调用获胜"的第二个参数通道，改动会静默失效）。
 EM_LIMITER = get_limiter("eastmoney")
+# #27：桶外那条路（`_ak_request`）的观测族。**与 EM_LIMITER 必须是不同实例**——共用就等于
+# 把"不占东财桶"这件事悄悄改掉（第一步刻意零行为变化）。
+AK_OBS_LIMITER = get_limiter("akshare-obs")
 
 
 def _em_request(fn):
@@ -108,9 +111,16 @@ def _em_ak_request(fn, seconds: float = 30.0, name: str = "akshare"):
 
 
 def _ak_request(fn, seconds: float = 30.0, name: str = "akshare"):
-    """非东财域名族的 akshare 调用：仅加看门狗超时（不占东财额度）。"""
+    """非东财域名族的 akshare 调用：仅加看门狗超时（不占东财额度）。
+
+    #27 第一步＝**纯观测**（10-03）：这条路上每一次调用按 `name` 记一笔进
+    `get_limiter("akshare-obs")`。之所以只计数不拦截，是因为这条红线破口今天**没有任何
+    可读计数面**——想判断"该不该给它补桶、补多大"，先得有真实次数。刻意**不调 `acquire()`**：
+    观测不得改变行为（含"到限就拒"）。域名归属由计数与名字自证，不在注释里猜。
+    """
     from ..utils.timeout import run_with_timeout
 
+    AK_OBS_LIMITER.observe(name)
     value, err = run_with_timeout(fn, seconds, name)
     if err is not None:
         raise ProviderError(f"{name} failed: {err}") from err

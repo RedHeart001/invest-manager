@@ -88,6 +88,7 @@ async def health():
     # （② 落地后本端点更是双保险：并发等待已被 `MAX_INFLIGHT_WATCHDOGS` 钉住，
     #   取数线程"占满 40"这条路本身就不成立了。）
     from .utils.timeout import MAX_INFLIGHT_WATCHDOGS, abandoned_count, inflight_count
+    from .utils.limiter import snapshot_all
 
     return {
         "status": "ok",
@@ -109,6 +110,11 @@ async def health():
         # 的每日 job 上，而"昨夜到底备份成没成"必须一条 curl 可读（#21 同族：日志会被回收，
         # 状态位不会）。**只报时刻/成败/次数，不回显绝对路径。**
         "dbBackup": backup_scheduler.health(),
+        # #27 第一步（10-03）：源族**真实计数**的读数面。此前"哪条路出了多少次网"只能靠日志
+        # 反推（而 `log.info` 在 uvicorn 默认配置下根本不打），而给"打 eastmoney 域名却不占
+        # 东财桶"那几处补限流，前提是先有次数可看。`akshare-obs` 族刻意只 observe 不 acquire
+        # ⇒ 这一位是纯观测，不会把任何一条取数路径改成"到限就拒"。
+        "limiters": snapshot_all(),
     }
 
 
