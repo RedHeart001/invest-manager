@@ -76,6 +76,9 @@ CATCHUP_TRIGGER = "startup-catchup"
 # 甲不消灭那 1,700s，只是把它从"被别人判成超时"挪进"一个知道自己要跑 40 分钟的 job"。
 REFRESH_CALLBACK_TIMEOUT_S = 2400.0
 REFRESH_URL_PATH = "/api/market/refresh?type=all"
+# #33 甲（CR9-60）：刷新腿**自己失败时**去问 web 的进度状态位。这是一次本机 BFF 的只读
+# GET（零出网、不占源族桶），预算只给 5s——它是观测，不许把主流程再拖一次（CR9-45 同族）。
+PROGRESS_READ_TIMEOUT_S = 5.0
 
 # 只有"web 真的回答完了列表"才值得接刷新腿（见 `_chain_refresh` 那段）。
 # #23（主人 10-02 拍板"两道叠加"）之后 `skipped` 也进这一组，理由要说清：
@@ -121,6 +124,39 @@ def _web_base() -> str:
     return os.environ.get("WEB_BASE_URL", "http://localhost:3000")
 
 
+def _refresh_progress() -> dict | None:
+    """#33 甲（CR9-60）：刷新腿**被打断**时，进度只能去问 web。
+
+    为什么必须有这一条（10-04 02:11 实测）：本腿那份逐类结果住在 HTTP 响应体里，
+    连接被重置（`ConnectionResetError 10054`）就永远拿不到 ⇒ `lastRefresh` 只剩
+    `outcome=failed`，我当晚是靠 `MAX(snapshotAt)` 与 `SUM(lastPrice IS NOT NULL)`
+    反推出"刷完 stock、fund 跑到第 35 批就断了"。按 #21/CR9-28 的纪律
+    **能做成状态位的别做成日志**，所以这里直接把它读回来。
+
+    读回来的是 web 那侧写进 `refresh` 状态位的一份逐类进度（`{startedAt, types,
+    current, done[], outcome}`，见 `web/lib/refresh-progress.ts`）。**它顺带把归因变成
+    事后可读**：本腿拿到 `ConnectionResetError` 时，若那份进度是 `outcome=completed`
+    ⇒ web 自己跑完了、是连接在半途被掐（#33 丙①）；若停在 `running` 且 `current`
+    正是当时那一类 ⇒ web 进程根本没走到头（丙②＝dev 在请求进行中重启/重编译）。
+
+    这是**本机 BFF 的一次只读 GET**：不出网、不占任何源族额度；读不到就返回 None
+    （观测通道不得把主流程再拖一次，CR9-45 那条"观测与被观测对象抢同一份资源"的教训）。
+    只在失败路径调用——成功路径的逐类结果本来就在 `results` 里，多问一次是浪费。
+    """
+    import requests
+
+    try:
+        r = requests.get(f"{_web_base()}/api/health", timeout=PROGRESS_READ_TIMEOUT_S)
+        if r.status_code != 200:
+            log.warning("refresh progress read: HTTP %s", r.status_code)
+            return None
+        prog = (r.json() or {}).get("refresh")
+        return prog if isinstance(prog, dict) else None
+    except Exception as e:  # noqa: BLE001 进度读不到不改变刷新腿自己的结论
+        log.warning("refresh progress read failed: %s", e)
+        return None
+
+
 def _refresh_leg(trigger: str, force: bool = False) -> dict:
     """刷新腿（刀 3/甲-1）：`POST /api/market/refresh?type=all`，自带 2400s 预算。
 
@@ -148,6 +184,8 @@ def _refresh_leg(trigger: str, force: bool = False) -> dict:
                 "body": r.text[:200],
             }
             log.warning("refresh leg rejected: status=%s body=%s", r.status_code, r.text[:200])
+            # #33 甲：4xx/5xx 也不该留白——web 回 500 时"到底刷完了几类"只有它自己知道。
+            out["progress"] = _refresh_progress()
         else:
             body = r.json() or {}
             results = body.get("results") or []
@@ -195,9 +233,14 @@ def _refresh_leg(trigger: str, force: bool = False) -> dict:
             "error": f"{type(e).__name__}: {e}",
         }
         log.warning("refresh leg read timeout (outcome inconclusive): %s", e)
+        # 读超时＝web 可能还在写 ⇒ 这时问到的进度是"跑到第几类"的最好证据（丙①/丙② 分档）
+        out["progress"] = _refresh_progress()
     except Exception as e:  # noqa: BLE001 单次失败不影响调度
         out = {"ok": None, "error": f"{type(e).__name__}: {e}", "outcome": "failed"}
         log.warning("refresh leg failed: %s", e)
+        # #33 甲的主战场：连接被重置（10054）时响应体永远拿不到，本腿只剩 `outcome=failed`。
+        # 进度读不到就留 None——**有没有读过**与**读到没读到**是两件事，别用省略冒充。
+        out["progress"] = _refresh_progress()
 
     out["callbackTimeoutS"] = int(timeout_s)
     out["tookMsTotal"] = int((time.time() - started) * 1000)

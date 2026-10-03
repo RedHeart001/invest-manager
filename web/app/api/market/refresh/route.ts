@@ -1,6 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import { refreshAll, refreshSnapshot } from "@/lib/market-snapshot";
+import { refreshAll } from "@/lib/market-snapshot";
+import {
+  finishRefreshProgress,
+  recordRefreshResult,
+  startRefreshProgress,
+} from "@/lib/refresh-progress";
 import { checkRequestOrigin } from "@/lib/request-origin";
 
 // CR-07（本轮 code review）：全类型快照刷新走东财批量通道，单类型即数分钟。显式声明 maxDuration。
@@ -46,16 +51,20 @@ export async function POST(req: NextRequest) {
   // 净值批次单独 ≈1,700s），判据＝该类今日有没有 `snapshotAt`；逐类各自判 ⇒
   // "列表今天到位了、快照还没到位"这种最需要补的形态照常放行（`?force=1` 为总出口）。
   const force = req.nextUrl.searchParams.get("force") === "1";
+  // #33 甲／CR9-60：起跑先落一次进度（"这一轮开始了、要刷哪几类"），随后**每完成一类**
+  // 覆写一次，收尾时置 completed/failed。连接被中途重置时响应体没了，这份文件还在。
+  startRefreshProgress(types);
   try {
-    const results =
-      types.length === 1
-        ? [await refreshSnapshot(types[0], { force })]
-        : await refreshAll(types, { force });
+    // 单类型也走 `refreshAll`（它就是一个顺序循环）：不是为了少写一行，是因为逐类回调
+    // 只有在这条路上才有——分两条路就会有一类刷新没有进度记录。
+    const results = await refreshAll(types, { force, onResult: recordRefreshResult });
+    finishRefreshProgress("completed");
     return NextResponse.json({
       tookMs: Date.now() - started,
       results,
     });
   } catch (e) {
+    finishRefreshProgress("failed");
     return NextResponse.json(
       { error: e instanceof Error ? e.message : "snapshot refresh failed" },
       { status: 500 },

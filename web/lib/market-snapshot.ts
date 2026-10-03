@@ -45,7 +45,7 @@ export const EM_SNAPSHOT_TYPES = new Set(["stock", "fund", "bond", "hk"]);
  */
 export const EM_BATCH_DELAY_MS = 5000;
 
-type SnapshotResult = {
+export type SnapshotResult = {
   type: string;
   total: number;
   updated: number;
@@ -237,11 +237,17 @@ async function refreshSnapshotInner(type: string): Promise<SnapshotResult> {
 
 export async function refreshAll(
   types: string[],
-  opts: { force?: boolean } = {},
+  opts: { force?: boolean; onResult?: (r: SnapshotResult) => void } = {},
 ): Promise<SnapshotResult[]> {
+  // #33 甲：每完成一类就回调一次（进度状态位要**边跑边落盘**，等证据自己攒完就晚了）。
+  // `onResult` 留在调用方手里而不让本模块直接写文件，是为了让这条刷新链仍然可单测、
+  // 也让"谁拥有这一轮"这件事继续在路由层说清（路由才是那轮刷新的一条腿）。
+  const { onResult, ...inner } = opts;
   const results: SnapshotResult[] = [];
   for (const t of types) {
-    results.push(await refreshSnapshot(t, opts));
+    const r = await refreshSnapshot(t, inner);
+    results.push(r);
+    onResult?.(r);
   }
   return results;
 }

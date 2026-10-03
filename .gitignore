@@ -40,6 +40,10 @@ data-service/*.out
 # ⇒ 跑一次全量测试就在 `git status` 里留下两个待跟踪项，与上面那条防的是同一件事。
 web/*.out
 
+# #33 甲（CR9-60）：刷新腿的逐类进度状态位（web 每完成一类覆写一次，供 /api/health 回读）。
+# 它是**运行时产物**，内容只有逐类计数与时刻，落进仓库既没有可比性也会被夜跑反复改动。
+web/runtime/
+
 # npx skills 的"通用位"产物：只有 Codex 等其他 agent 读它，Claude Code 只读 .claude/skills/
 # 技能实体已落在 .claude/skills/<name>/，故此处忽略，避免同一份内容在仓库里存两份
 .agents/

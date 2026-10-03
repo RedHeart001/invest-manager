@@ -1,0 +1,167 @@
+/**
+ * CR9-60（#33 甲）离线单测：刷新腿的**逐类进度状态位**（`lib/refresh-progress.ts`）。
+ *
+ * 背景（10-04 02:11 实测）：链式刷新腿被 `ConnectionResetError(10054)` 打断时，逐类结果
+ * 住在响应体里 ⇒ 永远拿不到，`lastRefresh` 只剩一句 `outcome=failed`，只能靠库里的
+ * `MAX(snapshotAt)` 反推中断点。主人的字＝"甲＋丙①"，本模块就是"甲"。
+ *
+ * 这套断言要钉住的四件事：
+ * 1. **边跑边落盘**：起跑写一次、每完成一类写一次 ⇒ 任何时刻被掐断都留下"跑到第几类"；
+ * 2. **续得上**：`done` 从盘上读回来接着写，不是模块内存——C17 记过 Next 的 HMR 会重建
+ *    模块作用域，而进程重启正是本条要归因的那一档；
+ * 3. **收尾态要说得出口**：`completed` ⇄ 停在 `running` 是 #33 丙①/丙② 的分档依据；
+ * 4. **观测不拖垮主功能**（CR9-45／#29 同族）：写不进只 warn，读不到只 null，都不抛。
+ *
+ * 全程零网络、零 prisma（`SnapshotResult` 是 `import type`，编译后即消失），
+ * 落点由 `REFRESH_PROGRESS_FILE` 指到系统临时目录 ⇒ 不许把仓库目录当测试产物落点。
+ */
+
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import type { SnapshotResult } from "./market-snapshot";
+import {
+  finishRefreshProgress,
+  readRefreshProgress,
+  recordRefreshResult,
+  startRefreshProgress,
+} from "./refresh-progress";
+
+const TYPES = ["stock", "fund", "bond", "crypto", "hk"];
+
+function res(type: string, over: Partial<SnapshotResult> = {}): SnapshotResult {
+  return {
+    type,
+    total: 10,
+    updated: 10,
+    failedBatches: 0,
+    tookMs: 1234,
+    snapshotAt: "2026-10-04T18:00:00.000Z",
+    ...over,
+  };
+}
+
+const file = () => process.env.REFRESH_PROGRESS_FILE as string;
+
+describe("刷新腿进度状态位（CR9-60／#33 甲）", () => {
+  let dir = "";
+  let prevEnv: string | undefined;
+
+  beforeEach(() => {
+    prevEnv = process.env.REFRESH_PROGRESS_FILE;
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "rp-"));
+    process.env.REFRESH_PROGRESS_FILE = path.join(dir, "refresh-progress.json");
+  });
+
+  afterEach(() => {
+    if (prevEnv === undefined) delete process.env.REFRESH_PROGRESS_FILE;
+    else process.env.REFRESH_PROGRESS_FILE = prevEnv;
+    fs.rmSync(dir, { recursive: true, force: true });
+    vi.restoreAllMocks();
+  });
+
+  it("起跑就落一次盘：running／types 全／current 是第一类／done 空", () => {
+    startRefreshProgress(TYPES);
+    const p = readRefreshProgress();
+    expect(p?.outcome).toBe("running");
+    expect(p?.types).toEqual(TYPES);
+    expect(p?.current).toBe("stock");
+    expect(p?.done).toEqual([]);
+    expect(typeof p?.startedAt).toBe("string");
+    expect(p?.finishedAt).toBe(null);
+  });
+
+  it("每完成一类推进一格：done 累计、current 跟着走、startedAt 不被改写", () => {
+    startRefreshProgress(TYPES);
+    const t0 = readRefreshProgress()?.startedAt;
+    recordRefreshResult(res("stock"));
+    let p = readRefreshProgress();
+    expect(p?.done.map((x) => x.type)).toEqual(["stock"]);
+    expect(p?.current).toBe("fund");
+    recordRefreshResult(res("fund", { updated: 3500 }));
+    p = readRefreshProgress();
+    expect(p?.done.map((x) => x.type)).toEqual(["stock", "fund"]);
+    expect(p?.current).toBe("bond");
+    expect(p?.outcome).toBe("running"); // 中途永远还是 running——这正是"被打断"的形状
+    expect(p?.startedAt).toBe(t0);
+  });
+
+  it("五类刷完 ⇒ current 归 null（『跑完了』与『停在第几类』必须不同形）", () => {
+    startRefreshProgress(TYPES);
+    for (const t of TYPES) recordRefreshResult(res(t));
+    const p = readRefreshProgress();
+    expect(p?.current).toBe(null);
+    expect(p?.done).toHaveLength(5);
+  });
+
+  it("收尾 completed：落时刻、不改 startedAt、逐类结果还在", () => {
+    startRefreshProgress(TYPES);
+    const t0 = readRefreshProgress()?.startedAt;
+    recordRefreshResult(res("stock"));
+    finishRefreshProgress("completed");
+    const p = readRefreshProgress();
+    expect(p?.outcome).toBe("completed");
+    expect(p?.startedAt).toBe(t0);
+    expect(typeof p?.finishedAt).toBe("string");
+    expect(p?.done).toHaveLength(1); // 收尾不许把已完成的那一类抹掉
+  });
+
+  it("🔁 异常收尾也标 failed：这条链的失败形态同样留得下来", () => {
+    startRefreshProgress(TYPES);
+    finishRefreshProgress("failed");
+    const p = readRefreshProgress();
+    expect(p?.outcome).toBe("failed");
+    expect(p?.current).toBe(null);
+  });
+
+  it("没有起跑记录时收尾/回调都不抛（观测不许反过来打断刷新）", () => {
+    expect(() => finishRefreshProgress("completed")).not.toThrow();
+    expect(readRefreshProgress()?.outcome).toBe("completed");
+    expect(() => recordRefreshResult(res("bond"))).not.toThrow();
+    const p = readRefreshProgress();
+    expect(p?.done.map((x) => x.type)).toEqual(["bond"]); // 单类型漏 start 时也要留下痕迹
+  });
+
+  it("写盘失败只 warn：本模块的异常绝不往上冒（CR9-45／#29 同族）", () => {
+    startRefreshProgress(TYPES);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(fs, "writeFileSync").mockImplementation(() => {
+      throw new Error("readonly volume");
+    });
+    expect(() => recordRefreshResult(res("stock"))).not.toThrow();
+    expect(() => finishRefreshProgress("completed")).not.toThrow();
+    expect(warn).toHaveBeenCalledTimes(2);
+    vi.restoreAllMocks();
+  });
+
+  it("先写 .tmp 再改名 ⇒ 磁盘上不留半截文件", () => {
+    startRefreshProgress(TYPES);
+    recordRefreshResult(res("stock"));
+    expect(fs.existsSync(`${file()}.tmp`)).toBe(false);
+    expect(fs.existsSync(file())).toBe(true);
+  });
+
+  it("🔁 读不到就 null：没有文件／半截 JSON／形状不对，三种都当『没有进度可读』", () => {
+    expect(readRefreshProgress()).toBe(null); // 还没有文件
+    fs.writeFileSync(file(), '{"startedAt":"2026-10-0', "utf8"); // 半截
+    expect(readRefreshProgress()).toBe(null);
+    fs.writeFileSync(file(), JSON.stringify({ startedAt: "x" }), "utf8"); // 缺 done/types
+    expect(readRefreshProgress()).toBe(null);
+    fs.writeFileSync(file(), "[1,2]", "utf8"); // 顶层不是对象
+    expect(readRefreshProgress()).toBe(null);
+  });
+
+  it("模块作用域被 HMR 重建后仍能续上（done 读的是盘，不是内存——C17）", async () => {
+    startRefreshProgress(TYPES);
+    recordRefreshResult(res("stock"));
+    vi.resetModules();
+    const fresh = await import("./refresh-progress");
+    fresh.recordRefreshResult(res("fund"));
+    const p = fresh.readRefreshProgress();
+    expect(p?.done.map((x) => x.type)).toEqual(["stock", "fund"]);
+    expect(p?.current).toBe("bond");
+  });
+});

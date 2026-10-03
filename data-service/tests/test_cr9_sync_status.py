@@ -11,6 +11,10 @@
 反向验证成对断言（C34）：既断"部分失败 → ok=False"，也断"全成功 → ok=True"，
 证明 `ok` 不是恒假桩，而是真跟着 web 的判定走。
 
+⚠️ 本套件**在模块作用域把 `requests.get` 也换成了假对象**（CR9-60 起）：刷新腿的三条失败
+路径现在会 GET 一次本机 `/api/health` 读进度状态位，不拦就是拿"这台机上 web 此刻在不在跑"
+当常数读。用例要通过 `HEALTH`／`_reset_get()` 自己决定那份健康检查长什么样。
+
 运行方式（无需任何服务在跑）：
     PYTHONPATH=. .venv/Scripts/python tests/test_cr9_sync_status.py
 """
@@ -48,6 +52,44 @@ class _Resp:
 
     def json(self) -> dict:
         return self._payload
+
+
+# ---------- #33 甲（CR9-60）：进度回读走的是 GET /api/health，这条腿也必须自己控 ----------
+# `_refresh_leg` 的三条失败路径现在会 GET 一次本机 BFF 把逐类进度读回来。不拦它 ⇒ 用例把
+# "这台机上 web 此刻在不在跑、跑的是哪份码"当常数读（CR9-51／#26 同族教训：环境一变就是
+# 假红或假绿），所以整个套件把 `requests.get` 换成假对象，由用例自己改 `HEALTH`。
+GET_CALLS: list[dict] = []
+HEALTH: dict = {"payload": {"status": "ok", "db": "ok"}, "status": 200, "raises": None}
+
+
+def _fake_get(url, **kw):
+    GET_CALLS.append({"url": url, **kw})
+    if HEALTH["raises"] is not None:
+        raise HEALTH["raises"]
+    return _Resp(HEALTH["payload"], HEALTH["status"])
+
+
+requests.get = _fake_get  # type: ignore[assignment]
+
+
+def _reset_get(payload: dict | None = None, status: int = 200, raises=None) -> None:
+    GET_CALLS.clear()
+    HEALTH["payload"] = payload if payload is not None else {"status": "ok", "db": "ok"}
+    HEALTH["status"] = status
+    HEALTH["raises"] = raises
+
+
+# web 那侧写出来的进度（形状见 `web/lib/refresh-progress.ts`；这里是 10-04 02:11 那轮的形状）
+PROGRESS = {
+    "startedAt": "2026-10-03T18:01:58.000Z",
+    "types": ["stock", "fund", "bond", "crypto", "hk"],
+    "current": "bond",
+    "outcome": "running",
+    "done": [
+        {"type": "stock", "total": 5571, "updated": 5570, "failedBatches": 0},
+        {"type": "fund", "total": 28013, "updated": 3500, "failedBatches": 0},
+    ],
+}
 
 
 def _run_with(body: dict, status: int = 200) -> dict:
@@ -378,6 +420,73 @@ def test_run_now_claim_clears_skip_reason() -> None:
         ss._state.update(saved)
 
 
+# ---------- #33 甲（CR9-60）：刷新腿被打断时，进度要从 web 的状态位读回来 ----------
+
+
+def test_progress_read_back_on_failure_paths() -> None:
+    """本腿失败 ⇒ GET 一次本机 `/api/health`，把"跑到第几类"挂进 `lastRefresh.progress`。
+
+    三条失败路径各断一次（连接被重置＝10-04 02:11 的真形态／读超时／4xx-5xx），
+    再断两件反向的事：**成功轮一次都不问**（逐类结果本来就在 `results` 里，多问是浪费），
+    以及**读不到也要留键**——"没读过"与"读过但没读到"不许同形。
+    """
+    _reset_get({"status": "ok", "db": "ok", "refresh": PROGRESS})
+    _r, refresh, _legs = _run_two_legs(
+        refresh_exc=ConnectionError("('Connection aborted.', ConnectionResetError(10054, ...)")
+    )
+    check("#33甲：连接被重置的轮次把 web 的逐类进度读回来挂进 progress",
+          refresh.get("outcome") == "failed" and (refresh.get("progress") or {}).get("outcome") == "running"
+          and len((refresh.get("progress") or {}).get("done") or []) == 2, str(refresh)[:200])
+    check("#33甲：问的是一次 GET /api/health（不是再 POST 一次刷新＝观测不许变成第二次写入）",
+          len(GET_CALLS) == 1 and str(GET_CALLS[0].get("url", "")).endswith("/api/health")
+          and "force" not in str(GET_CALLS[0].get("url", "")), str(GET_CALLS)[:160])
+    check("#33甲：读的预算是 PROGRESS_READ_TIMEOUT_S（5s），不是刷新腿那 2400s",
+          (GET_CALLS[0].get("timeout") if GET_CALLS else None) == ss.PROGRESS_READ_TIMEOUT_S,
+          str(GET_CALLS[:1])[:120])
+    check("#33甲🔁：进度不替本腿下结论——outcome 与 error 照旧是自己那份",
+          "ConnectionError" in str(refresh.get("error")), str(refresh.get("error"))[:120])
+
+    _reset_get({"status": "ok", "db": "ok", "refresh": PROGRESS})
+    _r2, refresh2, _l2 = _run_two_legs(refresh_exc=requests.exceptions.ReadTimeout("read timeout"))
+    check("#33甲：读超时（inconclusive）同样挂进度——这时『刷到第几类』正是最想知道的",
+          refresh2.get("outcome") == "inconclusive"
+          and (refresh2.get("progress") or {}).get("current") == "bond", str(refresh2)[:200])
+
+    _reset_get({"status": "ok", "db": "ok", "refresh": PROGRESS})
+    _r3, refresh3, _l3 = _run_two_legs(refresh_resp=_Resp({"error": "boom"}, status=500))
+    check("#33甲：web 回 5xx（rejected）也挂——它自己吐了错，更要看它跑到哪儿了",
+          refresh3.get("outcome") == "rejected" and isinstance(refresh3.get("progress"), dict),
+          str(refresh3)[:200])
+
+    _reset_get()
+    _r4, refresh4, _l4 = _run_two_legs()
+    check("#33甲🔁：成功轮零次 GET（多问一次就是多占一次本机往返）", len(GET_CALLS) == 0,
+          str(GET_CALLS)[:120])
+    check("#33甲🔁：成功轮不挂 progress 键——缺省＝没读过，与『读过而读到 null』不同形",
+          "progress" not in refresh4 and refresh4.get("outcome") == "completed", str(refresh4)[:160])
+
+    _reset_get({"status": "ok", "db": "ok", "refresh": PROGRESS}, status=503)
+    _r5, refresh5, _l5 = _run_two_legs(refresh_exc=ConnectionError("reset"))
+    check("#33甲：health 非 200 ⇒ progress 为 None **但键在**（读过而没读到，要能分开）",
+          "progress" in refresh5 and refresh5.get("progress") is None, str(refresh5)[:200])
+
+    _reset_get({"status": "ok", "db": "ok"})  # 旧 web：没有 refresh 这个键
+    _r6, refresh6, _l6 = _run_two_legs(refresh_exc=ConnectionError("reset"))
+    check("#33甲🔁：旧 web 的载荷里根本没有 refresh 键 ⇒ 键在而值为 None（读过≠没读过要能分开）",
+          "progress" in refresh6 and refresh6["progress"] is None, str(refresh6)[:200])
+
+    _reset_get({"status": "ok", "db": "ok", "refresh": ["stock", "fund"]})  # 列表形态（我一度写错的形状）
+    _r7, refresh7, _l7 = _run_two_legs(refresh_exc=ConnectionError("reset"))
+    check("#33甲🔁：refresh 不是对象（旧形状／上游改形）⇒ 当没读到，不拿它猜",
+          "progress" in refresh7 and refresh7["progress"] is None, str(refresh7)[:200])
+
+    _reset_get(raises=requests.exceptions.ConnectionError("health 自己连不上"))
+    _r8, refresh8, _l8 = _run_two_legs(refresh_exc=ConnectionError("reset"))
+    check("#33甲：进度读失败**不改变主流程**——本腿仍是 failed，error 仍是它自己那条",
+          refresh8.get("outcome") == "failed" and refresh8.get("progress") is None
+          and "ConnectionError" in str(refresh8.get("error")), str(refresh8)[:200])
+
+
 # ---------- #23 当日幂等闸门（主人 2026-10-02 拍板"两道叠加"；闸门本体在 web 侧） ----------
 #
 # 本套件要钉的是 ds 这一侧的三个契约，一个都不许"顺手多做"：
@@ -538,6 +647,7 @@ def main() -> int:
     test_chain_refresh_also_fires_on_partial_failure()
     test_chain_refresh_skipped_when_sync_leg_unanswered()
     test_refresh_leg_own_outcome_semantics()
+    test_progress_read_back_on_failure_paths()
     test_status_exposes_skip_and_refresh()
     test_run_now_claim_clears_skip_reason()
     test_gate_skipped_round_is_not_completed()
