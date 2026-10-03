@@ -3,7 +3,9 @@
 背景（10-03 探针／10-04 落码实测，见 docs/FIX-LEDGER.md 的 #32 与 CR9-59 两行）：
 `Product` 里 `us` 长期只有 1 行、`/product/us/AAPL` 404、搜索 0 结果，根因是
 **美股从来没有列表 provider**（`register_list` 里根本没有 us）。甲的口径＝先把入口通了：
-只取前排 N 页（≈300 只），**绝不打满 913 页**（那是乙的 913 次请求），且这轮**不开美股 tab**。
+只取前排 N 页（20N 行，实测 15 页＝300 行），**绝不打满 913 页**（那是乙的 913 次请求），
+且这轮**不开美股 tab**；10-04 03:1x 的 (2) 定案在前排之上再叠一道**行业闸**（无 `category`
+的行不进库 ⇒ 300 行实测留 ≈179），闸在解析之后、翻页之前 ⇒ **请求数不受影响**。
 
 本套件钉住四类事：
 1. **解析按实测字节，不按想象**——jsonp 外层、`count`/`data` 内层、中文名 `cname` 优先、
@@ -11,10 +13,13 @@
    `tencent_provider.CURRENCY_BY_TYPE` 早已按 `us`/`NASDAQ` 写死）。
 2. **额度闸**：`US_LIST_PAGES` 的默认值、非法回落、"合法但手滑"的巨大值被硬上限夹住；
    上游给不满一页就**不再往后发**——"少花钱"必须有断言，不然它只是一句注释。
-3. **不替主人判算不算一条美股**（#32 的 (2) 仍待字）：ETF/畸形行照收，只丢**结构不可用**的行
-   （无 symbol、或两个名字都缺）。这是一组**反向**断言，防的是"将来有人手一抖加了白名单"。
-4. **覆盖面必须自己说话**（CR9-31/R16）：`degraded=True` ＋ note 带盘子总数、行业缺失数、
-   交易所分布、中途失败的页数与成因。
+3. **两道闸分层，且第二道是主人的口径**（不是我的判断）：**结构闸**在行级映射里
+   （无 symbol、或两个名字都缺 ⇒ 建不出主键，`_us_product` 返回 None）；**行业闸**在列表层
+   （10-04 03:1x 的字＝"剔除没行业的"＝#32 的 (2) 定案 ⇒ `category` 为 null/空串的行不进库）。
+   分层是有意为之：映射函数不看行业，才能分别报出"结构丢弃"与"按口径剔除"是两个数。
+4. **覆盖面必须自己说话**（CR9-31/R16）：`degraded=True` ＋ note 带盘子总数、**剔掉的无行业
+   行数**、交易所分布、中途失败的页数与成因；且 note 明写**这条筛法不等于"只留普通股"**
+   （行业字段缺失与品种无关 ⇒ 带行业的 ETF 会留下、不带行业的普通股被砍）。
 
 零出网：provider 模块里的 `requests` 整个换成假模块（不动全局 `requests`，免得污染同进程
 其他套件，也免得"这条路没真出网"变成一句自我声明）。假对象对**没备数据的页号直接抛**——
@@ -56,7 +61,7 @@ NVDA = {"name": "NVIDIA Corporation", "cname": "英伟达公司", "category": "�
         "symbol": "NVDA", "price": "233.95", "market": "NASDAQ"}
 VISA = {"name": "Visa Inc.", "cname": "维萨公司", "category": "",  # 实测：空串（不是 null）
         "symbol": "V", "price": "360.66", "market": "NYSE"}
-QQQ = {"name": "Invesco QQQ Trust", "cname": "", "category": None,  # ETF：按甲不筛
+QQQ = {"name": "Invesco QQQ Trust", "cname": "", "category": None,  # ETF：无行业 ⇒ 列表层剔掉
        "symbol": "QQQ", "price": "480.10", "market": "NASDAQ"}
 ZZZTX = {"name": "ZZZTX", "cname": "", "category": None,  # 10-03 实测的畸形行：name==symbol
          "symbol": "ZZZTX", "price": "500.00", "market": "NYSE"}
@@ -189,7 +194,8 @@ def test_us_product_mapping() -> None:
     check("英文名喂 `_pinyin_pair` 是透传（实测钉住，不靠猜）",
           q["pinyin"] == "Invesco QQQ Trust" and q["pinyinInitials"] == "Invesco QQQ Trust", str(q)[:110])
     check("🔁 category 为 null ⇒ tags 为空（null 与空串同处）", q["tags"] == [], str(q)[:90])
-    check("ETF 不被筛掉：算不算一条美股归主人（#32 (2) 待字）", q["code"] == "QQQ", str(q)[:90])
+    check("行级映射不看品种：QQQ 照样出行（筛不筛是列表层那道闸的事，见第 4 节）",
+          q["code"] == "QQQ", str(q)[:90])
 
     outs = [
         akp._us_product({"symbol": "", "name": "No Symbol Inc.", "cname": "无代码"}),
@@ -201,7 +207,8 @@ def test_us_product_mapping() -> None:
     check("🔁 只有空白的 symbol ⇒ 丢（strip 后判空）", outs[2] is None, str(outs[2])[:80])
 
     z = akp._us_product(ZZZTX)
-    check("畸形行（name==symbol、category null）照收——它该进 note 的盘子而不是被隐身",
+    check("畸形行（name==symbol、category null）在映射层仍出行——它被剔是因为**没有行业**，"
+          "不是因为名字长得像代码（两道闸各有各的字面）",
           z["code"] == "ZZZTX" and z["name"] == "ZZZTX" and z["tags"] == [], str(z)[:90])
 
 
@@ -231,14 +238,20 @@ def test_list_us_stocks_declaration() -> None:
     em_before = get_limiter("eastmoney").state()
     obs_before = get_limiter("akshare-obs").state()
     rows, meta = listed({1: jsonp20([NVDA, VISA, QQQ, ZZZTX], "d")}, 1)
-    check("一页 20 行", len(rows) == 20, str(len(rows)))
+    check("一页 20 行 ⇒ 留 17（NVDA＋16 个有行业的填充行）", len(rows) == 17, str(len(rows)))
     check("source 声明＝新浪美股名单（不是 akshare 主源）", meta["source"] == "sina-us-category-list", str(meta)[:90])
     check("覆盖面按设计缩水 ⇒ 恒带 degraded 声明", meta.get("degraded") is True, str(meta)[:90])
     check("note 带上游自己声明的盘子数", "18241" in meta["note"], meta["note"][:160])
-    check("note 带行业缺失计数（VISA 空串／QQQ／ZZZTX 为 null）", "行业缺失 3 行" in meta["note"], meta["note"][:160])
-    check("note 带交易所分布（16 个填充行也是 NASDAQ）",
-          "NASDAQ×18" in meta["note"] and "NYSE×2" in meta["note"], meta["note"][:160])
-    check("note 明写不替主人判可投资性", "#32" in meta["note"], meta["note"][:160])
+    check("note 报**剔了多少行**（VISA 空串／QQQ／ZZZTX 为 null）——砍掉 40% 的名单不许隐身",
+          "剔掉 3 行" in meta["note"], meta["note"][:200])
+    check("note 带交易所分布（只数留下来的行：17 行全 NASDAQ）",
+          "NASDAQ×17" in meta["note"], meta["note"][:160])
+    check("🔁 被剔的行不进交易所分布（VISA/ZZZTX 是 NYSE，留下来的 17 行里没有 NYSE）",
+          "NYSE" not in meta["note"], meta["note"][:200])
+    check("note 带着这条口径的出处（#32 的 (2)），日后谁改口径能看到是谁定的",
+          "#32" in meta["note"], meta["note"][:160])
+    check("note 明写这条筛法**不等于只留普通股**（带行业的 ETF 会进来）",
+          "不等于" in meta["note"] and "ETF" in meta["note"], meta["note"][:220])
     check("note 说清只取前排 N 页＝子集", "只取前排 1 页" in meta["note"], meta["note"][:160])
 
     em_after = get_limiter("eastmoney").state()
@@ -288,8 +301,11 @@ def test_list_us_stocks_partial_and_total_failure() -> None:
         {1: jsonp20([NVDA, VISA], "x"), 2: RuntimeError("RemoteDisconnected"), 3: jsonp20([QQQ], "y")},
         3,
     )
-    check("中途一页失败 ⇒ 已拿到的行照常返回（不整轮作废）", len(rows) == 40, str(len(rows)))
+    check("中途一页失败 ⇒ 已拿到的行照常返回（不整轮作废；40 行里剔掉 VISA/QQQ 两个无行业的＝38）",
+          len(rows) == 38, str(len(rows)))
     check("失败的页数必须自己说话", "1 页失败" in meta["note"], meta["note"][:160])
+    check("🔁 「剔了多少行」与「失败了几页」是两个数，不许混成一句",
+          "剔掉 2 行" in meta["note"] and "1 页失败" in meta["note"], meta["note"][:220])
     check("失败成因带在 note 里（不看日志也能归因）", "RemoteDisconnected" in meta["note"], meta["note"][:200])
     check("部分到货仍算一次成功（degraded 只有一份语义，不新增失败态）",
           meta.get("degraded") is True, str(meta)[:90])
@@ -300,6 +316,55 @@ def test_list_us_stocks_partial_and_total_failure() -> None:
     except Exception as e:  # noqa: BLE001
         raised = type(e).__name__
     check("全页皆失败 ⇒ ProviderError（空列表不许冒充成功）", raised == "ProviderError", raised)
+
+
+# ---------- 4b. 行业闸（#32 的 (2) 定案＝10-04 03:1x 主人的字"剔除没行业的"） ----------
+
+
+def test_category_gate() -> None:
+    no_key = {"symbol": "NOKEY", "name": "No Key Inc.", "cname": "无键公司"}  # 连键都没有
+    blank = dict(NVDA, symbol="BLANK", category="   ")  # 全空白：strip 之后为空
+    rows, meta = listed({1: jsonp20([NVDA, VISA, QQQ, no_key, blank], "g")}, 1)
+    codes = [r["code"] for r in rows]
+    check("『没有行业』的四种形态（空串／null／缺键／全空白）由同一道闸剔掉",
+          len(rows) == 16 and "剔掉 4 行" in meta["note"],
+          f"{len(rows)} 行｜{meta['note'][:150]}")
+    check("🔁 带行业的行一条都没被误剔（NVDA＋15 个填充行全在）",
+          "NVDA" in codes and sum(1 for c in codes if c.startswith("Fg")) == 15, str(codes[:4]))
+
+    # 闸排在**去重登记之前**：被剔的代码不进 `seen` ⇒ 后一页带上行业时还能救回来
+    rows2, meta2 = listed(
+        {1: jsonp20([VISA], "h1"), 2: jsonp20([dict(VISA, category="金融服务")], "h2")}, 2,
+    )
+    codes2 = [r["code"] for r in rows2]
+    check("同一代码第 1 页无行业被剔、第 2 页带行业 ⇒ 仍入库且不重复（口径闸不冒充去重闸）",
+          "V" in codes2 and codes2.count("V") == 1, str(codes2[:3]))
+    check("救回来只算剔了 1 行（不是两次都不见）", "剔掉 1 行" in meta2["note"], meta2["note"][:150])
+
+    rows3, meta3 = listed(
+        {1: jsonp20([{"name": "No Symbol", "cname": "无代码"}, dict(VISA)], "t")}, 1,
+    )
+    check("🔁 两道闸分开计：无 symbol 那行走的是**结构丢弃**，不进『剔掉 N 行』（1 行而非 2 行）",
+          len(rows3) == 18 and "剔掉 1 行" in meta3["note"],
+          f"{len(rows3)} 行｜{meta3['note'][:140]}")
+
+    raised, msg = "", ""
+    try:
+        listed({1: jsonp([VISA, QQQ, ZZZTX])}, 1)
+    except Exception as e:  # noqa: BLE001
+        raised, msg = type(e).__name__, str(e)
+    check("整页都不带行业 ⇒ ProviderError（空名单不许冒充成功），成因带上剔了多少",
+          raised == "ProviderError" and "剔无行业 3 行" in msg, f"{raised}｜{msg[:140]}")
+
+    # 闸**不省钱**：筛在解析之后、翻页之前 ⇒ 上游请求数一页都不少
+    full_none = jsonp([dict(VISA, symbol=f"X{i}") for i in range(PAGE_SIZE)])
+    raised2 = ""
+    try:
+        listed({1: full_none, 2: full_none, 3: full_none}, 3)
+    except Exception as e:  # noqa: BLE001
+        raised2 = type(e).__name__
+    check("三页满页全被剔 ⇒ 恰好 3 次请求（名单缩到 0 也不会少打一页，别把这道闸读成省钱）",
+          raised2 == "ProviderError" and len(CALLS) == 3, f"{raised2}｜{len(CALLS)} 次")
 
 
 # ---------- 5. 注册与派发 ----------
@@ -330,6 +395,7 @@ if __name__ == "__main__":
     test_list_us_stocks_paging()
     test_list_us_stocks_early_stop()
     test_list_us_stocks_partial_and_total_failure()
+    test_category_gate()
     test_registration_and_dispatch()
     fails = [x for x in results if not x[1]]
     print(f"\n===== {len(results) - len(fails)}/{len(results)} 通过 =====")

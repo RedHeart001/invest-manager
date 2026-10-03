@@ -223,9 +223,10 @@ def _jsonp_payload(text: str) -> dict:
 def _us_product(row: dict) -> dict | None:
     """一行新浪美股记录 ⇒ 主数据 schema；**结构不可用**时返回 None。
 
-    这里刻意**不做产品判断**：盘子里 ETF 与普通股混发（第 2 页就有 `QQQ`、尾部有 LP），
-    "算不算一条美股"是主人的口径（#32 的 (2) 未拍）⇒ 只丢"建不出主键/无法展示"的行
-    （无 `symbol`、或两个名字都缺）。中文名优先（与 A股/港股同一套展示与拼音检索），
+    这里只管结构（无 `symbol` 或两个名字都缺 ⇒ 建不出 (type,code) 主键、展示不出名字），
+    **不看品种、也不看行业**：行业那道闸在 `_list_us_stocks` 的循环里（主人的口径是
+    "名单层面筛"，见 #32 的 (2)＝10-04 03:1x 定案），映射函数保持纯净，才能分别报出
+    "结构丢弃"与"按口径剔除"是两个数。中文名优先（与 A股/港股同一套展示与拼音检索），
     `category`（行业，实测有 null 与空串）进 tags 与板块检索，`market` 原样进 `exchange`
     （`lib/profile.ts:91` 与 `tencent_provider.CURRENCY_BY_TYPE` 早已按 `us`/`NASDAQ` 写死）。
     """
@@ -1140,14 +1141,18 @@ class AkshareProvider(BaseProvider):
 
         刻意声明 `degraded`：覆盖面**按设计**小于上游自己报的总数（不是上游挂了），
         按 CR9-31 的口径这必须让消费侧读得到，否则"300 只"与"全量"长得一模一样。
+        10-04 03:1x 主人的字（#32 的 (2)）在此再加一道**行业闸**＝`category` 为 null 或空串
+        的行不进库；闸在解析之后、翻页之前 ⇒ **请求数不受它影响**（15 页仍是 15 次），
+        它只缩名单不缩额度。
         """
         pages = _us_list_pages()
 
-        def _fetch() -> tuple[list[dict], str, list[str]]:
+        def _fetch() -> tuple[list[dict], str, list[str], int]:
             rows: list[dict] = []
             seen: set[str] = set()
             declared = ""
             failures: list[str] = []
+            dropped = 0  # #32 的 (2) 定案：按"没有行业标签"剔掉的行数（要能在 note 里看见）
             for page in range(1, pages + 1):
                 if page > 1:
                     time.sleep(US_LIST_PAGE_INTERVAL_S)
@@ -1180,20 +1185,27 @@ class AkshareProvider(BaseProvider):
                     product = _us_product(row)
                     if product is None or product["code"] in seen:
                         continue
+                    # 行业闸排在**去重登记之前**：被这道闸剔掉的代码不进 `seen`，所以同一
+                    # 代码在后一页带上行业时还能被救回来——口径闸不许冒充去重闸。
+                    if not product["tags"]:
+                        dropped += 1
+                        continue
                     seen.add(product["code"])
                     rows.append(product)
                 if len(data) < US_LIST_PAGE_SIZE:
                     break  # 上游给不满一页＝已到尾部（10-03 实测第 913 页只回 1 行）
-            return rows, declared, failures
+            return rows, declared, failures, dropped
 
-        rows, declared, failures = _ak_request(_fetch, US_LIST_WHOLE_TIMEOUT_S, "sina.us-list")
+        rows, declared, failures, dropped = _ak_request(
+            _fetch, US_LIST_WHOLE_TIMEOUT_S, "sina.us-list"
+        )
         if not rows:
             raise ProviderError(
                 "us list empty from all pages"
-                f"（{pages} 页{'，失败：' + '、'.join(failures[:5]) if failures else '全无载荷'}）"
+                f"（{pages} 页{'，失败：' + '、'.join(failures[:5]) if failures else '全无载荷'}"
+                f"，剔无行业 {dropped} 行）"
             )
 
-        no_category = sum(1 for r in rows if not r["tags"])
         markets: dict[str, int] = {}
         for r in rows:
             key = r["exchange"] or "?"
@@ -1201,10 +1213,11 @@ class AkshareProvider(BaseProvider):
         spread = "/".join(f"{k}×{v}" for k, v in sorted(markets.items()))
         note = (
             f"美股主数据按甲方案只取前排 {pages} 页"
-            + (f"（上游声明盘子 {declared} 只 ⇒ 本次 {len(rows)} 只是子集）" if declared else "")
-            + f"；行业缺失 {no_category} 行、交易所分布 {spread}。"
-            "名单里 ETF/合伙份额与普通股混发，代码侧只丢结构不可用的行"
-            "（无 symbol 或两个名字都缺），不替主人判算不算一条美股（#32 的 (2) 待字）"
+            + (f"（上游声明盘子 {declared} 只 ⇒ 本次留 {len(rows)} 只）" if declared else "")
+            + f"；按「没有行业标签即剔除」的口径剔掉 {dropped} 行、交易所分布 {spread}。"
+            "⚠️ 这条筛法不等于「只留普通股」：新浪的行业字段缺失与品种无关"
+            "（实测 Visa/Meta 这一档常为空），所以带行业的 ETF 照样进来、"
+            "不带行业的普通股被砍（#32 的 (2)＝主人 10-04 定案，代价已知）"
             + (
                 f"；本次 {len(failures)} 页失败（{'、'.join(failures[:3])}）"
                 "⇒ 行数可能低于前排应有规模"
