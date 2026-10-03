@@ -62,6 +62,7 @@ function executedCount(out) {
 
 const lines = [];
 const gaps = [];
+const failedSuites = [];
 for (const s of suites) {
   const started = Date.now();
   const r = spawnSync(process.execPath, [join(WEB_DIR, "scripts", s)], {
@@ -89,6 +90,7 @@ for (const s of suites) {
       : ""
     : ` ⚠️ 实跑 ${ran} 不在登记形态 ${shapes.join("/")} 内（CR9-25/36）`;
   if (!hit) gaps.push(`${s}：应跑形态 ${shapes.join(" 或 ")}，实跑 ${ran}`);
+  if (r.status !== 0) failedSuites.push(`${s}：exit=${r.status}（断言 ${ran}/${shapes.join("|")}）`);
   lines.push(
     `\n########## ${s} — exit=${r.status} 用时 ${Math.round((Date.now() - started) / 1000)}s 断言 ${ran}/${shapes.join("|")}${hit ? "" : " ⚠️"} ##########\n${tail}`,
   );
@@ -98,6 +100,19 @@ writeFileSync(join(WEB_DIR, "verify-suites.txt"), lines.join("\n"), "utf8");
 if (gaps.length) {
   // 不静默：绿色数字里混着"根本没跑"的断言，正是 CR9-25 要消灭的假闭环
   console.log(`\n!!! 断言缺口（全绿不等于全跑）：\n  - ${gaps.join("\n  - ")}`);
+}
+if (failedSuites.length) {
+  console.log(`\n!!! 套件非零退出：\n  - ${failedSuites.join("\n  - ")}`);
+}
+// #28（10-03 主人点头）：缺口与失败**必须编码进退出码**。此前这里无条件打完 `ALL DONE` 就
+// exit 0 ⇒ 门槛④ 历次拿来当凭据的那个 `verify_all_exit=0`，在"某套 exit=1、断言 0/23"的
+// 日子里照样是 0（10-03 01:1x 的 p4 就是这么被糊过去的，靠人逐行读 `exit=` 才发现）。
+// 属假绿的第三种形态：CR9-25 是"条件跳过仍 exit 0"，CR9-36 是"多档计数"，这次是
+// **缺口已经被打印出来、却没被编码**。多档形态仍按 PLANNED 数组判（CR9-36 不变）。
+const bad = gaps.length + failedSuites.length;
+if (bad) {
+  console.log(`\nGATE FAILED（${bad} 项）：详见上面 !!! 段落；这次读数不得记作"④ 全绿"`);
+  process.exit(1);
 }
 console.log("ALL DONE");
 
