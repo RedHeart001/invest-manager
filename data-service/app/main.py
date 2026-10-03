@@ -201,9 +201,15 @@ def kline(
 
 @app.get("/products")
 def products(
-    type: str = Query(..., description="产品类型：stock/fund/bond/crypto"),
+    type: str = Query(
+        ...,
+        description="产品类型：stock/fund/bond/crypto/hk/us（可用集合＝列表注册表，未注册者 400）",
+    ),
 ):
     """全量产品列表（供 BFF 同步落库，低频调用）。
+
+    CR9-59（2026-10-04）：`us` 自此可取，但它是**有界子集**（新浪排行名单的前 N 页，
+    `US_LIST_PAGES`）且恒带 `degraded`/`note` 声明覆盖面——不是"美股全量"。
 
     CR9-31：响应恒带 `source`（这批数据真正的出网上游），走内部备源时另带
     `degraded`/`note`——覆盖面缩水必须对消费侧可见（R16），否则 BFF 只能猜。

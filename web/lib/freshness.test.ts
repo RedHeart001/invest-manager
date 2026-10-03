@@ -15,7 +15,7 @@ vi.mock("@/lib/prisma", () => ({
   prisma: { product: { groupBy: (...a: unknown[]) => groupBy(...a), findFirst: (...a: unknown[]) => findFirst(...a) } },
 }));
 
-import { listSyncedToday, snapshotRefreshedToday, staleNotes } from "./freshness";
+import { BROWSE_TYPES, listSyncedToday, snapshotRefreshedToday, staleNotes } from "./freshness";
 import { beijingDateOf, beijingToday } from "./time";
 
 /** 北京某个"月-日 时:分"对应的 UTC 瞬间（写用例时用可读的形式，不手算偏移） */
@@ -177,5 +177,17 @@ describe("陈旧说明只在有问题时出（#22(b) 改判：正常态一行字
       { type: "fund", kind: "pending", since: TODAY },
       { type: "bond", kind: "snapshot", since: "2026-09-25" },
     ]);
+  });
+});
+
+describe("分类浏览的类型集合（CR9-59 本轮刻意划下的边界）", () => {
+  // 主人 2026-10-04 的字＝"#32 甲先做，**先不用开美股 tab**" ⇒ 美股进主数据但不进分类浏览。
+  // 这条断言的作用不是证明"us 不在里面"这个事实，而是**锁住连带义务**：谁把 us 加进
+  // `BROWSE_TYPES`（开 tab），本条即红，逼他同时回答两件事——
+  //   ① 美股没有快照刷新（`SNAPSHOT_TYPES` 不含 us，见 CR9-59）⇒ `pending` 那档会夜夜说话；
+  //   ② `staleNotes` 的三档文案是否适用于英文名。
+  it("美股不进 BROWSE_TYPES（没有 tab ⇒ 没有陈旧说明的消费方）", () => {
+    expect(BROWSE_TYPES).not.toContain("us");
+    expect([...BROWSE_TYPES]).toEqual(["stock", "fund", "bond", "crypto", "hk"]);
   });
 });

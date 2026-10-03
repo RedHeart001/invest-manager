@@ -6,7 +6,9 @@
 接口应低频调用。
 """
 
+import json
 import logging
+import re
 import time
 from datetime import datetime
 
@@ -20,6 +22,7 @@ from .base import (
     register,
     register_list,
 )
+from ..config import load_env
 from ..utils.limiter import get_limiter
 from ..utils.timeutil import beijing_now, beijing_today
 
@@ -174,6 +177,75 @@ def _sina_symbol_exchange(symbol: str) -> str:
     if s.startswith("bj"):
         return "BJ"
     return ""
+
+
+# ---------- 美股主数据列表（CR9-59／#32 甲，2026-10-04 主人拍板"甲＋先不开美股 tab"） ----------
+#
+# 上游＝新浪 `US_CategoryService.getList`（`ak.stock_us_spot` 内部用的同一个接口，10-04 实测
+# 抓到的是同一条 URL）。刻意**不借 akshare 那个函数**：它按 `num=20` 把 913 页全翻完
+# ＝一次调用打满盘子（18,241 只、串行 11–20 分钟，比 A 股那条 56 页的备源贵 16 倍），
+# 而甲要的是"前排常见标的先通入口"。翻页在这里自己做 ⇒ 请求数＝页数，可被 `US_LIST_PAGES` 限住。
+US_LIST_URL = (
+    "http://stock.finance.sina.com.cn/usstock/api/jsonp.php/"
+    "IO.XSRV2.CallbackList[uslist]/US_CategoryService.getList"
+)
+US_LIST_PAGE_SIZE = 20  # 服务端把 `num` 硬截到 20（实测 num=100/500 都只回 20 行）⇒ 页数＝请求数
+US_LIST_DEFAULT_PAGES = 15  # ≈300 只：第 1 页 NVDA/AAPL/GOOGL/GOOG/MSFT/AMZN、第 2 页 V/XOM/INTC/JNJ
+US_LIST_PAGE_CEILING = 50  # 硬上限：防"合法但手滑多打两个 0"的 env 值变成几千次上游请求
+US_LIST_PAGE_INTERVAL_S = 0.5  # 翻页之间的节流（新浪侧无声明，按对上游礼貌的常规间隔）
+US_LIST_REQUEST_TIMEOUT_S = 20.0  # 单页超时（实测 0.19–6.31s，最慢那一档留 3 倍余量）
+US_LIST_WHOLE_TIMEOUT_S = 150.0  # 整条列表的看门狗预算（夹到上限 50 页时够用）
+
+
+def _us_list_pages() -> int:
+    """取几页＝发几次请求（env `US_LIST_PAGES`）。两头的错都要防：非法值回落默认，
+    合法但过大的值再夹一道硬上限（这条路上每一次翻页都是真金白银的上游请求）。"""
+    load_env()
+    return min(
+        env_capacity("US_LIST_PAGES", US_LIST_DEFAULT_PAGES),
+        US_LIST_PAGE_CEILING,
+    )
+
+
+def _jsonp_payload(text: str) -> dict:
+    """新浪 jsonp ⇒ 内层 JSON。载荷实测形态（10-04 逐字）＝
+    `/*<script>location.href='//sina.com';</script>*/` 换行后跟
+    `IO.XSRV2.CallbackList[uslist]({"count":"18241","data":[{...}]});`
+    纯函数，便于离线断言；解析不动就抛，不静默给空表（空表会被上游当"没有名单"）。"""
+    m = re.search(r"\((.*)\)\s*;?\s*\Z", text.strip(), re.S)
+    body = m.group(1) if m else text.strip()
+    obj = json.loads(body)
+    if not isinstance(obj, dict):
+        raise ValueError(f"unexpected jsonp payload type: {type(obj).__name__}")
+    return obj
+
+
+def _us_product(row: dict) -> dict | None:
+    """一行新浪美股记录 ⇒ 主数据 schema；**结构不可用**时返回 None。
+
+    这里刻意**不做产品判断**：盘子里 ETF 与普通股混发（第 2 页就有 `QQQ`、尾部有 LP），
+    "算不算一条美股"是主人的口径（#32 的 (2) 未拍）⇒ 只丢"建不出主键/无法展示"的行
+    （无 `symbol`、或两个名字都缺）。中文名优先（与 A股/港股同一套展示与拼音检索），
+    `category`（行业，实测有 null 与空串）进 tags 与板块检索，`market` 原样进 `exchange`
+    （`lib/profile.ts:91` 与 `tencent_provider.CURRENCY_BY_TYPE` 早已按 `us`/`NASDAQ` 写死）。
+    """
+    code = str(row.get("symbol") or "").strip()
+    cn = str(row.get("cname") or "").strip()
+    en = str(row.get("name") or "").strip()
+    name = cn or en
+    if not code or not name:
+        return None
+    full, initials = _pinyin_pair(name)
+    category = str(row.get("category") or "").strip()
+    return {
+        "type": "us",
+        "code": code,
+        "name": name,
+        "pinyin": full,
+        "pinyinInitials": initials,
+        "exchange": str(row.get("market") or "").strip(),
+        "tags": [category] if category else [],
+    }
 
 
 # 交易状态前缀（#25 乙口径②，10-03 主人拍板）：XD/DR/XR＝当日除权除息，
@@ -812,6 +884,8 @@ class AkshareProvider(BaseProvider):
             return self._list_funds()
         if type_ == "bond":
             return self._list_convertible_bonds()
+        if type_ == "us":
+            return self._list_us_stocks()
         raise ProviderError(f"unsupported list type: {type_}")
 
     def _list_stocks(self) -> tuple[list[dict], dict]:
@@ -1055,7 +1129,94 @@ class AkshareProvider(BaseProvider):
             ),
         }
 
+    def _list_us_stocks(self) -> tuple[list[dict], dict]:
+        """美股主数据＝新浪排行名单的**有界前 N 页**（CR9-59／#32 甲，主人 2026-10-04 定案）。
+
+        为什么不一次拉全（10-03/10-04 实测，不是推断）：`num` 被服务端硬截到 20 ⇒ 全量
+        18,241 只＝**913 次请求**、串行 ≈11–20 分钟，比 A 股那条 56 页的备源贵 16 倍；
+        而 `market` 参数不生效（传 NASDAQ 照样混返回），想按交易所缩盘子只能全量再自筛。
+        该接口按热度/市值排序 ⇒ "前 N 页"就是最常见那一批（第 1 页 NVDA/AAPL/GOOGL/GOOG/
+        MSFT/AMZN），甲要买的"详情页不再 404、代码搜得通"由它就够了，长尾留给乙。
+
+        刻意声明 `degraded`：覆盖面**按设计**小于上游自己报的总数（不是上游挂了），
+        按 CR9-31 的口径这必须让消费侧读得到，否则"300 只"与"全量"长得一模一样。
+        """
+        pages = _us_list_pages()
+
+        def _fetch() -> tuple[list[dict], str, list[str]]:
+            rows: list[dict] = []
+            seen: set[str] = set()
+            declared = ""
+            failures: list[str] = []
+            for page in range(1, pages + 1):
+                if page > 1:
+                    time.sleep(US_LIST_PAGE_INTERVAL_S)
+                try:
+                    res = requests.get(
+                        US_LIST_URL,
+                        params={
+                            "page": str(page),
+                            "num": str(US_LIST_PAGE_SIZE),
+                            "sort": "",
+                            "asc": "0",
+                            "market": "",
+                            "id": "",
+                        },
+                        timeout=US_LIST_REQUEST_TIMEOUT_S,
+                    )
+                    res.raise_for_status()
+                    payload = _jsonp_payload(res.text)
+                except Exception as e:  # noqa: BLE001 中途失败要能带着已拿到的行继续，成因要能转述
+                    # 记 **类型＋原话**（CR9-30 同族：只有类名的错误说明归不了因——
+                    # `RemoteDisconnected` 与 `Timeout` 都叫 `ConnectionError`）。截 60 字防
+                    # requests 把整条 URL 塞进 message。
+                    failures.append(f"p{page}:{type(e).__name__}: {str(e)[:60]}")
+                    logger.warning("us list page %s failed: %s", page, e)
+                    continue
+                if not declared:
+                    declared = str(payload.get("count") or "")
+                data = payload.get("data") or []
+                for row in data:
+                    product = _us_product(row)
+                    if product is None or product["code"] in seen:
+                        continue
+                    seen.add(product["code"])
+                    rows.append(product)
+                if len(data) < US_LIST_PAGE_SIZE:
+                    break  # 上游给不满一页＝已到尾部（10-03 实测第 913 页只回 1 行）
+            return rows, declared, failures
+
+        rows, declared, failures = _ak_request(_fetch, US_LIST_WHOLE_TIMEOUT_S, "sina.us-list")
+        if not rows:
+            raise ProviderError(
+                "us list empty from all pages"
+                f"（{pages} 页{'，失败：' + '、'.join(failures[:5]) if failures else '全无载荷'}）"
+            )
+
+        no_category = sum(1 for r in rows if not r["tags"])
+        markets: dict[str, int] = {}
+        for r in rows:
+            key = r["exchange"] or "?"
+            markets[key] = markets.get(key, 0) + 1
+        spread = "/".join(f"{k}×{v}" for k, v in sorted(markets.items()))
+        note = (
+            f"美股主数据按甲方案只取前排 {pages} 页"
+            + (f"（上游声明盘子 {declared} 只 ⇒ 本次 {len(rows)} 只是子集）" if declared else "")
+            + f"；行业缺失 {no_category} 行、交易所分布 {spread}。"
+            "名单里 ETF/合伙份额与普通股混发，代码侧只丢结构不可用的行"
+            "（无 symbol 或两个名字都缺），不替主人判算不算一条美股（#32 的 (2) 待字）"
+            + (
+                f"；本次 {len(failures)} 页失败（{'、'.join(failures[:3])}）"
+                "⇒ 行数可能低于前排应有规模"
+                if failures
+                else ""
+            )
+        )
+        return rows, {"source": "sina-us-category-list", "degraded": True, "note": note}
+
 
 _akshare = AkshareProvider()
 register(["stock", "fund", "bond"], _akshare)  # 行情：场内品种实时，场外基金每日净值
-register_list(["stock", "fund", "bond"], _akshare)  # 产品列表：股票/基金/可转债
+register_list(["stock", "fund", "bond", "us"], _akshare)  # 产品列表：股票/基金/可转债/美股（CR9-59）
+# 注意这里**只注册列表**：美股的行情/K 线仍由 `openbb_provider`（yfinance）与腾讯 us 现价
+# （CR9-52）承担，上面那行 `register(["stock","fund","bond"])` 刻意不加 us。

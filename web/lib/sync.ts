@@ -9,8 +9,13 @@ import { prisma } from "./prisma";
 import { buildSearchText } from "./search-text";
 import { beijingStamp } from "./time";
 
-// G6（批次 D）：新增 hk（港股）——data-service 已提供 provider 与列表接口
-export const SYNC_TYPES = ["stock", "fund", "bond", "crypto", "hk"] as const;
+// G6（批次 D）：新增 hk（港股）
+// CR9-59（2026-10-04，主人「#32 甲」的字）：新增 **us（美股主数据）**——只进同步阶梯，
+// **不进刷新腿**（`app/api/market/refresh/route.ts:38` 的 `SNAPSHOT_TYPES` 是另一份名单，
+// 没跟着长），因为主人这轮明确"先不用开美股 tab" ⇒ 没有分类浏览就没有 `lastPrice` 的消费方，
+// 让夜跑去给几百只美股打现价是纯烧额度。也不进 `BROWSE_TYPES`（`lib/freshness.ts:27`）
+// ⇒ 美股不出现在分类浏览，也就不需要给它配陈旧说明那一档。
+export const SYNC_TYPES = ["stock", "fund", "bond", "crypto", "hk", "us"] as const;
 export type SyncType = (typeof SYNC_TYPES)[number];
 
 // 分型同步单飞锁（C17：进程内单例挂 globalThis，避免 dev HMR 重建模块作用域后失效）

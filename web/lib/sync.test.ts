@@ -33,7 +33,7 @@ vi.mock("./market-snapshot", () => ({ refreshSnapshot: (...a: unknown[]) => refr
 const listSyncedToday = vi.fn();
 vi.mock("./freshness", () => ({ listSyncedToday: (...a: unknown[]) => listSyncedToday(...a) }));
 
-import { syncType } from "./sync";
+import { SYNC_TYPES, syncType } from "./sync";
 
 function products(n: number) {
   return Array.from({ length: n }, (_, i) => ({
@@ -176,5 +176,61 @@ describe("sync 当日幂等闸门（#23，同步腿这一侧）", () => {
     expect(stock.skipped).toBe(true);
     expect(hk.skipped).toBeUndefined();
     expect(dsGet).toHaveBeenCalledTimes(1); // 只有 hk 那一次出网
+  });
+});
+
+describe("美股进同步阶梯（CR9-59／#32 甲，主人 2026-10-04 定案）", () => {
+  beforeEach(() => {
+    count.mockReset().mockResolvedValue(0);
+    executeRawUnsafe.mockReset().mockResolvedValue(0);
+    transaction.mockReset().mockResolvedValue(undefined);
+    dsGet.mockReset();
+    refreshSnapshot.mockReset();
+    listSyncedToday.mockReset().mockResolvedValue(null);
+  });
+
+  function usProducts(n: number) {
+    return Array.from({ length: n }, (_, i) => ({
+      type: "us",
+      code: ["AAPL", "NVDA", "BRK.B"][i % 3],
+      name: `美${i}`,
+    }));
+  }
+
+  it("us 在 SYNC_TYPES ⇒ 夜跑那轮会带上市名单，并走同一条列表链落库", async () => {
+    expect(SYNC_TYPES).toContain("us");
+    dsGet.mockResolvedValue({ count: 3, products: usProducts(3) });
+    const r = await syncType("us");
+    expect(r.error).toBeUndefined();
+    expect(r.count).toBe(3);
+    // 暂存表名由 SYNC_TYPES 派生 ⇒ 断"这一类真的有自己的暂存表"，而不是靠白名单加了的推定
+    const created = executeRawUnsafe.mock.calls.map((c) => String(c[0])).filter((s) => s.includes("Product_stage_us"));
+    expect(created.length).toBeGreaterThan(0);
+  });
+
+  it("美股的覆盖面声明按 CR9-31 经列表链落到 result.note（R16：子集必须自己说话）", async () => {
+    dsGet.mockResolvedValue({
+      count: 2,
+      products: usProducts(2),
+      source: "sina-us-category-list",
+      degraded: true,
+      note: "只取前排 15 页（上游声明盘子 18241 只）",
+    });
+    const r = await syncType("us");
+    expect(r.note).toContain("list degraded source=sina-us-category-list");
+    expect(r.note).toContain("18241");
+  });
+
+  it("🔁 未注册的列表类型过不了暂存表那道闸（且一条写库 SQL 都不发）", async () => {
+    // 实测出来的**分层**（本轮写这条时我先按"lib 层也拒在出网之前"下断言，红了才知道不是）：
+    // 出网闸在**路由层**——`app/api/sync/route.ts` 先过 `SYNC_TYPES` 才调 `syncType`
+    // （p2 第 [10] 段那条 `?type=bogus → 400` 断的就是它）；lib 这道 `stageTable()` 抛
+    // 是**表名/SQL 注入面**的闸（暂存表名由类型拼出），它跑在取数之后。
+    // 所以这里不许断"没出网"，要断的是"没对任意名字的表动过写"。
+    dsGet.mockResolvedValue({ count: 1, products: usProducts(1) });
+    const r = await syncType("bogus");
+    expect(r.error).toContain("invalid sync type");
+    const writes = executeRawUnsafe.mock.calls.filter((c) => String(c[0]).includes("INSERT INTO"));
+    expect(writes).toHaveLength(0);
   });
 });
