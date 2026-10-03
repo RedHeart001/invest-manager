@@ -402,6 +402,22 @@ def test_stock_list_backup_source() -> None:
         check("乙③🔁：note 说得出两处真实代价（摘牌代码不会带来／新浪短名≤5 字符与 -U 后缀）",
               "已摘牌" in note and "短名" in note and "-U" in note, note[:260])
 
+        # ②b 同一份数据换成**英文列名**也必须解析得动：本机 akshare 的
+        # `stock_zh_a_spot` 给中文列名（代码=带 sh/sz/bj 前缀的 symbol），而同版本的
+        # `bond_zh_hs_cov_spot` 给英文列名——**不能按"akshare 都用英文列名"推**，
+        # 10-03 就是按英文键取 `code` 拿到 5571 行却一个 code 都没存下来。
+        ak.stock_zh_a_spot = lambda: pd.DataFrame({  # type: ignore[assignment]
+            "symbol": ["sh600028", "bj920000"],
+            "name": ["XD中国石", "XD安徽凤"],
+        })
+        items_en, meta_en = list_products_with_meta(akp._akshare, "stock")
+        check("乙③🔁：英文列名形态（symbol/name）同样解析——不押注本机那套中文列名",
+              [x["code"] for x in items_en] == ["600028", "920000"]
+              and [x["exchange"] for x in items_en] == ["SH", "BJ"]
+              and items_en[1]["name"] == "安徽凤"
+              and meta_en.get("degraded") is True,
+              str(items_en))
+
         # ③ 两源皆失败 → 按既有契约抛 ProviderError，不静默交空表（C1 空载荷保护在上游）
         ak.stock_zh_a_spot = lambda: (_ for _ in ()).throw(RuntimeError("sina hs_a timeout"))  # type: ignore[assignment]
         try:
