@@ -2,8 +2,8 @@
 // - 全局排序基于 Product 行情快照列（lastChangePct，同步/刷新任务写入）
 // - 当前页仍做实时行情富集（P1 管线）；实时缺失时回退展示快照值
 // - 名称排序按拼音字母序（pinyin），空值沉底
-// - **#22(b)／#25 陈旧可见性**：该类的主数据或价格快照早于昨日（北京日界）时，
-//   随结果给一句说明；正常态一条都不出（那时这句话零信息量）
+// - **#22(b)／#25 陈旧可见性 ＋ CR9-57 价格缺口**：该类主数据早于昨日、或整类一个价都
+//   没有时，随结果给一句说明；正常态一条都不出（那时这句话零信息量）
 
 import { type Quote } from "./data-service";
 import { type StaleNote, freshnessOfTypes, staleNotes } from "./freshness";

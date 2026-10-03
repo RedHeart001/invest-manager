@@ -29,6 +29,15 @@ const TYPE_LABEL: Record<string, string> = {
   us: "美股",
 };
 
+// 三种成因各说各的话（CR9-57）。`pending` 刻意不写"未更新"——它不是陈旧；也刻意不写
+// "正在刷新"——刷新腿可能整晚没跑，那会变成第二种谎。它只说用户自己核对得到的两件事：
+// 名单什么时候换的、这一列现在是空的。
+const STALE_PHRASE: Record<StaleNote["kind"], (label: string, day: string) => string> = {
+  list: (label, day) => `主数据未更新（${label}：${day} 起）`,
+  snapshot: (label, day) => `价格快照未更新（${label}：${day} 起）`,
+  pending: (label, day) => `价格还没跟上（${label}：名单 ${day} 换过，等下一轮刷新）`,
+};
+
 // 排序选项：值 = sort:order；relevance 仅查询模式可选
 const SORT_OPTIONS = [
   { value: "changePct:desc", label: "涨幅从高到低", browse: true, query: true },
@@ -268,20 +277,20 @@ export default function SearchClient() {
         </label>
       </div>
 
-      {/* #22(b)／#25 陈旧可见性（主人 10-02 定案文案「主数据未更新（股票：09-12 起）」）：
-          后端只在"早于昨日（北京日界）"时给说明 ⇒ **正常态这一段整体不渲染**，
-          因为那时这句话零信息量。设计语言沿用 CR8-1「产出说明」：小字、一批最多两条、按成因分类。 */}
+      {/* #22(b)／#25 陈旧可见性 ＋ CR9-57 价格缺口（主人 10-03 定案文案「主数据未更新（股票：09-12 起）」，
+          同轮拍板"整列空价格那句要上屏、但说明要人性化"）：后端只在有问题时给说明 ⇒
+          **正常态这一段整体不渲染**，因为那时这句话零信息量。设计语言沿用 CR8-1「产出说明」：小字、一批最多两条、按成因分类。 */}
       {browseMode && stale.length > 0 && (
         <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1" data-testid="stale-notes">
           {stale.map((n) => (
             <span key={`${n.type}:${n.kind}`} className="text-[11px] text-amber-700">
-              {n.kind === "list" ? "主数据未更新" : "价格快照未更新"}（
-              {TYPE_LABEL[n.type] ?? n.type}：{n.since.slice(5)} 起）
+              {STALE_PHRASE[n.kind](TYPE_LABEL[n.type] ?? n.type, n.since.slice(5))}
             </span>
           ))}
-          {/* 超过展示上限的：说"还有几条"，不静默丢掉（R16「看不见的降级」同族） */}
+          {/* 超过展示上限的：说"还有几条"，不静默丢掉（R16「看不见的降级」同族）。
+              措辞刻意不说"未更新"——三种成因里 `pending` 不是陈旧，混着报会把人引向错的解释。 */}
           {staleMore > 0 && (
-            <span className="text-[11px] text-amber-700">另有 {staleMore} 类未更新</span>
+            <span className="text-[11px] text-amber-700">另有 {staleMore} 类的说明没显示出来</span>
           )}
         </div>
       )}

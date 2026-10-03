@@ -67,10 +67,12 @@ describe("北京日界（#23 与 #22(b) 共用的那一把尺）", () => {
   });
 });
 
-describe("陈旧说明只在陈旧时出（#22(b) 改判：正常态一行字都不出）", () => {
+describe("陈旧说明只在有问题时出（#22(b) 改判：正常态一行字都不出）", () => {
   const TODAY = "2026-10-02";
   // cutoff＝昨日（给 1 天宽限：休市日与"服务停一晚"都属正常态，天天出字这句话就没判别力了）
-  const at = (day: string) => ({ listAt: bj(day, "12:00"), snapAt: bj(day, "13:00") });
+  // `maxPrice` 给一个有值的数＝这一类当前是有价的（`crypto` 那种"有价而 snapshotAt 为 null"
+  // 的库内形态由下面单独一条钉住）
+  const at = (day: string) => ({ listAt: bj(day, "12:00"), snapAt: bj(day, "13:00"), maxPrice: 12.5 });
 
   it("主数据早于前日 ⇒ 报一条 list 成因", () => {
     const n = staleNotes([{ type: "stock", ...at("2026-09-12") }], TODAY);
@@ -84,25 +86,57 @@ describe("陈旧说明只在陈旧时出（#22(b) 改判：正常态一行字都
 
   it("列表新、只有快照早于前日 ⇒ 报 snapshot 成因（快照列没被 list 掩盖）", () => {
     const n = staleNotes(
-      [{ type: "bond", listAt: bj(TODAY, "02:10"), snapAt: bj("2026-09-25", "20:22") }],
+      [{ type: "bond", listAt: bj(TODAY, "02:10"), snapAt: bj("2026-09-25", "20:22"), maxPrice: 100 }],
       TODAY,
     );
     expect(n).toEqual([{ type: "bond", kind: "snapshot", since: "2026-09-25" }]);
   });
 
-  it("🔁 拆腿窗口不得谎称陈旧：列表刚换、snapshotAt 还是 null ⇒ 不报快照那条", () => {
+  // CR9-57（主人 10-03 拍板"整列空价格那句要上屏"）：#25 甲 (ii) 原来在这里选择**沉默**，
+  // 防的是"把拆腿窗口谎称成陈旧"。这个约束原样保留（措辞不许出现"未更新"，见 search-client），
+  // 新增的是"也不许没有话"。⇒ 本条从 🔁「不报」改判为「报 pending」，不是把旧断言放宽。
+  it("拆腿窗口现在报 pending：列表今日换过、一个价都没有 ⇒ 说话但不称陈旧", () => {
     expect(
-      staleNotes([{ type: "stock", listAt: bj(TODAY, "02:05"), snapAt: null }], TODAY),
+      staleNotes(
+        [{ type: "stock", listAt: bj(TODAY, "02:05"), snapAt: null, maxPrice: null }],
+        TODAY,
+      ),
+    ).toEqual([{ type: "stock", kind: "pending", since: TODAY }]);
+  });
+
+  it("🔁 pending 不得用 snapshotAt 单独判：有价而 snapshotAt 仍是 null（crypto 的真实形态）⇒ 一个字都不出", () => {
+    // 库里 crypto＝250 行有价／`MAX(snapshotAt)` 为 NULL（09-27 那批行由当时的列表阶段
+    // 直接写了 lastPrice，而 snapshotAt 这列是刀 1 之后才加的）⇒ 只看 snapshotAt 会把
+    // 一列有价格的东西报成"还没跟上"。
+    expect(
+      staleNotes(
+        [{ type: "crypto", listAt: bj(TODAY, "02:05"), snapAt: null, maxPrice: 68000.5 }],
+        TODAY,
+      ),
     ).toEqual([]);
   });
 
+  it("pending 的 since＝名单换过的那一天（昨日换的、至今没价格 ⇒ 宽限期内不称陈旧但要说）", () => {
+    const n = staleNotes(
+      [{ type: "fund", listAt: bj("2026-10-01", "02:00"), snapAt: null, maxPrice: null }],
+      TODAY,
+    );
+    expect(n).toEqual([{ type: "fund", kind: "pending", since: "2026-10-01" }]);
+  });
+
   it("同源不重复报：列表陈旧且从未刷过快照 ⇒ 只报 list 一条（成因只有一个，不说两遍）", () => {
-    const n = staleNotes([{ type: "stock", listAt: bj("2026-09-12", "22:02"), snapAt: null }], TODAY);
+    const n = staleNotes(
+      [{ type: "stock", listAt: bj("2026-09-12", "22:02"), snapAt: null, maxPrice: null }],
+      TODAY,
+    );
     expect(n).toEqual([{ type: "stock", kind: "list", since: "2026-09-12" }]);
   });
 
   it("无 tab 的类型不报（us 有主数据却没有入口 ⇒ 报了会把人引向不存在的分类）", () => {
-    const n = staleNotes([{ type: "us", listAt: bj("2026-09-12", "22:02"), snapAt: null }], TODAY);
+    const n = staleNotes(
+      [{ type: "us", listAt: bj("2026-09-12", "22:02"), snapAt: null, maxPrice: null }],
+      TODAY,
+    );
     expect(n).toEqual([]);
   });
 
@@ -119,7 +153,7 @@ describe("陈旧说明只在陈旧时出（#22(b) 改判：正常态一行字都
 
   it("list 优先于 snapshot：同一类两者都陈旧时只说一次（snapAt 为 null 时两者同源）", () => {
     const n = staleNotes(
-      [{ type: "crypto", listAt: bj("2026-09-27", "11:38"), snapAt: bj("2026-09-27", "11:40") }],
+      [{ type: "crypto", listAt: bj("2026-09-27", "11:38"), snapAt: bj("2026-09-27", "11:40"), maxPrice: null }],
       TODAY,
     );
     expect(n).toEqual([{ type: "crypto", kind: "list", since: "2026-09-27" }]);
@@ -127,5 +161,21 @@ describe("陈旧说明只在陈旧时出（#22(b) 改判：正常态一行字都
 
   it("该类 0 行（groupBy 不返回这一类）⇒ 不报：空表在页面上就是空列表，不需要一句陈旧", () => {
     expect(staleNotes([], TODAY)).toEqual([]);
+  });
+
+  it("🔁 三种成因混在一晚：list／pending／snapshot 各占一类 ⇒ 各自归各自、顺序仍按 tab", () => {
+    const n = staleNotes(
+      [
+        { type: "stock", listAt: bj("2026-09-12", "23:37"), snapAt: bj(TODAY, "02:01"), maxPrice: 1700 },
+        { type: "fund", listAt: bj(TODAY, "02:00"), snapAt: null, maxPrice: null },
+        { type: "bond", listAt: bj(TODAY, "02:00"), snapAt: bj("2026-09-25", "20:22"), maxPrice: 100 },
+      ],
+      TODAY,
+    );
+    expect(n).toEqual([
+      { type: "stock", kind: "list", since: "2026-09-12" },
+      { type: "fund", kind: "pending", since: TODAY },
+      { type: "bond", kind: "snapshot", since: "2026-09-25" },
+    ]);
   });
 });

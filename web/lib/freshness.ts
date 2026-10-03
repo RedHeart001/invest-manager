@@ -8,10 +8,10 @@
 //   连重启也不再重复"——**叠加而不是替换**，所以 CR9-28「失败轮不自动重试」那两条
 //   被测试钉住的既有取舍一个字都不用改判。
 //
-// 用途二（#22(b) 快照新鲜度 ＋ #25 stock 主数据陈旧，同一条判据、同一处文案）：
-//   陈旧才说话，正常态一行字都不出。
+// 用途二（#22(b) 快照新鲜度 ＋ #25 stock 主数据陈旧 ＋ CR9-57 的价格缺口，同一条判据、
+//   同一处文案）：有问题才说话，正常态一行字都不出。
 //
-// 为什么是这两列（`Product`）：
+// 为什么看这两列时刻（`Product`）——第三条判据要多看一列 `lastPrice`，理由写在 `Freshness.maxPrice` 上：
 //   · `updatedAt`＝Prisma 的 `@updatedAt`，只被 list 阶段的**整表删旧插新**推动
 //     ⇒ 它是"主数据什么时候换过"的唯一痕迹；
 //   · `snapshotAt`＝刷新腿（`/api/market/refresh`）整批写入的收尾时刻，raw SQL 刻意
@@ -26,19 +26,29 @@ import { beijingDateOf, beijingToday } from "./time";
  *  陈旧说明只报这几类：`us` 有主数据却没有入口 ⇒ 报一句会把人引向一个不存在的 tab。 */
 export const BROWSE_TYPES = ["stock", "fund", "bond", "crypto", "hk"] as const;
 
-export type Freshness = { type: string; listAt: Date | null; snapAt: Date | null };
+export type Freshness = {
+  type: string;
+  listAt: Date | null;
+  snapAt: Date | null;
+  /** 该类**有没有一个价格**（`MAX(lastPrice)`）。不能拿 `snapshotAt` 代替它——
+   *  crypto 的 250 行在库里就是"有价而 `snapshotAt` 为 null"（09-27 由当时的列表阶段
+   *  直接把价写进 `lastPrice`，而 `snapshotAt` 这列是刀 1 之后才加的）。
+   *  ⇒ 两列要一起看，否则那一类会被误报成"价格还没跟上"（CR9-57）。 */
+  maxPrice: number | null;
+};
 
-/** 逐类的两个时刻（一次 `groupBy` 取两列，比两次全表扫省一半） */
+/** 逐类的新鲜度面（一次 `groupBy` 取齐三列，比多次全表扫省一半以上） */
 export async function freshnessOfTypes(where: { type?: string } = {}): Promise<Freshness[]> {
   const rows = await prisma.product.groupBy({
     by: ["type"],
     where,
-    _max: { updatedAt: true, snapshotAt: true },
+    _max: { updatedAt: true, snapshotAt: true, lastPrice: true },
   });
   return rows.map((r) => ({
     type: r.type,
     listAt: r._max.updatedAt ?? null,
     snapAt: r._max.snapshotAt ?? null,
+    maxPrice: r._max.lastPrice ?? null,
   }));
 }
 
@@ -69,7 +79,7 @@ export async function snapshotRefreshedToday(type: string): Promise<Date | null>
     : null;
 }
 
-export type StaleNote = { type: string; kind: "list" | "snapshot"; since: string };
+export type StaleNote = { type: string; kind: "list" | "snapshot" | "pending"; since: string };
 
 /** 昨日（北京日界）——**给 1 天宽限**：休市日与"服务停了一晚"都不该报陈旧，
  *  否则 10-02 这种国庆休市日会天天出字，那句话就失去判别力了。 */
@@ -77,15 +87,19 @@ function previousDay(day: string): string {
   return new Date(new Date(`${day}T00:00:00Z`).getTime() - 86_400_000).toISOString().slice(0, 10);
 }
 
-/** 陈旧说明（纯函数，便于把日界与"正常态不出字"都钉成断言）
+/** 陈旧／缺口说明（纯函数，便于把日界与"正常态不出字"都钉成断言）
  *
- * 两条规则各自成立的原因：
+ * 三条规则各管一种成因，**同一类只报一条**（优先级 `list` ＞ `pending` ＞ `snapshot`）：
  *  · `listAt` 早于昨日 ⇒ 「主数据未更新」——列表是主数据（名称/代码/币种）之源，
  *    它旧了会连带 CR8-8 那类"按库内权威名判退市"的前提一起变旧（#25 的牵动项）。
- *  · `snapAt` 早于昨日 ⇒ 「价格快照未更新」；而 `snapAt` 为 **null 时不报这一条**——
- *    刀 3 拆腿之后列表阶段会把新行的价格两列写成 null（`sync.test.ts` 钉住的已知窗口），
- *    "从未刷过"与"刚换完列表、刷新腿还没跑到"在这里同形，报出来就是把窗口谎称成陈旧。
- *  同一类只报一条（`list` 优先）：`snapAt` 为 null 时两者同源，说两遍就是噪声。
+ *  · 该类**一个价都没有**（`snapshotAt` 与 `lastPrice` 双双为 null）⇒ 「价格还没跟上」。
+ *    这一档是 CR9-57（主人 10-03 拍板"那句要上屏"）补进来的：刀 3 拆腿后列表阶段会把
+ *    新行价格写成 null（`sync.test.ts` 钉着那个窗口），刷新腿还没跑到之前用户看到的
+ *    就是**一整列空白＋一句话都没有**——10-03 实测那个形态挂了约 20 小时。
+ *    它**不是陈旧**，所以措辞不许用"未更新"；它也不许承诺"正在刷新"（刷新腿可能整晚
+ *    没跑，那是第二种谎）⇒ 只锚在两个用户能自己核对的事实上：名单什么时候换的、
+ *    这一列现在是空的。判据要 `snapshotAt` 与 `lastPrice` 两列一起看，理由见 `Freshness.maxPrice`。
+ *  · `snapAt` 早于昨日 ⇒ 「价格快照未更新」。
  *
  * **本函数不截断**：条数上限属于渲染层（CR8-1「一批最多两条」），归 `browse.ts` 与前端，
  * 因为它们要一并说出"还有几条"。在这里 `slice(0,2)` 会把第三类**静默丢掉**——
@@ -100,6 +114,8 @@ export function staleNotes(rows: Freshness[], today: string = beijingToday()): S
     if (!row) continue;
     if (row.listAt && beijingDateOf(row.listAt) < cutoff) {
       notes.push({ type, kind: "list", since: beijingDateOf(row.listAt) });
+    } else if (row.listAt && !row.snapAt && row.maxPrice === null) {
+      notes.push({ type, kind: "pending", since: beijingDateOf(row.listAt) });
     } else if (row.snapAt && beijingDateOf(row.snapAt) < cutoff) {
       notes.push({ type, kind: "snapshot", since: beijingDateOf(row.snapAt) });
     }
