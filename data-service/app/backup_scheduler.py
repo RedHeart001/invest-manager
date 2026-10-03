@@ -16,10 +16,15 @@ scheduler 里没有一处引用它，`backups/` 目录是空的。单机自托�
 - 失败面两条，都是本轮已验证过的仪器口径：`log.warning`（uvicorn 默认配置下 warning
   可见、`log.info` 完全不打 ⇒ 见门槛⑤）＋ `/health` 的 `dbBackup` 观测位
   （**只报最后时刻与成没成，不回显绝对路径**）
+- **#29（10-03 断电撞出来的）**：上面那条观测位是**内存态**，进程一死就变 null，于是
+  "昨晚到底备过没有"在断电重启后读不出来。⇒ 每轮结果**同时落 `backups/state.json`**
+  （失败轮同样落），`health()` 在内存为空时回落到它并标 `fromDisk`。放在 `backups/` 里
+  是因为 `rotate()` 只按 `SNAPSHOT_NAME` 删文件 ⇒ 这份状态永远不会被轮换碰掉。
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -49,6 +54,10 @@ CONTAINER_BACKUP_DIR = "/backup"
 # 只认这个命名模式的产物（backup_db.backup 生成 dev-<日期>-<时间>.db，
 # 字典序即时间序）⇒ 轮换永不碰目录里的手工存放物或恢复前的 .pre-restore-* 文件。
 SNAPSHOT_NAME = re.compile(r"^dev-\d{8}-\d{6}\.db$")
+
+# #29：备份结果的**磁盘状态位**。放在 backups/ 里而不在库里，是因为 `rotate()` 只按
+# SNAPSHOT_NAME 删文件 ⇒ 这个文件永远不会被轮换碰掉，而它要回答的恰是"昨晚到底备过没有"。
+STATE_NAME = "state.json"
 
 _scheduler: BackgroundScheduler | None = None
 _lock = threading.Lock()
@@ -103,6 +112,45 @@ def _hour_minute() -> tuple[int, int]:
     except ValueError:
         minute = DEFAULT_BACKUP_MINUTE
     return max(0, min(hour, 23)), max(0, min(minute, 59))
+
+
+def _state_file(outdir: str) -> str:
+    return os.path.join(outdir, STATE_NAME)
+
+
+def _write_state(payload: dict, outdir: str) -> bool:
+    """把本轮结果落成磁盘状态（先写 `.tmp` 再 `os.replace`，读者不会看到半截）。
+
+    **观测不得拖垮主功能**：写不进去只 `log.warning`，备份本身与返回值都不受影响。
+    载荷里刻意不含绝对路径，也不含 `error` 原文（那句会带源库路径）——`/health` 的
+    "不回显路径"这条纪律不能因为落盘而被绕过。
+    """
+    path = _state_file(outdir)
+    tmp = path + ".tmp"
+    try:
+        os.makedirs(outdir, exist_ok=True)
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, sort_keys=True)
+        os.replace(tmp, path)
+        return True
+    except OSError as e:
+        log.warning("backup state could not be written to %s: %s", path, e)
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        return False
+
+
+def read_state(outdir: str | None = None) -> dict | None:
+    """读回磁盘状态；文件缺失／损坏一律当"没有"，**不抛**（观测位不能让 /health 500）。"""
+    path = _state_file(outdir if outdir is not None else _backup_dir())
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def rotate(outdir: str, keep: int) -> list[str]:
@@ -175,11 +223,27 @@ def run_once(trigger: str = "scheduled") -> dict:
                 log.warning("db backup kept %d > BACKUP_KEEP=%d", kept, keep)
 
     with _lock:
-        _state["lastRun"] = datetime.now(TZ).isoformat(timespec="seconds")
+        last_run = datetime.now(TZ).isoformat(timespec="seconds")
+        _state["lastRun"] = last_run
         _state["lastResult"] = result
         _state["runs"] += 1
         _state["running"] = False
+        runs = _state["runs"]
     result["tookMsTotal"] = int((time.time() - started) * 1000)
+    # #29（10-03 断电实测）：内存那份随进程一起死，"昨晚到底备过没有"就不能只指望它
+    # ⇒ 同一份结果落盘；**失败轮同样要落**，否则"没备"仍然不可见。
+    result["stateWritten"] = _write_state(
+        {
+            "lastRun": last_run,
+            "ok": result.get("ok"),
+            "outcome": result.get("outcome"),
+            "runs": runs,
+            "trigger": trigger,
+            "skippedReason": result.get("skippedReason"),
+            "kept": result.get("kept"),
+        },
+        outdir,
+    )
     return result
 
 
@@ -231,6 +295,10 @@ def health() -> dict:
     为什么必须带 `nextRun`：只看 lastRun/ok/runs 时，"今天还没到 03:30"与"job 根本没注册上"
     在 curl 里长得一模一样（都是 null/0），而后者正是本位要防的那种静默失败。
     **不回显绝对路径。**
+
+    #29 增加的两件事：**内存为空时回落到磁盘那份状态并标 `fromDisk=True`**——断电／重启后
+    一条 curl 仍能把"昨晚备过（旧进程写的）"与"这台机从没备过"分开读。代价要说清：
+    此时 `runs` 是**那份文件累计的次数**，不是本进程的次数。
     """
     last = _state["lastResult"] or {}
     next_run = None
@@ -238,9 +306,24 @@ def health() -> dict:
         jobs = _scheduler.get_jobs()
         if jobs:
             next_run = str(jobs[0].next_run_time)
-    return {
+    out = {
         "lastRun": _state["lastRun"],
         "ok": last.get("ok"),
+        "outcome": last.get("outcome"),
         "runs": _state["runs"],
         "nextRun": next_run,
+        "fromDisk": False,
     }
+    if out["lastRun"] is None:
+        disk = read_state()
+        if disk:
+            out.update(
+                {
+                    "lastRun": disk.get("lastRun"),
+                    "ok": disk.get("ok"),
+                    "outcome": disk.get("outcome"),
+                    "runs": disk.get("runs"),
+                    "fromDisk": True,
+                }
+            )
+    return out

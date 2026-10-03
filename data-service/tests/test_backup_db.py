@@ -315,7 +315,20 @@ def test_backup_run_once_end_to_end_and_paths() -> None:
                   r2.get("ok") is False and r2.get("skippedReason") == "source-not-found",
                   str(r2))
             check("🔁 ①：失败轮不产出半成品快照（空目录不会被误读成'有备份'）",
-                  os.listdir(out) == [], str(os.listdir(out)))
+                  [f for f in os.listdir(out) if bs.SNAPSHOT_NAME.match(f)] == [], str(os.listdir(out)))
+            # #29 之后这条口径要说满：目录里**不是全空**——`state.json` 是状态位不是快照，
+            # 判"有没有备份产物"必须按 SNAPSHOT_NAME 过滤（上面那条 🔁 已按此收紧）。
+            check("#29：失败轮同样落 state.json（'没备'必须比'备过'更容易读出来）",
+                  os.path.exists(os.path.join(out, bs.STATE_NAME)), str(os.listdir(out)))
+            st = bs.read_state(out) or {}
+            check("#29：磁盘状态带得回失败那轮的 ok/skippedReason/trigger",
+                  st.get("ok") is False and st.get("skippedReason") == "source-not-found"
+                  and st.get("trigger") == "unit-test", str(st))
+            check("🔁 #29：磁盘状态里不写绝对路径（落盘不能变成新的路径泄露面）",
+                  tmp not in open(os.path.join(out, bs.STATE_NAME), encoding="utf-8").read(),
+                  str(st))
+            check("🔁 #29：原子写不留 `.tmp`（读到半截的可能被排除）",
+                  not os.path.exists(os.path.join(out, bs.STATE_NAME + ".tmp")), str(os.listdir(out)))
         finally:
             for k, v in orig_env.items():
                 if v is None:
@@ -365,6 +378,81 @@ def test_backup_captures_uncheckpointed_wal_rows() -> None:
             con.close()
 
 
+def test_backup_state_survives_process_death() -> None:
+    """#29（10-03 断电实测）：备份结果必须比进程活得久——落盘、可回落读、轮换永不碰它。
+
+    C34 成对三组：`fromDisk` 两态（内存空才回落 ⇔ 内存有值不得被旧文件盖住）；
+    有文件 ⇔ 没文件／坏文件；**写盘失败 ⇔ 备份本身照旧成功**（观测不得拖垮主功能）。
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        src = os.path.join(tmp, "dev.db")
+        _make_db(src, rows=2)
+        out = os.path.join(tmp, "backups")
+        state_path = os.path.join(out, bs.STATE_NAME)
+        orig_env = {k: os.environ.get(k) for k in ("DB_PATH", "BACKUP_DIR")}
+        orig_state = dict(bs._state)
+        try:
+            os.environ.update({"DB_PATH": src, "BACKUP_DIR": out})
+            bs._state.update({"running": False, "lastRun": None, "lastResult": None, "runs": 0})
+            r = bs.run_once("unit-test")
+            st = bs.read_state(out) or {}
+            check("#29：成功轮同时落盘（stateWritten=True，磁盘那份 ok/outcome 齐）",
+                  r.get("stateWritten") is True and st.get("ok") is True
+                  and st.get("outcome") == "completed", f"{r} / {st}")
+
+            # 轮换永不碰状态文件：它和快照同目录，正是 rotate 只按 SNAPSHOT_NAME 删才安全
+            _snapshot(out, "20260101-000000")
+            _snapshot(out, "20260102-000000")
+            removed = bs.rotate(out, 2)
+            check("#29：轮换只删快照，`state.json` 永不被 prune（放在 backups/ 里的前提）",
+                  os.path.exists(state_path) and bs.STATE_NAME not in removed, str(removed))
+
+            # 模拟进程死亡：内存清空，磁盘那份还在 ⇒ 一条 curl 仍判得出"昨晚备过"
+            saved = dict(bs._state)
+            bs._state.update({"running": False, "lastRun": None, "lastResult": None, "runs": 0})
+            h_disk = bs.health()
+            check("#29：内存清空 ⇒ 回落到磁盘那份并标 fromDisk=True（断电重启后可读）",
+                  h_disk.get("fromDisk") is True and bool(h_disk.get("lastRun"))
+                  and h_disk.get("ok") is True, str(h_disk))
+            bs._state.clear()
+            bs._state.update(saved)
+            h_mem = bs.health()
+            check("🔁 #29：内存跑过就用内存那份、fromDisk=False（旧文件不得盖住新事实）",
+                  h_mem.get("fromDisk") is False and h_mem.get("lastRun") == saved["lastRun"],
+                  str(h_mem))
+
+            os.remove(state_path)
+            bs._state.update({"running": False, "lastRun": None, "lastResult": None, "runs": 0})
+            h_none = bs.health()
+            check("🔁 #29：磁盘也没有状态文件 ⇒ lastRun=None／runs=0（'从没备过'与'昨晚备过'分得开）",
+                  h_none["lastRun"] is None and h_none["runs"] == 0
+                  and h_none["fromDisk"] is False, str(h_none))
+            with open(state_path, "w", encoding="utf-8") as f:
+                f.write("{not json")
+            check("#29：损坏的 state.json 当'没有'读，不抛（观测位不得把 /health 变成 500）",
+                  bs.read_state(out) is None, "")
+            os.remove(state_path)
+
+            orig_replace = os.replace
+            try:
+                os.replace = lambda *a, **kw: (_ for _ in ()).throw(OSError("disk busy"))
+                r2 = bs.run_once("unit-test")
+            finally:
+                os.replace = orig_replace
+            check("🔁 #29：状态写不进去（磁盘忙）⇒ 只置 stateWritten=False，备份本身仍判成功",
+                  r2.get("ok") is True and r2.get("stateWritten") is False, str(r2))
+            check("🔁 #29：写失败不留 `.tmp` 残件",
+                  not os.path.exists(state_path + ".tmp"), str(os.listdir(out)))
+        finally:
+            for k, v in orig_env.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+            bs._state.clear()
+            bs._state.update(orig_state)
+
+
 if __name__ == "__main__":
     test_backup_integrity_and_corrupt_cleanup()
     test_restore_rejects_invalid_backup()
@@ -373,6 +461,7 @@ if __name__ == "__main__":
     test_backup_job_registered_and_rotates()
     test_backup_run_once_end_to_end_and_paths()
     test_backup_captures_uncheckpointed_wal_rows()
+    test_backup_state_survives_process_death()
     fails = [x for x in results if not x[1]]
     print(f"\n===== {len(results) - len(fails)}/{len(results)} 通过 =====")
     if fails:
