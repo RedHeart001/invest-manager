@@ -445,6 +445,91 @@ async function main() {
        junkIngest.status === 400, `status=${junkIngest.status}`);
   }
 
+  // ---------- [11] 自选回环（#22(d) 的 watchlist 那条：纯 DB，零出网，不要求交易日） ----------
+  // 这一节锁的是"Watchlist 此前只有 vitest 的 mock 单测、HTTP 层零集成断言"。
+  // 形态按主人拍的 (i)＝**测试内 POST→GET→DELETE 回环**：用合成代码，收尾必删，
+  // 所以它不会在他的自选里留下任何东西（(ii) 碰真实条目那条口径明确没走）。
+  console.log("\n[11] 自选回环（零出网，收尾必删不留残留）");
+  {
+    const CODE = "zzz-watch-selfcheck"; // 过 CODE_SET `[\w.-]{1,20}`，又不可能与真实代码相撞
+    const NAME = "自选回环自检";
+    // ⚠️ 实测到的 dev 级瞬态（CR9-47 同族，10-03 20:1x 对照实验定案）：
+    // **每次对这个库的写入都会让 next dev 重编译**（写入组 12 轮＝11 次 `Compiled`，
+    // 纯 GET 对照组 30 次＝1 次），落在那个窗口里的请求由 **Next 自己**抛 500
+    // （响应体是空的，不是路由 catch 出来的 `{error}`；GET 的代码里根本没有 JSON.parse，
+    // 日志字面是 `⨯ SyntaxError: Unexpected end of JSON input`）。
+    // ⇒ **只对 status===500 重试**；400/200 的语义一次都不放过，别把守卫失效读成"又抖了"。
+    const retry500 = async (fn, attempts = 3) => {
+      let last;
+      for (let i = 0; i < attempts; i++) {
+        last = await fn();
+        if (last.status !== 500) return last;
+        await sleep(900);
+      }
+      return last;
+    };
+    const wl = () => retry500(() => getJson(`${BASE}/api/watchlist`));
+    const post = (payload) =>
+      retry500(() =>
+        fetch(`${BASE}/api/watchlist`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        }));
+    const drop = () =>
+      retry500(() => fetch(`${BASE}/api/watchlist?type=stock&code=${CODE}`, { method: "DELETE" }));
+
+    const before = await wl();
+    const itemsOf = (b) => (Array.isArray(b.items) ? b.items : []);
+    ok("#22(d)：GET /api/watchlist 200 且 items 是数组（回环的基线读法成立）",
+       before.status === 200 && Array.isArray(before.body.items),
+       `status=${before.status} body=${JSON.stringify(before.body).slice(0, 120)}`);
+    const n0 = itemsOf(before.body).length;
+
+    try {
+      const add = await post({ type: "stock", code: CODE, name: NAME });
+      let afterAdd = itemsOf((await wl()).body);
+      // 写入后第一次读没看到自己写的行 ⇒ 再读一次并把这件事记进 detail。
+      // **刻意不把"看不见"当成通过**：这是唯一能区分"可见性延迟"与"写丢了"的证据形态。
+      let reRead = false;
+      if (!afterAdd.some((x) => x.code === CODE)) {
+        await sleep(900);
+        afterAdd = itemsOf((await wl()).body);
+        reRead = true;
+      }
+      const row = afterAdd.find((x) => x.code === CODE);
+      ok("#22(d)：POST 合成自选 → 200，且下一读就出现（type/code/name 三项对上）",
+         add.status === 200 && afterAdd.length === n0 + 1 && row?.type === "stock" && row?.name === NAME,
+         `status=${add.status} n=${n0}→${afterAdd.length} row=${JSON.stringify(row ?? null)}${reRead ? " （第一次读没看见，复读才见＝可见性延迟，已记）" : ""}`);
+
+      const dup = await post({ type: "stock", code: CODE, name: `${NAME}改名` });
+      let dupRows = itemsOf((await wl()).body).filter((x) => x.code === CODE);
+      if (dupRows.length !== 1) { await sleep(900); dupRows = itemsOf((await wl()).body).filter((x) => x.code === CODE); }
+      ok("#22(d)🔁：同 (type,code) 再 POST 走 upsert——行数不增、name 被更新（C26 唯一键没被绕开）",
+         dup.status === 200 && dupRows.length === 1 && dupRows[0].name === `${NAME}改名`,
+         `rows=${dupRows.length} name=${JSON.stringify(dupRows[0]?.name)}`);
+
+      const badCode = await post({ type: "stock", code: "bad code!/../../x", name: "不该进库" });
+      const badType = await post({ type: "zzz", code: CODE, name: "不该进库" });
+      const afterBad = itemsOf((await wl()).body);
+      ok("#22(d)🔁：非法 code 与非法 type 都 400，且库里没有多出行（守卫在写之前，C33/C5 同口径）",
+         badCode.status === 400 && badType.status === 400 && afterBad.length === n0 + 1,
+         `code=${badCode.status} type=${badType.status} n=${afterBad.length}（基线 ${n0}+1）`);
+
+      const del = await drop();
+      const afterDel = itemsOf((await wl()).body);
+      ok("#22(d)🔁：DELETE 后回到基线条数、合成行彻底消失（回环不污染真实自选数据）",
+         del.status === 200 && afterDel.length === n0 && !afterDel.some((x) => x.code === CODE),
+         `status=${del.status} n=${afterDel.length}（基线 ${n0}）`);
+    } finally {
+      // 上面任何一条红掉都要先把合成行删干净——这是"测试内回环"这个形态自己欠的承诺
+      await drop().catch(() => {});
+      const leftover = itemsOf((await wl()).body).filter((x) => x.code === CODE);
+      ok("#22(d)：收尾自证 leftover=0（不管中间断言红绿，库里都不留这行）",
+         leftover.length === 0, JSON.stringify(leftover));
+    }
+  }
+
   // ---------- 结果 ----------
   console.log(`\n== 结果：${passed} 通过 / ${failed} 失败 ==`);
   if (failures.length) {
