@@ -141,6 +141,15 @@ async function main() {
       `state=${local?.state} reason=${local?.reason ?? ""}`,
     );
     ok("MCP 工具数 ≥1", (local?.tools ?? 0) >= 1, `tools=${local?.tools}`);
+    // M7 已知优化点 2（10-03 闭环）：面板要自证"探测最多等几秒"这件事活在本进程里，
+    // 而不是等某个 server 挂起时由人来猜。零出网的一条观测位。
+    ok(
+      "MCP 探测上限可见（限时返回，不等满 timeoutMs）",
+      typeof ns.mcp?.probeTimeoutS === "number" &&
+        ns.mcp.probeTimeoutS > 0 &&
+        ns.mcp.probeTimeoutS <= 20,
+      `probeTimeoutS=${ns.mcp?.probeTimeoutS}`,
+    );
 
     ok(
       "技能正文未通过接口泄漏",

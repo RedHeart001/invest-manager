@@ -99,6 +99,9 @@ async function buildStatus(opts: { connect?: boolean }) {
       },
       mcp: {
         count: mcp.servers.reduce((acc, s) => acc + s.tools, 0),
+        // 探测上限是多少秒（M7 优化点 2）：面板要能自证"这个进程里生效的是哪一档"，
+        // 与 `skill.maxBodyChars` 同一类观测位；connect=false 时为 null
+        probeTimeoutS: mcp.probeTimeoutS,
         servers: mcp.servers,
       },
     },

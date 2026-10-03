@@ -134,6 +134,81 @@ describe("失败降级（不阻塞对话）", () => {
   });
 });
 
+describe("探测短超时（M7 已知优化点 2，10-03 落地）", () => {
+  // 探测上限只约束"面板让调用方等多久"，**不取消连接、不据此判降级**——
+  // 判成 degraded 会吃 `RETRY_COOLDOWN_MS`（60s）冷却，等于把一个慢但可用的 server
+  // 踢到半分钟没人理，比面板多等几秒糟得多。两条用例一起把这句话钉住。
+  const PROBE_S = "0.2";
+
+  it("server 挂起 ⇒ 面板在探测上限内返回，状态仍是 idle（没被误判成 degraded）", async () => {
+    useConfig([
+      { name: "probe-hang", transport: "http", url: "http://127.0.0.1:59999/mcp", timeoutMs: 1200 },
+    ]);
+    const real = globalThis.fetch;
+    process.env.MCP_PROBE_TIMEOUT_S = PROBE_S;
+    // 永不 resolve 的 fetch：传输层自己的 1200ms 都到不了（这里没有 signal 可 abort）
+    globalThis.fetch = (() => new Promise(() => undefined)) as unknown as typeof fetch;
+    const started = Date.now();
+    let status: Awaited<ReturnType<typeof mcpStatus>>;
+    try {
+      status = await mcpStatus({ connect: true });
+    } finally {
+      globalThis.fetch = real;
+      delete process.env.MCP_PROBE_TIMEOUT_S;
+    }
+    const elapsed = Date.now() - started;
+    const entry = status.servers.find((s) => s.name === "probe-hang");
+    expect(elapsed).toBeLessThan(1000); // ⇒ 返回不是因为等满了传输层超时
+    expect(entry?.state).toBe("idle");
+    expect(String(entry?.reason)).toContain("探测未在 0.2s 内返回");
+    expect(status.probeTimeoutS).toBe(0.2);
+    stopAllMcp(); // 收掉那条永不 resolve 的 in-flight，别留给后续用例
+  });
+
+  it("🔁 对照：同一探测上限下，及时应答的 server 照常 connected（不是把一切都判成超时）", async () => {
+    useConfig([
+      { name: "probe-fast", transport: "http", url: "http://127.0.0.1:59998/mcp", timeoutMs: 1200 },
+    ]);
+    const real = globalThis.fetch;
+    process.env.MCP_PROBE_TIMEOUT_S = PROBE_S;
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: { tools: [] } }), {
+        headers: { "Content-Type": "application/json" },
+      })) as unknown as typeof fetch;
+    try {
+      const status = await mcpStatus({ connect: true });
+      const entry = status.servers.find((s) => s.name === "probe-fast");
+      expect(entry?.state).toBe("connected");
+      expect(entry?.reason).toBeUndefined();
+    } finally {
+      globalThis.fetch = real;
+      delete process.env.MCP_PROBE_TIMEOUT_S;
+      stopAllMcp();
+    }
+  });
+
+  it("🔁 未探测（connect=false）⇒ 不吃探测预算，probeTimeoutS 显式为 null", async () => {
+    useConfig([
+      { name: "probe-plain", transport: "http", url: "http://127.0.0.1:59997/mcp", timeoutMs: 1200 },
+    ]);
+    const real = globalThis.fetch;
+    // 一旦被调用就是回归：connect=false 不该发起任何探测请求
+    let calls = 0;
+    globalThis.fetch = (() => {
+      calls += 1;
+      return Promise.reject(new Error("不该出网"));
+    }) as unknown as typeof fetch;
+    try {
+      const status = await mcpStatus();
+      expect(calls).toBe(0);
+      expect(status.probeTimeoutS).toBeNull();
+      expect(status.servers.find((s) => s.name === "probe-plain")?.state).toBe("idle");
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+});
+
 describe("配置解析", () => {
   it("无 mcp.json / 解析失败 → 视为无第三方 server（空数组）", () => {
     process.env.MCP_CONFIG = path.join(tmpDir, "missing.json");

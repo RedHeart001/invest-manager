@@ -54,6 +54,23 @@ const DEFAULT_TIMEOUT = Number(process.env.MCP_TIMEOUT_MS ?? 20000);
 /** 失败后的重试冷却，避免 spawn 风暴 */
 const RETRY_COOLDOWN_MS = Number(process.env.MCP_RETRY_COOLDOWN_MS ?? 60000);
 
+/**
+ * 探测专用短超时（M7 已知优化点 2，PLAN 在 09-20 复核时写着"未见修复"）：
+ * `/api/tools/status` 是给人看的面板，一个挂起的 server 不该让人对着它等满 `timeoutMs`（20s）。
+ *
+ * **它只约束"调用方最多等多久"，不取消连接、也不改状态**：探测超时如果把它判成
+ * `degraded`，就会吃 `RETRY_COOLDOWN_MS`（60s）冷却，把一个慢但可用的 server 踢到
+ * "半分钟内没人理"——那比面板多等几秒糟得多。连接继续在后台跑，下一次刷新就接上。
+ *
+ * 读的是**调用时**的 env（不是模块常量），这样测试能改短它而不用重载模块。
+ */
+function probeDeadlineMs(): number {
+  const raw = Number(process.env.MCP_PROBE_TIMEOUT_S ?? "");
+  return Number.isFinite(raw) && raw > 0 ? Math.round(raw * 1000) : 5000;
+}
+
+const wait = (ms: number) => new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), ms));
+
 export function mcpConfigPath(): string {
   const p = process.env.MCP_CONFIG?.trim();
   if (!p) return path.join(process.cwd(), "mcp.json");
@@ -564,27 +581,41 @@ export async function callMcpTool(
  * 状态面板数据（含未连接 server 的降级原因）
  * connect=true 时先探测连接——状态面板要如实反映当前可用性（含降级原因），
  * 否则只会显示从未尝试过的 idle。
+ * 探测按 `MCP_PROBE_TIMEOUT_S`（默认 5s）限时返回，见 `probeDeadlineMs` 的边界说明。
  */
 export async function mcpStatus(
   opts: { connect?: boolean } = {},
-): Promise<{ configPath: string; servers: McpServerStatus[] }> {
+): Promise<{ configPath: string; probeTimeoutS: number | null; servers: McpServerStatus[] }> {
   const cfgs = loadServerConfigs();
+  const deadlineMs = opts.connect ? probeDeadlineMs() : 0;
   const servers: McpServerStatus[] = [];
   for (const cfg of cfgs) {
     const rt = runtimeFor(cfg);
+    let probeTimedOut = false;
     if (opts.connect && rt.state !== "disabled") {
-      await ensureConnected(rt);
+      probeTimedOut =
+        (await Promise.race([
+          ensureConnected(rt).then(() => false),
+          wait(deadlineMs),
+        ])) === "timeout";
     }
     servers.push({
       name: cfg.name,
       transport: cfg.transport ?? "stdio",
       state: rt.state,
       tools: rt.tools.length,
-      reason: rt.reason,
+      reason:
+        probeTimedOut && rt.state !== "connected"
+          ? `探测未在 ${deadlineMs / 1000}s 内返回（连接仍在后台进行，未据此判降级）`
+          : rt.reason,
       configured: true,
     });
   }
-  return { configPath: mcpConfigPath(), servers };
+  return {
+    configPath: mcpConfigPath(),
+    probeTimeoutS: opts.connect ? deadlineMs / 1000 : null,
+    servers,
+  };
 }
 
 /** 测试/运维用：断开全部 stdio server */
