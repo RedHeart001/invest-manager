@@ -10,6 +10,11 @@ const findMany = vi.fn();
 const executeRawUnsafe = vi.fn();
 const fetchQuotes = vi.fn();
 const snapshotRefreshedToday = vi.fn();
+// CR9-61（乙＝可续跑）：闸门的第二半判据住在刷新腿的进度状态位里，所以它也必须被自己控住——
+// 默认"账本存在 且 这一类今天跑完过"，让上面那批 #23 的既有用例照旧按旧语义走。
+const hasCompletionLedger = vi.fn();
+const completedToday = vi.fn();
+const lastCompletedAt = vi.fn();
 
 vi.mock("@/lib/prisma", () => ({
   prisma: {
@@ -23,6 +28,11 @@ vi.mock("@/lib/prisma", () => ({
 vi.mock("./data-service", () => ({ fetchQuotes: (...a: unknown[]) => fetchQuotes(...a) }));
 vi.mock("./freshness", () => ({
   snapshotRefreshedToday: (...a: unknown[]) => snapshotRefreshedToday(...a),
+}));
+vi.mock("./refresh-progress", () => ({
+  hasCompletionLedger: () => hasCompletionLedger(),
+  completedToday: (...a: unknown[]) => completedToday(...a),
+  lastCompletedAt: (...a: unknown[]) => lastCompletedAt(...a),
 }));
 
 import { refreshAll, refreshSnapshot } from "./market-snapshot";
@@ -40,6 +50,9 @@ describe("刷新腿的当日幂等闸门（#23）", () => {
     executeRawUnsafe.mockReset().mockResolvedValue(1);
     fetchQuotes.mockReset();
     snapshotRefreshedToday.mockReset().mockResolvedValue(null); // 默认：今日没刷过 ⇒ 放行
+    hasCompletionLedger.mockReset().mockReturnValue(true); // 默认：完成账本存在（本刀之后的常态）
+    completedToday.mockReset().mockReturnValue(true); // 默认：这一类今日真跑完过 ⇒ 挡
+    lastCompletedAt.mockReset().mockReturnValue("2026-10-04T18:20:00.000Z");
   });
 
   it("今日已刷过 ⇒ 零次出网、零条写库，且 snapshotAt 回填库里已有的那个时刻", async () => {
@@ -95,5 +108,56 @@ describe("刷新腿的当日幂等闸门（#23）", () => {
     const [a, b] = await Promise.all([refreshSnapshot("stock"), refreshSnapshot("stock")]);
     expect(fetchQuotes).toHaveBeenCalledTimes(1);
     expect(a).toBe(b);
+  });
+
+  // ---------- CR9-61（乙＝可续跑）：闸门的第二半判据 ----------
+
+  it("CR9-61：今日有快照时刻**且**账本说这一类跑完过 ⇒ 挡下，原因里带『整轮跑完于』", async () => {
+    snapshotRefreshedToday.mockResolvedValue(new Date("2026-10-03T18:20:00.000Z"));
+    const r = await refreshSnapshot("stock");
+    expect(r.skipped).toBe(true);
+    expect(fetchQuotes).not.toHaveBeenCalled();
+    expect(r.skippedReason).toContain("整轮跑完于");
+  });
+
+  it("CR9-61🔁：今日有快照时刻但账本里没有它 ⇒ 放行续跑（这正是 10-04 fund 那 35/280 批的形态）", async () => {
+    snapshotRefreshedToday.mockResolvedValue(new Date("2026-10-03T18:08:00.000Z"));
+    completedToday.mockReturnValue(false); // 被打断的那一类：库里时刻是今日，整轮却没跑完
+    fetchQuotes.mockResolvedValue(quoteMap(codes(2)));
+    const r = await refreshSnapshot("fund");
+    expect(r.skipped).toBeUndefined();
+    expect(r.resumed).toBe(true);
+    expect(fetchQuotes).toHaveBeenCalledTimes(1); // 续跑＝真的再取数，不是又挡一次
+    expect(executeRawUnsafe).toHaveBeenCalledTimes(1);
+  });
+
+  it("CR9-61：续跑粒度是整类重跑，而**跑完这一次就把账本补上** ⇒ 同日再触发被挡（不会成环）", async () => {
+    snapshotRefreshedToday.mockResolvedValue(new Date("2026-10-03T18:08:00.000Z"));
+    fetchQuotes.mockResolvedValue(quoteMap(codes(2)));
+    completedToday.mockReturnValueOnce(false).mockReturnValue(true); // 第一次没跑完记录，重跑后补上
+    const first = await refreshSnapshot("fund");
+    const second = await refreshSnapshot("fund");
+    expect(first.resumed).toBe(true);
+    expect(second.skipped).toBe(true);
+    expect(fetchQuotes).toHaveBeenCalledTimes(1); // 只补一次，不自动重试成环（CR9-28 那条不改判）
+  });
+
+  it("CR9-61🔁：账本是空的（这台机还没跑过含本刀的轮）⇒ 退回旧判据挡下，原因说清为什么", async () => {
+    snapshotRefreshedToday.mockResolvedValue(new Date("2026-10-03T18:20:00.000Z"));
+    hasCompletionLedger.mockReturnValue(false);
+    const r = await refreshSnapshot("stock");
+    expect(r.skipped).toBe(true);
+    expect(fetchQuotes).not.toHaveBeenCalled(); // 部署当天不许变成"整轮重刷"（那是凭空多烧的额度）
+    expect(r.skippedReason).toContain("完成账本还是空的");
+    expect(completedToday).not.toHaveBeenCalled(); // 空账本这条分支根本不该去问第二类判据
+  });
+
+  it("CR9-61🔁：?force=1 时第二半判据一次都不问（越过闸门就是越过，不再逐条自查）", async () => {
+    snapshotRefreshedToday.mockResolvedValue(new Date());
+    fetchQuotes.mockResolvedValue(quoteMap(codes(2)));
+    await refreshSnapshot("bond", { force: true });
+    expect(hasCompletionLedger).not.toHaveBeenCalled();
+    expect(completedToday).not.toHaveBeenCalled();
+    expect(lastCompletedAt).not.toHaveBeenCalled();
   });
 });

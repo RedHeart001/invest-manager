@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import type { SnapshotResult } from "./market-snapshot";
+import { beijingDateOf, beijingToday } from "./time";
 
 /**
  * #33 甲／CR9-60：刷新腿的**逐类进度状态位**（主人 2026-10-04 的字＝"甲＋丙①"）。
@@ -35,6 +36,16 @@ export type RefreshProgress = {
   done: SnapshotResult[];
   outcome: "running" | "completed" | "failed";
   finishedAt: string | null;
+  /**
+   * CR9-61（乙＝可续跑）：每一类**真跑完过**的时刻（跑完＝`refreshSnapshot` 返回了，
+   * 包括被 #23 挡下而直接返回的那些）。这是当日幂等闸门的第二半判据——
+   * "今日有 `snapshotAt`"只能证明**这一行被碰过**，证明不了**这一类跑完了**：
+   * 10-04 02:11 那轮 fund 的 `snapshotAt` 落在 02:08（第 35 批），但它没跑完，
+   * 只按 `snapshotAt` 判就会整天都被挡下，而库里 28,013 只里只有 3,500 只有价。
+   * 跨轮合并、`startRefreshProgress` 不许抹掉它：否则后来一次单类型刷新会把
+   * 前一晚"stock 已完成"的证据清掉，那次刷新就白烧。
+   */
+  lastCompleted: Record<string, string>;
 };
 
 const nowIso = () => new Date().toISOString();
@@ -69,7 +80,8 @@ export function readRefreshProgress(): RefreshProgress | null {
     if (!obj || typeof obj !== "object") return null;
     const p = obj as Partial<RefreshProgress>;
     if (!Array.isArray(p.done) || !Array.isArray(p.types)) return null;
-    return p as RefreshProgress;
+    // `lastCompleted` 是 CR9-61 才加的字段：老文件里没有它属于正常，补空对象而不是判"读不到"
+    return { ...p, lastCompleted: p.lastCompleted ?? {} } as RefreshProgress;
   } catch {
     return null;
   }
@@ -77,6 +89,7 @@ export function readRefreshProgress(): RefreshProgress | null {
 
 /** 刷新腿起跑时写一次 ⇒ "这一轮开始了、打算刷哪几类"从第一毫秒就可读。 */
 export function startRefreshProgress(types: string[]): void {
+  const prev = readRefreshProgress();
   writeProgress({
     startedAt: nowIso(),
     types,
@@ -84,6 +97,10 @@ export function startRefreshProgress(types: string[]): void {
     done: [],
     outcome: "running",
     finishedAt: null,
+    // **跨轮合并**：新轮开始不许把"昨天/上一轮已完成哪几类"抹掉。否则会出这样一个洞：
+    // 早上手动补一次 `?type=fund`，那份文件就只剩 fund，而当晚 stock 的完成证据没了 ⇒
+    // 闸门按第二半判据会把 stock 再刷一遍（＝白烧一整份东财行情批次）。
+    lastCompleted: prev?.lastCompleted ?? {},
   });
 }
 
@@ -99,6 +116,7 @@ export function recordRefreshResult(result: SnapshotResult): void {
     current: done.length < types.length ? types[done.length] : null,
     outcome: "running",
     finishedAt: null,
+    lastCompleted: { ...(prev?.lastCompleted ?? {}), [result.type]: nowIso() },
   });
 }
 
@@ -112,5 +130,28 @@ export function finishRefreshProgress(outcome: "completed" | "failed"): void {
     current: null,
     outcome,
     finishedAt: nowIso(),
+    lastCompleted: prev?.lastCompleted ?? {},
   });
+}
+
+/**
+ * 完成账本是否已经存在（CR9-61 的第三半：退回旧判据的依据）。
+ * 空账本＝这台机还没跑过含本刀代码的刷新轮 ⇒ 闸门必须按**旧判据**（今日有 `snapshotAt` 即挡），
+ * 否则部署当天每一类都会变成"没跑完"而整轮重刷——那是凭空多烧的额度，不是续跑。
+ */
+export function hasCompletionLedger(): boolean {
+  return Object.keys(readRefreshProgress()?.lastCompleted ?? {}).length > 0;
+}
+
+/** 这一类今天（北京日）有没有真跑完过——用的就是 #22(b)/#23 同一把尺 `beijingDateOf`。 */
+export function completedToday(type: string): boolean {
+  const at = readRefreshProgress()?.lastCompleted?.[type];
+  if (!at) return false;
+  const d = new Date(at);
+  return !Number.isNaN(d.getTime()) && beijingDateOf(d) === beijingToday();
+}
+
+/** 这一类的完成时刻（给 `skippedReason` 说话用）；没有则 null。 */
+export function lastCompletedAt(type: string): string | null {
+  return readRefreshProgress()?.lastCompleted?.[type] ?? null;
 }

@@ -24,7 +24,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { SnapshotResult } from "./market-snapshot";
 import {
+  completedToday,
   finishRefreshProgress,
+  hasCompletionLedger,
+  lastCompletedAt,
   readRefreshProgress,
   recordRefreshResult,
   startRefreshProgress,
@@ -163,5 +166,74 @@ describe("刷新腿进度状态位（CR9-60／#33 甲）", () => {
     const p = fresh.readRefreshProgress();
     expect(p?.done.map((x) => x.type)).toEqual(["stock", "fund"]);
     expect(p?.current).toBe("bond");
+  });
+
+  // ---------- CR9-61（乙＝可续跑）：完成账本这一半 ----------
+
+  it("CR9-61：每跑完一类就往账本里记一条该类的完成时刻", () => {
+    startRefreshProgress(["stock", "fund"]);
+    recordRefreshResult(res("stock"));
+    const p = readRefreshProgress();
+    expect(typeof p?.lastCompleted.stock).toBe("string");
+    expect(p?.lastCompleted.fund).toBeUndefined(); // 没跑完的那一类不许有记录
+    expect(Number.isNaN(Date.parse(String(p?.lastCompleted.stock)))).toBe(false);
+  });
+
+  it("CR9-61🔁：新一轮 start 不许抹掉上一轮的完成记录（跨轮合并，否则那次刷新白烧）", () => {
+    startRefreshProgress(["stock", "fund"]);
+    recordRefreshResult(res("stock"));
+    const first = readRefreshProgress()?.lastCompleted.stock;
+    startRefreshProgress(["fund"]); // 例如早上手动补一次 fund
+    const p = readRefreshProgress();
+    expect(p?.types).toEqual(["fund"]);
+    expect(p?.lastCompleted.stock).toBe(first); // stock 的证据还在
+    expect(p?.done).toEqual([]); // 而"本轮跑到哪儿"确实跟着新一轮重置
+  });
+
+  it("CR9-61：completedToday 判的是北京日——今日记录为真、昨日记录为假（与 #23/#22(b) 同一把尺）", () => {
+    const todayIso = new Date().toISOString();
+    const yesterdayIso = new Date(Date.now() - 86_400_000).toISOString();
+    startRefreshProgress(["stock"]);
+    fs.writeFileSync(
+      file(),
+      JSON.stringify({
+        startedAt: todayIso,
+        types: ["stock"],
+        current: null,
+        done: [],
+        outcome: "completed",
+        finishedAt: todayIso,
+        lastCompleted: { stock: todayIso, fund: yesterdayIso },
+      }),
+      "utf8",
+    );
+    expect(completedToday("stock")).toBe(true);
+    expect(completedToday("fund")).toBe(false); // 昨日跑完 ⇒ 今天这一类还能补
+    expect(completedToday("bond")).toBe(false); // 账本里根本没有这一类
+    expect(lastCompletedAt("stock")).toBe(todayIso);
+    expect(lastCompletedAt("bond")).toBe(null);
+  });
+
+  it("CR9-61：hasCompletionLedger 两态——没文件／空账本都是 false，老文件缺字段也当空账本（退回旧判据）", () => {
+    expect(hasCompletionLedger()).toBe(false); // 还没有任何文件
+    startRefreshProgress(["stock"]);
+    expect(hasCompletionLedger()).toBe(false); // 起了轮但还没跑完任何一类
+    recordRefreshResult(res("stock"));
+    expect(hasCompletionLedger()).toBe(true);
+    // CR9-60 那版写出来的文件里没有 `lastCompleted` 字段：读侧补空对象，不许当成"读到了记录"
+    fs.writeFileSync(
+      file(),
+      JSON.stringify({
+        startedAt: new Date().toISOString(),
+        types: ["stock"],
+        current: null,
+        done: [],
+        outcome: "completed",
+        finishedAt: new Date().toISOString(),
+      }),
+      "utf8",
+    );
+    expect(readRefreshProgress()?.lastCompleted).toEqual({});
+    expect(hasCompletionLedger()).toBe(false);
   });
 });

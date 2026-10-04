@@ -11,6 +11,7 @@
 import { fetchQuotes } from "./data-service";
 import { snapshotRefreshedToday } from "./freshness";
 import { prisma } from "./prisma";
+import { completedToday, hasCompletionLedger, lastCompletedAt } from "./refresh-progress";
 import { beijingStamp } from "./time";
 
 const BATCH = 100;
@@ -58,6 +59,10 @@ export type SnapshotResult = {
   skipped?: boolean;
   /** 被挡下时自己说清"哪一列、几点"（#21 同族：能做成状态位的别做成日志） */
   skippedReason?: string;
+  /** CR9-61（乙＝可续跑）：本轮是**接着被打断的那一类重跑**的（今日有 `snapshotAt`
+   *  但完成账本里没有它）。标出来是为了让 ds 的 `results` 与页面上都能看出这一轮不是常规轮；
+   *  续跑粒度＝整类重跑，不是批次游标。 */
+  resumed?: boolean;
 };
 
 function sleep(ms: number): Promise<void> {
@@ -154,21 +159,52 @@ async function _refreshGated(type: string, force: boolean): Promise<SnapshotResu
   if (!force) {
     const doneAt = await snapshotRefreshedToday(type);
     if (doneAt) {
-      const reason =
-        `今日已刷新（快照时刻 ${beijingStamp(doneAt)}），本轮不重复取数；确要重刷带 ?force=1`;
-      return {
-        type,
-        total: 0,
-        updated: 0,
-        failedBatches: 0,
-        tookMs: 0,
-        snapshotAt: doneAt.toISOString(),
-        skipped: true,
-        skippedReason: reason,
-      };
+      // CR9-61（乙＝可续跑）：`snapshotAt` 只能证明"这一行今天被碰过"，证明不了"这一类跑完了"。
+      // 10-04 那轮 fund 的 `snapshotAt` 落在第 35 批就断了 ⇒ 只按旧判据会整天挡下，
+      // 而库里 28,013 只里只有 3,500 只有价——"补一次"这件事在那个判据下根本没有入口。
+      if (!hasCompletionLedger()) {
+        // 空账本＝这台机还没跑过含本刀的刷新轮 ⇒ **退回旧判据**（叠加而非替换的另一半）。
+        // 不退回的后果是部署当天每一类都成了"没跑完"⇒ 整轮重刷，那是凭空多烧的额度，不是续跑。
+        return skipResult(
+          type,
+          doneAt,
+          `今日已刷新（快照时刻 ${beijingStamp(doneAt)}；完成账本还是空的 ⇒ 按快照时刻挡下），本轮不重复取数；确要重刷带 ?force=1`,
+        );
+      }
+      if (completedToday(type)) {
+        const at = lastCompletedAt(type);
+        return skipResult(
+          type,
+          doneAt,
+          `今日已刷新（快照时刻 ${beijingStamp(doneAt)}，整轮跑完于${at ? beijingStamp(new Date(at)) : "未知时刻"}），本轮不重复取数；确要重刷带 ?force=1`,
+        );
+      }
+      // 走到这里＝今日有快照时刻、但这一类今日**没跑完过** ⇒ 放行续跑。
+      // ⚠️ 粒度要说清：续跑＝**整类重跑**（`refreshSnapshotInner` 没有批次游标），
+      // 所以那 35 批已付的会连同剩下 245 批一起再付一遍——这是它的代价，不藏着。
+      // 仍**不新增自动重试**（CR9-28"失败批次不自动重试"被 `test_c3_readtimeout` 钉着）：
+      // 本刀只让"下一次触发"变成续跑，夜跑链照旧是一轮。
+      console.log(`[market-snapshot] resuming interrupted type=${type} (snapshotAt 今日但整轮未跑完)`);
+      const r = await refreshSnapshotInner(type);
+      return { ...r, resumed: true };
     }
   }
   return refreshSnapshotInner(type);
+}
+
+/** 被 #23 挡下时的那份返回：本轮一批都没发，所以 `updated/failedBatches` 记 0，
+ *  而 `snapshotAt` 回填库里**已有**的时刻（状态位不许因为"有人问了一次"就撒谎）。 */
+function skipResult(type: string, doneAt: Date, skippedReason: string): SnapshotResult {
+  return {
+    type,
+    total: 0,
+    updated: 0,
+    failedBatches: 0,
+    tookMs: 0,
+    snapshotAt: doneAt.toISOString(),
+    skipped: true,
+    skippedReason,
+  };
 }
 
 async function refreshSnapshotInner(type: string): Promise<SnapshotResult> {
