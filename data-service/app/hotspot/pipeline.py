@@ -249,6 +249,8 @@ def merge_news(attempts: list[dict], limit: int = NEWS_LIMIT) -> dict:
         两者相加才等于 `items` 的条数——note 里"去重后 N 条"报的是截断**后**，别看混；
       · `crossSource`＝`via` 跨了 ≥2 家的条目数，**这才是 0.5/0.8 那两道门槛真正作用的对象**
         （同一家内的重复不需要阈值）。
+    **计数只留在这份结构里、不进 `note`**（主人 10-05 的字＝"合并前／并掉几条"这类数对用户没用，
+    属面向开发者的数据）⇒ note 维持"几家到货、去重后几条、未到货是谁"，两者各说各的话。
     """
     arrived = [str(a.get("source") or "?") for a in attempts if not a.get("error")]
     missing = [f"{a.get('source')}（{a.get('error')}）" for a in attempts if a.get("error")]
@@ -308,8 +310,7 @@ def merge_news(attempts: list[dict], limit: int = NEWS_LIMIT) -> dict:
     elif missing:
         note = (
             f"新闻多源合并：{len(arrived)}/{len(attempts)} 家到货（{'、'.join(arrived)}）、"
-            f"合并前 {stats['raw']} 条 ⇒ 去重后 {len(items)} 条（并掉 {merged_away} 条）；"
-            f"未到货：{'；'.join(missing)}"
+            f"去重后 {len(items)} 条；未到货：{'；'.join(missing)}"
         )
     else:
         note = None

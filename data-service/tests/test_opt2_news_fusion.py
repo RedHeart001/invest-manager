@@ -18,6 +18,8 @@
 一个计数都不留 ⇒ ① `merge_news` 产出 `stats`、`run_pipeline` 带出 `newsStats`；
 ② `hotspot/scheduler` 每轮把 `lastResult` 覆写落盘，`status()` 内存空时回落到它并标 `fromDisk`
 （同 #29／CR9-53 的备份状态位口径）。
+**10-05 他的再一字＝"合并前／并掉几条"这类数对用户没用、属面向开发者的数据** ⇒ note 退回旧文案（只有"去重后 N 条"），
+计数只留在 `newsStats`；下面那两条 note 断言因此是一对**屏幕不带数 ⇔ 数据照样读得到**。
 
 零出网：三个源函数（`_em_global_news`／`_cls_telegraph`／`_tavily`）整体换成假对象，
 调用计数就是"有没有真的出网"的证据；顺带断言这条合并路本身**不占东财桶**
@@ -374,7 +376,8 @@ def test_news_stats_survive_a_full_merge() -> None:
           m2["stats"]["kept"] == 3 and len(m2["items"]) == 2 and m2["stats"]["truncated"] == 1
           and m2["stats"]["mergedAway"] == 1, str(m2["stats"])[:200])
 
-    # 缺一家：note 说话了，且它说的数必须与 stats 同一份（两套口径各自数一遍＝下一个 CR）
+    # 缺一家：note 说话了，但说的是『给用户看的那一层』——计数只在 stats 里（主人 10-05 的字＝
+    # "合并前／并掉几条"对用户没用、属面向开发者的数据，不要上屏）。
     m3 = pl.merge_news(
         [{"source": "eastmoney-news", "items": em, "error": None},
          {"source": "cls", "items": cls, "error": None},
@@ -382,12 +385,11 @@ def test_news_stats_survive_a_full_merge() -> None:
         limit=25,
     )
     note = m3["note"] or ""
-    check("note 顺带带上合并前后的数（原文案只有“去重后”，读不出比值）",
-          f"合并前 {m3['stats']['raw']} 条" in note and f"并掉 {m3['stats']['mergedAway']} 条" in note,
-          note[:220])
-    check("🔁 note 里的数与 stats 同源同值（两家到货时 raw=5、mergedAway=2）",
+    check("note 不带合并前后的计数（屏幕只说几家到货、去重后几条、未到货是谁）",
+          "合并前" not in note and "并掉" not in note and "去重后 3 条" in note, note[:220])
+    check("🔁 撤的是屏幕不是数据：同一轮 stats 里 raw=5／mergedAway=2／arrived=2／attempted=3 照样读得到",
           m3["stats"]["raw"] == 5 and m3["stats"]["mergedAway"] == 2
-          and f"合并前 5 条" in note and f"并掉 2 条" in note, note[:220])
+          and m3["stats"]["arrived"] == 2 and m3["stats"]["attempted"] == 3, str(m3["stats"])[:200])
     check("缺源时 attempted/arrived 也在 stats 里（note=None 的那一轮同样要能说清“试了几家”）",
           m3["stats"]["attempted"] == 3 and m3["stats"]["arrived"] == 2, str(m3["stats"])[:160])
 
