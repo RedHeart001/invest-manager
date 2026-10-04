@@ -83,7 +83,7 @@ def test_run_pipeline_deadline_env() -> None:
     orig_build = pl.build_items
     orig_emit = pl.emit_ingest
 
-    pl.fetch_news = lambda **kw: {"items": [], "source": "test", "note": None, "degraded": False}
+    pl.fetch_news = lambda **kw: {"items": [], "source": "test", "sources": ["test"], "note": None, "degraded": False}
     pl.structure_topics = lambda items, **kw: {"topics": [], "engine": "keyword", "note": None}
 
     def _build(topics, news, deadline=None):
@@ -171,7 +171,8 @@ def test_run_pipeline_reasons_split() -> None:
         pl.fetch_news = lambda **kw: {
             "items": [],
             "source": "eastmoney-news",
-            "note": "Tavily 不可用（Timeout），已降级国内新闻源",
+            "sources": ["eastmoney-news"],
+            "note": "新闻多源合并：1/3 家到货；未到货：Tavily（Timeout）",
             "degraded": True,
         }
         pl.structure_topics = lambda items, **kw: {
@@ -202,6 +203,7 @@ def test_run_pipeline_reasons_split() -> None:
         pl.fetch_news = lambda **kw: {
             "items": [],
             "source": "tavily",
+            "sources": ["tavily"],
             "note": None,
             "degraded": False,
         }

@@ -186,42 +186,143 @@ def _em_global_news(limit: int) -> list[dict]:
     return out
 
 
-def fetch_news(limit: int = NEWS_LIMIT, deadline: float | None = None) -> dict:
-    """R12：海外源优先、国内源降级；返回 {items, source, degraded, note}。
+# ---------------- 1b. 新闻层多源合并（OPT-2／PLAN M8 那条「例外」，主人 10-04 给字"执行"） ----------------
+#
+# 源序＝东财 → 财联社 → Tavily。**与旧的 failover 反了方向**（旧的是"海外优先、国内兜底"）：
+# 海外那条要么靠 key 要么靠代理，本机常态拿不到 ⇒ 一批新闻实际上常年只来自一家，
+# 而"只有一家"在旧语义里恒等于 degraded ⇒ CR8-1 那条横幅天天亮。fusion 之后三家都尝试，
+# 顺序只决定"同一条重复时先留下谁的"（择优另看 url/summary）。
+NEWS_SOURCE_ORDER = ("eastmoney-news", "cls", "tavily")
+# 跨源标题的相似度用**两道门槛各挡一种错**（二元组集合，同一把尺 `_bigrams`）：
+#   · Jaccard（交集/并集）≥ 0.5 —— 挡"同板块的不同事件"（合成样本「地产链午后拉升」vs
+#     「地产链龙头涨停」交集只有 2 个二元组，只看重合度也会被"地产链"这三个字骗过去）；
+#   · 重合度（交集/较短那条）≥ 0.8 —— 容得下转发造成的变形（「央行宣布降准」vs
+#     「【央行宣布降准】」的 Jaccard 只有 5/7≈0.71，单卡 Jaccard 会把同一条事件留成两条）。
+# 两个条件都满足才判"同一条"。⚠️ 这对阈值只在**合成标题**上断言过（成对：前缀变形要合并 ⇔
+# 同板块不同事件不许并 ⇔ 空标题不参与判定），**没有拿真新闻校准**——那属 `OPT-2` 前置实测，
+# 欠一次真 pipeline；校准前不要调这两个数。
+NEWS_DEDUPE_MIN_SIM = 0.5
+NEWS_DEDUPE_MIN_OVERLAP = 0.8
 
-    CR-16（本轮 code review）：接收整体 deadline——新闻源逐个尝试，若预算已耗尽
-    则停止后续源的尝试（此前新闻抓取完全不受 pipeline 超时预算约束）。
+
+def _news_similar(a: set[str], b: set[str]) -> bool:
+    """两个标题的二元组集合是否够判"同一条"（两道门槛都要过，理由见上面那对常数）。
+    任一侧为空 ⇒ 不算相似：财联社那类只有摘要、没有标题的条目，宁可留下重复也不误并。"""
+    if not a or not b:
+        return False
+    inter = len(a & b)
+    if inter / len(a | b) < NEWS_DEDUPE_MIN_SIM:
+        return False
+    return inter / min(len(a), len(b)) >= NEWS_DEDUPE_MIN_OVERLAP
+
+
+def _news_better(cand: dict, kept: dict) -> bool:
+    """重复条目的择优：**有链接优先于没链接**（CR8-3「相关文章」能不能出东西就靠这条，
+    而财联社电报的 `url` 恒空），其次摘要更长的优先。
+    两条规则的顺序不能反：先比链接再比长度，否则会出现"摘要长但没链接的那条把带链接的顶掉"。
     """
-    notes: list[str] = []
-    if os.environ.get("SEARCH_API_KEY"):
-        try:
-            items = _tavily(limit)
-            return {"items": items, "source": "tavily", "degraded": False, "note": None}
-        except Exception as e:  # noqa: BLE001
-            notes.append(f"Tavily 不可用（{type(e).__name__}），已降级国内新闻源")
-    else:
-        notes.append("未配置 SEARCH_API_KEY，使用国内新闻源")
+    has_url_new = bool(cand.get("url"))
+    has_url_kept = bool(kept.get("url"))
+    if has_url_new != has_url_kept:
+        return has_url_new
+    return len(cand.get("summary") or "") > len(kept.get("summary") or "")
 
-    for name, fn in (("cls", _cls_telegraph), ("eastmoney-news", _em_global_news)):
-        if deadline is not None and time.monotonic() > deadline:
-            notes.append(f"pipeline 超时，跳过新闻源 {name}")
-            break
-        try:
-            items = _ak_guarded(lambda: fn(limit), 45.0, "news-source")
-            return {
-                "items": items,
-                "source": name,
-                "degraded": True,
-                "note": "；".join(notes),
+
+def merge_news(attempts: list[dict], limit: int = NEWS_LIMIT) -> dict:
+    """OPT-2 刀 1：多源并集 → 跨源标题去重（择优留一条）→ 覆盖面自述。**纯函数**，不碰网络也不碰限流器。
+
+    入参＝`[{"source": 名, "items": list|None, "error": str|None}]`，顺序即源序（重复条目
+    先留下靠前那家的字段组合，再按 url/summary 择优）。返回 `{items, sources, source, missing,
+    degraded, note}`：
+      · `items` 每条带 `via`＝这一条由哪几家供的（可能不止一家）；
+      · `sources`＝**到货**的源（`error` 为空的），`source`＝主源＝`sources[0]`；
+      · `degraded` **只在降到单源或零源时才真**——多源到手是 fusion 的设计常态，缺一家不算降级，
+        否则 CR8-1 刚治掉的"降级横幅天天亮"会原样回来；缺的那几家仍进 `note`（⇒ `reasons[]`
+        的 news 条目），说话与报警是两件事。
+    """
+    arrived = [str(a.get("source") or "?") for a in attempts if not a.get("error")]
+    missing = [f"{a.get('source')}（{a.get('error')}）" for a in attempts if a.get("error")]
+
+    kept: list[dict] = []
+    for a in attempts:
+        name = str(a.get("source") or "?")
+        if a.get("error"):
+            continue
+        for raw in a.get("items") or []:
+            title = str(raw.get("title", "") or "")[:120]
+            summary = str(raw.get("summary", "") or "")[:200]
+            if not title and not summary:
+                continue
+            cand = {
+                "title": title,
+                "summary": summary,
+                "url": str(raw.get("url", "") or ""),
+                "time": str(raw.get("time", "") or ""),
+                "via": [name],
             }
-        except Exception as e:  # noqa: BLE001
-            notes.append(f"{name} 不可用（{type(e).__name__}: {str(e)[:80]}）")
+            grams = _bigrams(cand["title"])
+            hit = next(
+                (i for i, k in enumerate(kept) if _news_similar(grams, k["_grams"])), None
+            )
+            if hit is None:
+                kept.append({**cand, "_grams": grams})
+                continue
+            group = kept[hit]
+            if name not in group["via"]:
+                group["via"].append(name)
+            if _news_better(cand, group):  # 择优：换掉代表条目，但 `via` 要累计
+                kept[hit] = {**cand, "via": list(group["via"]), "_grams": grams}
+
+    items = [{k: g[k] for k in ("title", "summary", "url", "time", "via")} for g in kept[:limit]]
+    degraded = len(items) == 0 or len(arrived) <= 1
+    if not items:
+        note = "全部新闻源不可用" + (f"（{'；'.join(missing)}）" if missing else "")
+    elif missing:
+        note = (
+            f"新闻多源合并：{len(arrived)}/{len(attempts)} 家到货（{'、'.join(arrived)}）、"
+            f"去重后 {len(items)} 条；未到货：{'；'.join(missing)}"
+        )
+    else:
+        note = None
     return {
-        "items": [],
-        "source": "none",
-        "degraded": True,
-        "note": "；".join(notes) or "全部新闻源不可用",
+        "items": items,
+        "sources": arrived,
+        "source": arrived[0] if arrived else "none",
+        "missing": missing,
+        "degraded": degraded,
+        "note": note,
     }
+
+
+def fetch_news(limit: int = NEWS_LIMIT, deadline: float | None = None) -> dict:
+    """R15「例外」＋R12：新闻层走 **fusion**（OPT-2 刀 2）＝按 `NEWS_SOURCE_ORDER` **逐源全部尝试**，
+    不再"任一源成功即返回"，成功项交给 `merge_news` 并集去重择优。
+
+    ⚠️ 代价要说清（不是免费的）：东财新闻从此**每次 pipeline 必调**，而它与板块成分/快照
+    同抢一个 `eastmoney` 桶（`_em_global_news` 里那次 `_EM.acquire(timeout=15)`）。
+    "必调之后令牌获取率掉多少"＝`OPT-2` 前置实测 ②，**没测完就不动桶参数**（读码阶段不猜），
+    四条缓解方向（缩短超时／拿不到先跳过最后补／重排调用顺序／微调桶）也等那一个数字。
+
+    `deadline` 仍是硬预算（CR-16）：到点就停止尝试后面的源，**已到货的部分照常合并**——
+    旧实现在这里只能整批放弃或整批来自一家，fusion 之后"跑到第几家算第几家"。
+    """
+    fns = {"eastmoney-news": _em_global_news, "cls": _cls_telegraph, "tavily": _tavily}
+    attempts: list[dict] = []
+    for name in NEWS_SOURCE_ORDER:
+        if deadline is not None and time.monotonic() > deadline:
+            attempts.append({"source": name, "items": None, "error": "pipeline 预算已尽，未尝试"})
+            continue
+        if name == "tavily" and not search_api_key():
+            # 没配 key 不是"上游挂了"，写成人看得懂的一句（旧实现把它当降级说明拼进 note）
+            attempts.append({"source": name, "items": None, "error": "未配置 SEARCH_API_KEY"})
+            continue
+        try:
+            items = _ak_guarded(lambda f=fns[name]: f(limit), 45.0, "news-source")
+        except Exception as e:  # noqa: BLE001 单源失败不许拖垮整批（R10）
+            attempts.append({"source": name, "items": None, "error": f"{type(e).__name__}: {str(e)[:80]}"})
+            continue
+        attempts.append({"source": name, "items": items, "error": None})
+    return merge_news(attempts, limit=limit)
 
 
 # ---------------- 2. 板块名单（EM → THS 降级 + 缓存） ----------------
@@ -677,7 +778,8 @@ def run_pipeline(trigger: str = "manual") -> dict:
     #   engine ② 结构化引擎退化（真实能力损失；`struct["note"]` 已是它的成因文案）
     #   board  ③ 板块名映射未命中（几乎每轮都有，纯噪声）⇒ 不再参与 `degraded`/`note`，
     #          只留在运行结果 `reasons` 里供排查（"看不见的降级"由这条兜住）
-    # ① 靠源序反转/fusion 消灭属 `OPT-2`，不在本刀。
+    # ① 的消灭（源序反转＋fusion）已随 `OPT-2` 落地（10-04）：现在缺一家是常态、不算降级，
+    #    只有降到**单源或零源**才把 `degraded` 点亮——所以这条 reasons 仍存在，但它是"说明"不是"报警"。
     reasons: list[dict] = []
     if news.get("note"):
         reasons.append({"kind": "news", "text": str(news["note"])})
@@ -691,7 +793,10 @@ def run_pipeline(trigger: str = "manual") -> dict:
         "date": beijing_today(),
         "trigger": trigger,
         "engine": struct["engine"],
-        "newsSource": news["source"],
+        # OPT-2 刀 1：`newsSource` 单值 → **`newsSources` 数组**（fusion 之后"这批来自哪家"
+        # 本来就可能是多家）。库里那一列仍是 `String?`，web 侧写成 JSON 文本、读侧归一，
+        # **存量裸字符串行不迁移、不重写**（无 migration，按 CR8-8 那条"只改写侧会留存量缺口"）。
+        "newsSources": news["sources"],
         "degraded": bool(news["degraded"] or struct["engine"] == "keyword"),
         "note": "；".join(dict.fromkeys(shown))[:500] or None,
         "items": items,
@@ -700,7 +805,7 @@ def run_pipeline(trigger: str = "manual") -> dict:
         "date": payload["date"],
         "trigger": trigger,
         "topics": len(items),
-        "newsSource": news["source"],
+        "newsSources": news["sources"],  # OPT-2：到货的源（可以是多家），不再是单值
         "engine": struct["engine"],
         "degraded": payload["degraded"],
         "note": payload["note"],

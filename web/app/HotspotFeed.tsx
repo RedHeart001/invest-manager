@@ -40,6 +40,13 @@ const SOURCE_LABEL: Record<string, string> = {
   none: "无来源",
 };
 
+/** OPT-2：一批热点现在可以来自多家源（fusion），来源渲染成一家一个名字。
+ *  ⚠️ 这是**本轮新上屏的字**（分隔符与"没有来源时说什么"都是我定的），措辞要改是一句话的事。 */
+function sourceText(list?: string[] | null): string {
+  const names = (list ?? []).map((s) => SOURCE_LABEL[s] ?? s);
+  return names.length ? names.join(" ＋ ") : "-";
+}
+
 const ENGINE_LABEL: Record<string, string> = {
   llm: "LLM 结构化",
   keyword: "关键词规则",
@@ -201,7 +208,7 @@ export default function HotspotFeed({
         if (!st.ok) continue;
         const sb = (await st.json()) as {
           running?: boolean;
-          lastResult?: { topics?: number; ingested?: number; newsSource?: string; note?: string; error?: string } | null;
+          lastResult?: { topics?: number; ingested?: number; newsSources?: string[]; note?: string; error?: string } | null;
         };
         if (sb.running) {
           sawRunning = true;
@@ -215,7 +222,7 @@ export default function HotspotFeed({
             setError(`抓取失败：${lr.error}`);
           } else {
             setFlash(
-              `抓取完成：${lr.topics ?? 0} 条热点 · 来源 ${lr.newsSource ?? "-"}${lr.note ? ` · ${String(lr.note).slice(0, 80)}` : ""}`,
+              `抓取完成：${lr.topics ?? 0} 条热点 · 来源 ${sourceText(lr.newsSources)}${lr.note ? ` · ${String(lr.note).slice(0, 80)}` : ""}`,
             );
           }
         } else {
@@ -315,7 +322,7 @@ export default function HotspotFeed({
                 <div className="shrink-0 text-right text-[11px] text-zinc-400">
                   <div>{beijingTimeOf(r.createdAt)}</div>
                   <div>
-                    {SOURCE_LABEL[r.newsSource ?? ""] ?? r.newsSource ?? "-"} ·{" "}
+                    {sourceText(r.newsSources)} ·{" "}
                     {ENGINE_LABEL[r.engine ?? ""] ?? r.engine ?? "-"}
                   </div>
                 </div>

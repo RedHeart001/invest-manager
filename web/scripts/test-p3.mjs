@@ -54,13 +54,13 @@ async function main() {
     if (rows.length > 0) {
       const r = rows[0];
       ok(
-        "字段完整（title/summary/boardTags/related/degraded/engine/newsSource）",
+        "字段完整（title/summary/boardTags/related/degraded/engine/newsSources）",
         typeof r.title === "string" &&
           Array.isArray(r.boardTags) &&
           Array.isArray(r.related) &&
           typeof r.degraded === "boolean" &&
           "engine" in r &&
-          "newsSource" in r,
+          Array.isArray(r.newsSources),
       );
       ok("相关产品结构含 type/code/name", rows.some((x) => (x.related ?? []).length > 0 && x.related.every((p) => p.type && p.code && p.name)) || (r.related ?? []).length === 0);
     }
@@ -80,14 +80,23 @@ async function main() {
       "R10 显式标注（降级带 note / 正常带来源）",
       rows.length === 0 ||
         degradedRows.every((r) => typeof r.note === "string" && r.note.length > 0) &&
-          rows.filter((r) => !r.degraded).every((r) => Boolean(r.newsSource || r.engine)),
+          rows.filter((r) => !r.degraded).every((r) => Boolean((r.newsSources ?? []).length || r.engine)),
       `rows=${rows.length} degraded=${degradedRows.length}`,
     );
     if (rows.length > 0) {
       ok(
-        "新闻源标注合法（R12：tavily/cls/eastmoney-news/none）",
-        rows.every((r) => ["cls", "eastmoney-news", "none", "tavily", null].includes(r.newsSource ?? null)),
-        rows.map((r) => r.newsSource).join(","),
+        "新闻源标注合法（OPT-2 后是**数组**，每个元素 ∈ tavily/cls/eastmoney-news/none）",
+        rows.every(
+          (r) =>
+            Array.isArray(r.newsSources) &&
+            r.newsSources.every((x) => ["cls", "eastmoney-news", "none", "tavily"].includes(x)),
+        ),
+        rows.map((r) => (r.newsSources ?? []).join("+")).join(" | "),
+      );
+      ok(
+        "🔁 存量裸字符串行也读得出来源（OPT-2 不迁移数据 ⇒ 归一必须在读侧）",
+        rows.every((r) => Array.isArray(r.newsSources)),
+        "任一行的 newsSources 不是数组就是归一没生效",
       );
       ok(
         "结构化引擎标注合法（llm/keyword/null）",
@@ -145,7 +154,7 @@ async function main() {
         date: today(),
         trigger: "test-p3",
         engine: "keyword",
-        newsSource: "cls",
+        newsSources: ["cls"],
         degraded: true,
         note: "测试数据（test-p3 自动生成，完成后清理）",
         items: [
@@ -277,7 +286,7 @@ async function main() {
     const lr = body.lastResult ?? {};
     ok(
       "最近一次执行含来源/引擎/降级信息",
-      "newsSource" in lr && "engine" in lr && "degraded" in lr,
+      "newsSources" in lr && Array.isArray(lr.newsSources) && "engine" in lr && "degraded" in lr,
       JSON.stringify(lr).slice(0, 160),
     );
   }

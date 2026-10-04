@@ -15,6 +15,34 @@ export type RelatedProduct = {
  *  （`pipeline.py:_topic_urls`），旧契约在返回时丢掉，前端无从渲染。 */
 export type SourceRef = { url: string; title: string };
 
+/**
+ * 归一化新闻源（OPT-2 刀 1：`newsSource` 单值 → `newsSources` 数组）。三种形态都要认：
+ *  1. ds 直接 POST 来的**真数组**（新契约）；
+ *  2. 库里新行的 **JSON 数组文本**（这一列仍是 `String?`，不动 schema、无 migration）；
+ *  3. **存量裸字符串行**（`"cls"`／`"none"`）——CR8-8 那条教训：只改写侧会留存量缺口，
+ *     历史批次的来源在页面上就瞎了。
+ * 顺带把空串／空数组归一成 `[]`，渲染层再决定"没有来源"说什么字。
+ */
+export function toSourceList(raw: unknown): string[] {
+  if (Array.isArray(raw)) {
+    return [...new Set(raw.map((x) => String(x).trim()).filter(Boolean))];
+  }
+  const s = String(raw ?? "").trim();
+  if (!s) return [];
+  const flat = (list: unknown[]) => [...new Set(list.map((x) => String(x).trim()).filter(Boolean))];
+  if (s.startsWith("[")) {
+    // 数组形态解不出来＝半截或被手改坏 ⇒ 当"没有来源"，不许把 `"[oops"` 当成一家源的名字
+    const parsed = safeJson<unknown>(s, null);
+    return Array.isArray(parsed) ? flat(parsed) : [];
+  }
+  if (s.startsWith('"')) {
+    // 被 JSON 引号包住的单个源名（`"cls"`）：解出来用，别把引号当来源名的一部分
+    const parsed = safeJson<unknown>(s, null);
+    if (typeof parsed === "string" && parsed.trim()) return [parsed.trim()];
+  }
+  return [s];
+}
+
 /** 归一化来源引用。**读侧必须兼容存量纯字符串行**：历史批次的 `sourceUrls` 里
  *  只有 URL，不重写库就永远拿不到标题 ⇒ 老行回退 `title: ""`（前端显示「原文」）。
  *  与 CR8-8 同一条教训：只改写侧会留下存量缺口。 */
@@ -42,7 +70,8 @@ export type DigestRow = {
   boardTags: string[];
   sourceUrls: SourceRef[];
   related: RelatedProduct[];
-  newsSource: string | null;
+  /** OPT-2：这批热点来自哪几家新闻源（读侧已把存量裸字符串/JSON 文本归一成数组） */
+  newsSources: string[];
   engine: string | null;
   degraded: boolean;
   note: string | null;
@@ -97,7 +126,7 @@ export function toDigestRow(r: DigestDbRow): DigestRow {
     related: safeJson<RelatedProduct[]>(r.relatedCodes, []).filter(
       (p) => !(p.type === "stock" && isDelistedName(p.name)),
     ),
-    newsSource: r.newsSource,
+    newsSources: toSourceList(r.newsSource),
     engine: r.engine,
     degraded: Boolean(r.degraded),
     note: r.note,
@@ -146,7 +175,7 @@ export type IngestPayload = {
   date: string;
   trigger?: string;
   engine?: string;
-  newsSource?: string;
+  newsSources?: string[];
   degraded?: boolean;
   note?: string | null;
   items: IngestItem[];
@@ -228,6 +257,11 @@ export async function ingestDigests(
   let inserted = 0;
   let skipped = 0;
   const createdRows: DigestRow[] = [];
+  // 整批共用同一份来源清单（ds 的 payload 是批次级的，逐行重复存会放大 5 倍）
+  const newsSourcesJson = (() => {
+    const l = toSourceList(payload.newsSources);
+    return l.length ? JSON.stringify(l) : null;
+  })();
 
   for (const item of items) {
     const title = String(item.title ?? "").trim().slice(0, 200);
@@ -247,7 +281,9 @@ export async function ingestDigests(
           boardTags: JSON.stringify(boardTags),
           sourceUrls: JSON.stringify(toSourceRefs(item.sourceUrls ?? []).slice(0, 5)),
           relatedCodes: JSON.stringify(related),
-          newsSource: payload.newsSource ?? null,
+          // OPT-2：一个数组落到那一列的 JSON 文本里（`String?` 不改 ⇒ 无 migration）；
+          // 空清单落 null，而不是 "[]"——否则读侧要再分一次"没有源"与"源列表为空"。
+          newsSource: newsSourcesJson,
           engine: payload.engine ?? null,
           degraded: Boolean(payload.degraded),
           note: payload.note ? String(payload.note).slice(0, 500) : null,

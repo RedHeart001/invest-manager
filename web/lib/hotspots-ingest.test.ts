@@ -253,6 +253,58 @@ describe("sourceUrls（CR8-3：{url,title} 透传与存量兼容）", () => {
   });
 });
 
+// OPT-2 刀 1 的契约面：`newsSource` 单值 → `newsSources` 数组。
+// 这一列仍是 `String?`（不动 schema、无 migration）⇒ 新行落 JSON 文本，
+// 而**存量裸字符串行必须照样读得出来**（CR8-8 那条教训：只改写侧会留存量缺口）。
+describe("newsSources（OPT-2：单值 → 数组，存量行不迁移）", () => {
+  const written = () => create.mock.calls[0][0].data.newsSource as string | null;
+  const rowOf = (raw: unknown) =>
+    toDigestRow(dbRow({ newsSource: raw }) as Parameters<typeof toDigestRow>[0]).newsSources;
+
+  it("ds POST 来的真数组 ⇒ 库里落 JSON 文本，读回来还是那两家", async () => {
+    findMany.mockResolvedValue([]);
+    create.mockResolvedValue(dbRow());
+    await ingestDigests({
+      date: "2026-09-25",
+      newsSources: ["eastmoney-news", "cls"],
+      items: [{ title: "甲事件" }],
+    });
+    expect(JSON.parse(String(written()))).toEqual(["eastmoney-news", "cls"]);
+    expect(rowOf(written())).toEqual(["eastmoney-news", "cls"]);
+  });
+
+  it("🔁 存量裸字符串行（老契约）读成一条来源，不瞎", () => {
+    expect(rowOf("cls")).toEqual(["cls"]);
+    expect(rowOf("none")).toEqual(["none"]); // 旧的"全源失败"标记也是一个合法值
+    expect(rowOf(String.raw`"eastmoney-news"`)).toEqual(["eastmoney-news"]); // 带引号的单值
+  });
+
+  it("空清单落 null 而不是『[]』（读侧不再分『没有源』与『源列表为空』）", async () => {
+    findMany.mockResolvedValue([]);
+    create.mockResolvedValue(dbRow());
+    await ingestDigests({ date: "2026-09-25", newsSources: [], items: [{ title: "乙事件" }] });
+    expect(written()).toBe(null);
+    expect(rowOf(null)).toEqual([]);
+  });
+
+  it("同一家重复只记一次（写侧与读侧同一口径去重）", async () => {
+    findMany.mockResolvedValue([]);
+    create.mockResolvedValue(dbRow());
+    await ingestDigests({
+      date: "2026-09-25",
+      newsSources: ["cls", "cls", "eastmoney-news"],
+      items: [{ title: "丙事件" }],
+    });
+    expect(JSON.parse(String(written()))).toEqual(["cls", "eastmoney-news"]);
+    expect(rowOf('["cls","cls"]')).toEqual(["cls"]);
+  });
+
+  it("被手改坏的 JSON 文本当『没有来源』，不抛也不把半截当来源名", () => {
+    expect(rowOf("[oops")).toEqual([]);
+    expect(rowOf("")).toEqual([]);
+  });
+});
+
 // CR8-8 的另一半：ingest 侧过滤只治**新批次**，历史行的 relatedCodes 里已经存着
 // 摘牌股 ⇒ 读侧（toDigestRow）必须同样剔除，否则"修了但首页还看得到"。
 describe("toDigestRow（CR8-8 读侧：存量行的退市成分不再出现）", () => {
