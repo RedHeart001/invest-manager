@@ -233,25 +233,41 @@ def merge_news(attempts: list[dict], limit: int = NEWS_LIMIT) -> dict:
 
     入参＝`[{"source": 名, "items": list|None, "error": str|None}]`，顺序即源序（重复条目
     先留下靠前那家的字段组合，再按 url/summary 择优）。返回 `{items, sources, source, missing,
-    degraded, note}`：
+    degraded, note, stats}`：
       · `items` 每条带 `via`＝这一条由哪几家供的（可能不止一家）；
       · `sources`＝**到货**的源（`error` 为空的），`source`＝主源＝`sources[0]`；
       · `degraded` **只在降到单源或零源时才真**——多源到手是 fusion 的设计常态，缺一家不算降级，
         否则 CR8-1 刚治掉的"降级横幅天天亮"会原样回来；缺的那几家仍进 `note`（⇒ `reasons[]`
         的 news 条目），说话与报警是两件事。
+
+    `stats`（#34／CR9-62）＝**不受"有没有缺源"约束的那份计数**。`note` 只在缺源时才说话
+    （三家齐走 `else: note=None`），于是"合并前逐源几条"这个 `OPT-2` 前置实测 ② 真正要的数字
+    恰好在看不到——满配那一轮最该有样本，却一个字都不留。计数因此独立成键、每轮都在：
+      · `perSource`＝各家**交来多少行**（合并前、按源分列，就是缺的那个"分母"）；
+      · `raw = sum(perSource)`，恒等式 `raw == blank + kept + mergedAway`（拿去校准阈值时先查这条）；
+      · `kept`＝并集大小（**截断前**）、`truncated`＝被 `NEWS_LIMIT` 切掉的那部分，
+        两者相加才等于 `items` 的条数——note 里"去重后 N 条"报的是截断**后**，别看混；
+      · `crossSource`＝`via` 跨了 ≥2 家的条目数，**这才是 0.5/0.8 那两道门槛真正作用的对象**
+        （同一家内的重复不需要阈值）。
     """
     arrived = [str(a.get("source") or "?") for a in attempts if not a.get("error")]
     missing = [f"{a.get('source')}（{a.get('error')}）" for a in attempts if a.get("error")]
 
+    per_source: dict[str, int] = {}
+    blank = 0
+    merged_away = 0
     kept: list[dict] = []
     for a in attempts:
         name = str(a.get("source") or "?")
         if a.get("error"):
             continue
-        for raw in a.get("items") or []:
+        rows = a.get("items") or []
+        per_source[name] = per_source.get(name, 0) + len(rows)
+        for raw in rows:
             title = str(raw.get("title", "") or "")[:120]
             summary = str(raw.get("summary", "") or "")[:200]
             if not title and not summary:
+                blank += 1
                 continue
             cand = {
                 "title": title,
@@ -267,6 +283,7 @@ def merge_news(attempts: list[dict], limit: int = NEWS_LIMIT) -> dict:
             if hit is None:
                 kept.append({**cand, "_grams": grams})
                 continue
+            merged_away += 1
             group = kept[hit]
             if name not in group["via"]:
                 group["via"].append(name)
@@ -274,13 +291,25 @@ def merge_news(attempts: list[dict], limit: int = NEWS_LIMIT) -> dict:
                 kept[hit] = {**cand, "via": list(group["via"]), "_grams": grams}
 
     items = [{k: g[k] for k in ("title", "summary", "url", "time", "via")} for g in kept[:limit]]
+    stats = {
+        "attempted": len(attempts),
+        "arrived": len(arrived),
+        "perSource": per_source,
+        "raw": sum(per_source.values()),
+        "blank": blank,
+        "kept": len(kept),
+        "mergedAway": merged_away,
+        "truncated": max(0, len(kept) - limit),
+        "crossSource": sum(1 for g in kept if len(g["via"]) > 1),
+    }
     degraded = len(items) == 0 or len(arrived) <= 1
     if not items:
         note = "全部新闻源不可用" + (f"（{'；'.join(missing)}）" if missing else "")
     elif missing:
         note = (
             f"新闻多源合并：{len(arrived)}/{len(attempts)} 家到货（{'、'.join(arrived)}）、"
-            f"去重后 {len(items)} 条；未到货：{'；'.join(missing)}"
+            f"合并前 {stats['raw']} 条 ⇒ 去重后 {len(items)} 条（并掉 {merged_away} 条）；"
+            f"未到货：{'；'.join(missing)}"
         )
     else:
         note = None
@@ -291,6 +320,7 @@ def merge_news(attempts: list[dict], limit: int = NEWS_LIMIT) -> dict:
         "missing": missing,
         "degraded": degraded,
         "note": note,
+        "stats": stats,
     }
 
 
@@ -809,6 +839,10 @@ def run_pipeline(trigger: str = "manual") -> dict:
         "trigger": trigger,
         "topics": len(items),
         "newsSources": news["sources"],  # OPT-2：到货的源（可以是多家），不再是单值
+        # #34（CR9-62）：合并计数每轮都在，**不随 note 一起消失**（三家齐时 note=None，
+        # 这一份就是"合并前逐源几条／并掉几条"的唯一去处）。它不进 `payload`——落库那列
+        # 没有装它的地方，而加列＝migration，按 CR8-8 那条口径要另立需求。
+        "newsStats": news["stats"],
         "engine": struct["engine"],
         "degraded": payload["degraded"],
         "note": payload["note"],

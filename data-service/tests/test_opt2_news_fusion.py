@@ -1,4 +1,4 @@
-"""OPT-2 离线单测：新闻层多源合并（fusion）——刀 1 的合并层＋刀 2 的"三家全部尝试"。
+"""OPT-2 离线单测：新闻层多源合并（fusion）＋ #34 的合并计数与状态位文件。
 
 背景（`docs/FIX-LEDGER.md` 的 OPT-2 行与 PLAN M8 那条「例外」）：`fetch_news` 旧语义是
 "任一源成功即返回"（failover），于是一批新闻常年只来自一家，而"只来自一家"在旧契约里
@@ -13,14 +13,22 @@
 4. **契约**：payload 的 `newsSource` 单值改 `newsSources` 数组（读侧兼容存量裸字符串，
    那半在 `web/lib/hotspots.ts` 与 ① 的 `hotspots-ingest.test.ts`）。
 
+#34（CR9-62，主人 10-04 夜给字"按 lastResult 新键＋状态位文件、note 只顺带 重写后要做"）补的是
+上面第 3 条留下的一个空洞：`note` **只在缺源时才说话**，于是"三家齐"那一轮（最该拿样本的一轮）
+一个计数都不留 ⇒ ① `merge_news` 产出 `stats`、`run_pipeline` 带出 `newsStats`；
+② `hotspot/scheduler` 每轮把 `lastResult` 覆写落盘，`status()` 内存空时回落到它并标 `fromDisk`
+（同 #29／CR9-53 的备份状态位口径）。
+
 零出网：三个源函数（`_em_global_news`／`_cls_telegraph`／`_tavily`）整体换成假对象，
 调用计数就是"有没有真的出网"的证据；顺带断言这条合并路本身**不占东财桶**
 （占桶的是 `_em_global_news` 里那一次 `acquire`，它在被测边界之外）。
+状态位那一组写进 `tempfile` 临时目录（`HOTSPOT_STATE_FILE` 覆盖），不碰仓库里那份真的。
 
 ⚠️ 本套件测不到的那一半：去重那两道阈值（`NEWS_DEDUPE_MIN_SIM=0.5` ＋
 `NEWS_DEDUPE_MIN_OVERLAP=0.8`）只在**合成标题**上被断言过（前缀变形要合并 ⇔ 同板块不同事件
-不许并 ⇔ 短标题不被长标题吞掉），**没拿真新闻校准**；"东财新闻必调之后令牌获取率掉多少"＝
-前置实测 ②，欠一次真 pipeline。
+不许并 ⇔ 短标题不被长标题吞掉），**没拿真新闻校准**。#34 落地的正是"校准要的那几个数从此每轮
+都在"（`perSource`/`raw`/`mergedAway`/`crossSource`），**但数拿到了不等于阈值就校准了**——
+比值仍要对着真 pipeline 的那一轮读（`OPT-2` 前置实测 ② 的遗留部分）。
 
 运行方式（无需任何服务在跑）：
     PYTHONPATH=. .venv/Scripts/python tests/test_opt2_news_fusion.py
@@ -293,6 +301,11 @@ def test_no_bucket_use_and_payload_key() -> None:
             "items": [news("甲")], "sources": ["eastmoney-news", "cls"],
             "source": "eastmoney-news", "missing": ["tavily（未配置）"],
             "degraded": False, "note": None,
+            # #34：桩件必须与真 `fetch_news` 同形（`run_pipeline` 直接按键取，缺了就是 KeyError，
+            # 这是刻意的——“计数丢了”不该被静默吞掉）。
+            "stats": {"attempted": 3, "arrived": 2, "perSource": {"eastmoney-news": 1},
+                      "raw": 1, "blank": 0, "kept": 1, "mergedAway": 0,
+                      "truncated": 0, "crossSource": 0},
         }
         pl.structure_topics = lambda items, **kw: {"topics": [{"title": "甲"}], "engine": "llm", "note": None}
         pl.build_items = lambda topics, news, deadline=None: (
@@ -308,6 +321,160 @@ def test_no_bucket_use_and_payload_key() -> None:
     check("运行结果同一口径（web 的「抓取完成：来源 X」读的就是这一份）",
           res.get("newsSources") == ["eastmoney-news", "cls"] and "newsSource" not in res,
           str({k: v for k, v in res.items() if "news" in k})[:160])
+    check("#34：计数随 `run_pipeline` 的返回值出来（web/探针读的是这一份，不是 merge_news 的中间态）",
+          res.get("newsStats", {}).get("attempted") == 3, str(res.get("newsStats"))[:160])
+    check("🔁 计数**不进落库 payload**（那一列没有装它的地方；加列＝migration，按 CR8-8 要另立需求）",
+          "newsStats" not in cap and "stats" not in cap, str(sorted(cap.keys()))[:200])
+
+
+# ---------- 5. #34：满配那一轮的计数读得到（note 恰恰在这一轮是 None） ----------
+
+
+def test_news_stats_survive_a_full_merge() -> None:
+    """这一组是 #34 的**本体**：三家齐时 `note=None`，于是"合并前逐源几条"必须有别的去处。
+
+    样本是照着"能手工数出来"设计的（三家全部到货、无 missing ⇒ note 必为 None）：
+      · 东财 3 行：`央行宣布降准`／`白酒板块震荡回落`／`光伏组件报价上涨`
+      · 财联社 2 行：`央行宣布降准`（与东财同一条）／`【白酒板块震荡回落】`（前缀变形，同一条）
+      · Tavily 2 行：`央行宣布降准`（第三次供同一条）／一行空标题空摘要（该被当噪声丢）
+      ⇒ raw 7、blank 1、kept 3、mergedAway 3、crossSource 2（降准跨三家、白酒跨两家）。
+    """
+    em = [news("央行宣布降准", url="https://em/1"), news("白酒板块震荡回落"), news("光伏组件报价上涨")]
+    cls = [news("央行宣布降准"), news("【白酒板块震荡回落】")]
+    tv = [news("央行宣布降准"), {"title": "", "url": "", "summary": "", "time": ""}]
+    m = pl.merge_news(
+        [{"source": "eastmoney-news", "items": em, "error": None},
+         {"source": "cls", "items": cls, "error": None},
+         {"source": "tavily", "items": tv, "error": None}],
+        limit=25,
+    )
+    s = m["stats"]
+    check("前提先钉住：三家齐 ⇒ note=None（旧口径下这一轮**什么数都不留**，#34 就是补这个）",
+          m["note"] is None and len(m["sources"]) == 3, str(m["note"]))
+    check("perSource＝合并前**逐源**交来几行（缺的就是这个分母）",
+          s["perSource"] == {"eastmoney-news": 3, "cls": 2, "tavily": 2}, str(s["perSource"]))
+    check("raw/blank/kept/mergedAway 四数手工可数（7/1/3/3）",
+          (s["raw"], s["blank"], s["kept"], s["mergedAway"]) == (7, 1, 3, 3), str(s)[:200])
+    check("恒等式 raw == blank + kept + mergedAway（拿去校准阈值时先查这条，不对就别读比值）",
+          s["raw"] == s["blank"] + s["kept"] + s["mergedAway"], str(s)[:200])
+    check("crossSource＝`via` 跨了 ≥2 家的条目数（同一家内的重复不需要阈值 ⇒ 只该数到 2）",
+          s["crossSource"] == 2, str([x["via"] for x in m["items"]]))
+    check("kept 是**截断前**的并集、truncated 是被 NEWS_LIMIT 切掉的 ⇒ 两者相加才等于 items",
+          s["truncated"] == 0 and s["kept"] - s["truncated"] == len(m["items"]), str(s)[:200])
+
+    # 截断这一档单独测：limit 比并集小，`truncated` 必须 nonzero，否则 note 与 stats 会互相打脸
+    m2 = pl.merge_news(
+        [{"source": "eastmoney-news",
+          "items": [news("央行宣布降准"), news("第 2 条独立事件标题甲"), news("第 3 条独立事件标题乙")],
+          "error": None},
+         {"source": "cls", "items": [news("央行宣布降准")], "error": None}],
+        limit=2,
+    )
+    check("🔁 limit=2 时 kept=3 而 items=2 ⇒ truncated=1（“并掉多少”与“切掉多少”是两件事）",
+          m2["stats"]["kept"] == 3 and len(m2["items"]) == 2 and m2["stats"]["truncated"] == 1
+          and m2["stats"]["mergedAway"] == 1, str(m2["stats"])[:200])
+
+    # 缺一家：note 说话了，且它说的数必须与 stats 同一份（两套口径各自数一遍＝下一个 CR）
+    m3 = pl.merge_news(
+        [{"source": "eastmoney-news", "items": em, "error": None},
+         {"source": "cls", "items": cls, "error": None},
+         {"source": "tavily", "items": None, "error": "未配置 SEARCH_API_KEY"}],
+        limit=25,
+    )
+    note = m3["note"] or ""
+    check("note 顺带带上合并前后的数（原文案只有“去重后”，读不出比值）",
+          f"合并前 {m3['stats']['raw']} 条" in note and f"并掉 {m3['stats']['mergedAway']} 条" in note,
+          note[:220])
+    check("🔁 note 里的数与 stats 同源同值（两家到货时 raw=5、mergedAway=2）",
+          m3["stats"]["raw"] == 5 and m3["stats"]["mergedAway"] == 2
+          and f"合并前 5 条" in note and f"并掉 2 条" in note, note[:220])
+    check("缺源时 attempted/arrived 也在 stats 里（note=None 的那一轮同样要能说清“试了几家”）",
+          m3["stats"]["attempted"] == 3 and m3["stats"]["arrived"] == 2, str(m3["stats"])[:160])
+
+
+# ---------- 6. 状态位文件：重启后那一轮的数还在（fromDisk 不许与"从没跑过"同形） ----------
+
+
+def test_state_file_and_from_disk_fallback() -> None:
+    import shutil
+    import tempfile
+
+    import app.hotspot.scheduler as hs
+
+    tmpdir = tempfile.mkdtemp()
+    path = os.path.join(tmpdir, "hotspot-state.json")
+    prev_env = os.environ.get("HOTSPOT_STATE_FILE")
+    prev_state = dict(hs._state)
+    os.environ["HOTSPOT_STATE_FILE"] = path
+    try:
+        hs._state.update({
+            "running": False, "runs": 7, "catchUpResolved": "2026-10-05",
+            "lastRun": "2026-10-05T08:30:05+08:00",
+            "lastResult": {"trigger": "pre-market", "newsSources": ["eastmoney-news", "cls", "tavily"],
+                           "note": None, "newsStats": {"kept": 3, "raw": 7, "crossSource": 2}},
+        })
+        wrote = hs._write_state()
+        check("跑完一轮就把 lastResult 覆写落盘（成功轮的出口）",
+              wrote is True and os.path.exists(path), f"wrote={wrote}")
+        s_mem = hs.status()
+        check("内存非空 ⇒ fromDisk=False（本进程跑过与上个进程跑过，两格不许同形）",
+              s_mem["fromDisk"] is False and s_mem["runs"] == 7, str(s_mem["fromDisk"]))
+
+        # 模拟重启：内存清空，只有盘上那份
+        hs._state.update({"lastRun": None, "lastResult": None, "runs": 0, "catchUpResolved": None})
+        s_disk = hs.status()
+        check("🔁 内存清空后一次 curl 仍读得到那一轮的合并计数，且标 fromDisk=True",
+              s_disk["fromDisk"] is True
+              and s_disk["lastResult"]["newsStats"]["crossSource"] == 2
+              and s_disk["lastRun"] == "2026-10-05T08:30:05+08:00", str(s_disk)[:200])
+        check("回落**只捞 lastRun/lastResult**，`runs` 保持本进程原义（p3 的轮询条件靠它）",
+              s_disk["runs"] == 0, f'runs={s_disk["runs"]}')
+        check("`catchUpResolved` 不进状态位文件（昨天的“补跑已定案”放到今天就是错的）",
+              "catchUpResolved" not in (hs.read_state() or {}), str(sorted((hs.read_state() or {}).keys())))
+
+        # 盘上也没有 ⇒ 与"读到 null"分开
+        os.remove(path)
+        s_none = hs.status()
+        check("🔁 内存空**且**盘上也没有 ⇒ fromDisk=False、lastResult=None（“从没跑过”是另一格）",
+              s_none["fromDisk"] is False and s_none["lastResult"] is None, str(s_none)[:160])
+
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("{ 半截的 JSON")
+        check("文件损坏一律当“没有”：read_state 不抛、status 不 500",
+              hs.read_state() is None and hs.status()["fromDisk"] is False, "corrupt")
+
+        # 失败轮同样要落盘，且**写盘这一步接在 `_execute` 的收尾**：只让单测手动调 `_write_state`
+        # 是假绿——把 `_execute` 里那行删掉，下面这条就该红。
+        orig_exec = hs.run_pipeline
+        hs._state.update({"lastRun": None, "lastResult": None})
+        try:
+            hs.run_pipeline = lambda trigger="manual": (_ for _ in ()).throw(RuntimeError("boom"))
+            hs._state["running"] = True
+            res = hs._execute("unit-test-fail")
+        finally:
+            hs.run_pipeline = orig_exec
+        disk_err = str((hs.read_state() or {}).get("lastResult", {}).get("error", ""))
+        check("🔁 失败轮同样落盘，且写盘接在 `_execute` 收尾（不是只有单测手动调）",
+              disk_err.startswith("RuntimeError: boom") and disk_err != ""
+              and res.get("error", "").startswith("RuntimeError: boom"), f"disk={disk_err[:100]}")
+        check("失败轮的出口照样释放 `running`（状态位不许把单飞锁卡死）",
+              hs._state["running"] is False, str(hs._state["running"]))
+
+        # 写不进去 ⇒ 观测不得拖垮主功能（CR9-45）：只 warning、返回 False、不留半截
+        blocker = os.path.join(tmpdir, "blocker")
+        with open(blocker, "w", encoding="utf-8") as f:
+            f.write("占位：blocker 是个文件，它下面的目录建不出来")
+        os.environ["HOTSPOT_STATE_FILE"] = os.path.join(blocker, "sub", "hotspot-state.json")
+        check("写不进去时只 log.warning、返回 False，且不留 `.tmp` 半截（CR9-45）",
+              hs._write_state() is False and not os.path.exists(path + ".tmp"), "unwritable")
+    finally:
+        hs._state.clear()
+        hs._state.update(prev_state)
+        if prev_env is None:
+            os.environ.pop("HOTSPOT_STATE_FILE", None)
+        else:
+            os.environ["HOTSPOT_STATE_FILE"] = prev_env
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 if __name__ == "__main__":
@@ -315,6 +482,8 @@ if __name__ == "__main__":
     test_merge_union_dedupe_and_pick()
     test_coverage_declaration()
     test_no_bucket_use_and_payload_key()
+    test_news_stats_survive_a_full_merge()
+    test_state_file_and_from_disk_fallback()
     fails = [x for x in results if not x[1]]
     print(f"\n===== {len(results) - len(fails)}/{len(results)} 通过 =====")
     if fails:

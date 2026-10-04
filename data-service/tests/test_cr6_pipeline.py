@@ -32,6 +32,15 @@ def _topics() -> list[dict]:
     ]
 
 
+# #34（CR9-62）之后 `run_pipeline` 按键取 `news["stats"]`（真 `fetch_news` 每轮都带），
+# 所以这里的桩件必须与它同形——缺这个键不是"桩件更简单"，而是**桩件比真函数少一个契约**，
+# 表现就是整轮 KeyError（本轮 ② 全量实跑撞到的就是这一条）。
+STUB_STATS = {
+    "attempted": 3, "arrived": 1, "perSource": {"test": 0}, "raw": 0,
+    "blank": 0, "kept": 0, "mergedAway": 0, "truncated": 0, "crossSource": 0,
+}
+
+
 def test_build_items_deadline_expired() -> None:
     """deadline 已过期 → 不调用 map_board_products，但每个 topic 仍产出，带降级 note。"""
     calls = {"n": 0}
@@ -83,7 +92,8 @@ def test_run_pipeline_deadline_env() -> None:
     orig_build = pl.build_items
     orig_emit = pl.emit_ingest
 
-    pl.fetch_news = lambda **kw: {"items": [], "source": "test", "sources": ["test"], "note": None, "degraded": False}
+    pl.fetch_news = lambda **kw: {"items": [], "source": "test", "sources": ["test"], "note": None,
+                                  "degraded": False, "stats": STUB_STATS}
     pl.structure_topics = lambda items, **kw: {"topics": [], "engine": "keyword", "note": None}
 
     def _build(topics, news, deadline=None):
@@ -173,7 +183,7 @@ def test_run_pipeline_reasons_split() -> None:
             "source": "eastmoney-news",
             "sources": ["eastmoney-news"],
             "note": "新闻多源合并：1/3 家到货；未到货：Tavily（Timeout）",
-            "degraded": True,
+            "degraded": True, "stats": STUB_STATS,
         }
         pl.structure_topics = lambda items, **kw: {
             "topics": [{"title": "t"}],
@@ -205,7 +215,7 @@ def test_run_pipeline_reasons_split() -> None:
             "source": "tavily",
             "sources": ["tavily"],
             "note": None,
-            "degraded": False,
+            "degraded": False, "stats": STUB_STATS,
         }
         pl.emit_ingest = lambda payload: (cap2.update(payload), {})[1]
         pl.run_pipeline(trigger="test")
