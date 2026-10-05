@@ -397,6 +397,8 @@ def test_stock_list_backup_source() -> None:
               items[2]["name"] == "安徽凤" and items[2]["pinyin"] == "anhuifeng", str(items[2]))
         check("乙③🔁：备源 source/degraded 声明到位",
               meta.get("source") == "sina-a-share-spot" and meta.get("degraded") is True, str(meta))
+        check("乙③🔁：上游劣化这条路径**不带**『有意子集』声明（#35／CR9-63 的放行通道没被写宽）",
+              "intentionalSubset" not in meta, str(meta)[:120])
         check("乙③🔁：note 说得出主源错误原文＋本次条数",
               "RemoteDisconnected" in note and f"本次 {len(items)} 只" in note, note[:200])
         check("乙③🔁：note 说得出两处真实代价（摘牌代码不会带来／新浪短名≤5 字符与 -U 后缀）",

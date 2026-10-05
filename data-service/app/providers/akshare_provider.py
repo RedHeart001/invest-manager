@@ -1225,7 +1225,17 @@ class AkshareProvider(BaseProvider):
                 else ""
             )
         )
-        return rows, {"source": "sina-us-category-list", "degraded": True, "note": note}
+        # #35／CR9-63（主人 10-05 取「甲」）：`degraded` 与 `intentionalSubset` 是**两件事**，
+        # 各用一个键——前者说"这批不是美股全量"（R16 的覆盖面可见性），后者说"缺口是我们自己的
+        # 产品口径造成的，不是上游劣化"。web 的降级缩水闸（`web/lib/sync.ts`）只在**收到这个声明**
+        # 时才放行有意子集，未声明时原判据一字不动（G2 防的备源劣化照旧挡）。
+        # 别把它读成"degraded 可以摘掉"：摘了就没有任何东西告诉消费侧"这是 179 只而不是全量"。
+        return rows, {
+            "source": "sina-us-category-list",
+            "degraded": True,
+            "intentionalSubset": True,
+            "note": note,
+        }
 
 
 _akshare = AkshareProvider()

@@ -111,4 +111,37 @@ describe("sync 降级缩水保护（G2 回归）", () => {
     expect(r.error).toBeUndefined();
     expect(r.note).toContain("list degraded source=sina-bond-cov-spot");
   });
+
+  // #35／CR9-63（主人 10-05 取「甲」）：缩水有两种成因——上游劣化（本闸要挡）与
+  // 上游自己声明的有意子集（`us`＝只取前排 N 页＋剔无行业）。过去两者共用 degraded 一个布尔，
+  // 于是第二次起的每一次 us 同步都被挡回，美股主数据事实上停止更新。
+  it("上游声明『有意子集』→ 缩水闸放行，且这笔账留在 note 里", async () => {
+    count.mockResolvedValue(300); // 库里旧的 300 行（改动前的 ds 写入）
+    dsGet.mockResolvedValue({
+      count: 179,
+      products: products(179),
+      source: "sina-us-category-list",
+      degraded: true,
+      note: "美股主数据按甲方案只取前排 15 页",
+      intentionalSubset: true,
+    });
+    const r = await syncType("bond");
+    expect(r.error).toBeUndefined();
+    expect(r.count).toBe(179);
+    expect(r.note).toContain("按上游声明放行有意子集（旧 300 → 新 179）");
+    // 放行不等于把覆盖面可见性顶掉：degraded 那句必须还在（R16）
+    expect(r.note).toContain("list degraded source=sina-us-category-list");
+    const wrote = executeRawUnsafe.mock.calls.some((c) => String(c[0]).includes("INSERT INTO"));
+    expect(wrote).toBe(true);
+  });
+
+  it("🔁 声明了却回 0 行 → 仍走 C1 空载荷保护（放行通道不覆盖空载荷）", async () => {
+    count.mockResolvedValue(300);
+    dsGet.mockResolvedValue({ count: 0, products: [], intentionalSubset: true });
+    const r = await syncType("bond");
+    expect(r.error).toContain("empty payload");
+    expect(r.count).toBeUndefined();
+    const wrote = executeRawUnsafe.mock.calls.some((c) => String(c[0]).includes("INSERT INTO"));
+    expect(wrote).toBe(false);
+  });
 });

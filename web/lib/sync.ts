@@ -168,6 +168,9 @@ async function _syncTypeInner(type: string): Promise<SyncResult> {
       source?: string;
       degraded?: boolean;
       note?: string;
+      // #35／CR9-63：上游声明"这一类本来就是有意取的子集"（不是上游劣化）。
+      // 只有带这个声明的载荷才允许通过下面的缩水闸；未声明者原判据一字不动。
+      intentionalSubset?: boolean;
     }>("/products", { type }, 600_000);
     const rows = (data.products ?? []).map((p) => ({
       id: randomUUID(),
@@ -205,20 +208,33 @@ async function _syncTypeInner(type: string): Promise<SyncResult> {
     // 备源（实测：转债东财 1052 只 → 新浪 cov_spot 仅 329 只），直接替换会把主数据
     // **缩小**（既有 1052 条被 329 条覆盖），属静默数据劣化。此处与现有条数比较，
     // 新载荷明显缩水（< 70%）时保留旧数据并显式标注，等主源恢复后再全量更新。
+    //
+    // #35／CR9-63（主人 10-05 取「甲」）：上面那句前提里藏着一个口径——"缩水"有两种成因，
+    // ① 上游劣化（备源覆盖度不足，正是本闸要挡的）② 我们自己的产品口径（`us` 有意只取前排
+    // N 页＋剔无行业 ⇒ 179 行 < 库里 300 行）。第二种过去被误读成第一种，于是**第二次起的
+    // 每一次同步都挡回同一份名单**，美股主数据事实上停止更新。现在只有载荷**显式声明**
+    // `intentionalSubset` 时才放行，未声明者本闸与原文案一字不动（`sync-shrink.test.ts`
+    // 钉着的那条 G2 取舍不许放宽）；空载荷保护在更前面且不看声明 ⇒ 声明了但 0 行仍保留旧数据。
     const existingCount = await prisma.product.count({ where: { type } });
+    let shrinkByDeclaration: string | null = null;
     if (existingCount > 0 && rows.length < existingCount * 0.7) {
-      // CR9-31：上游已显式声明降级时，这里不再是"疑似"，而是带来源、带原话的诊断
-      // （省掉一次去 data-service 日志里翻根因的功夫）；未声明时保留原有猜测口径。
-      const cause = data.degraded
-        ? `data-service 已声明降级：source=${data.source ?? "?"}——${data.note ?? "（无说明）"}`
-        : "疑似降级备源覆盖度不足";
-      return {
-        type,
-        error:
-          `payload shrunk (${rows.length} < ${existingCount} 的 70%)，` +
-          `${cause}，已保留现有数据`,
-        tookMs: Date.now() - started,
-      };
+      if (!data.intentionalSubset) {
+        // CR9-31：上游已显式声明降级时，这里不再是"疑似"，而是带来源、带原话的诊断
+        // （省掉一次去 data-service 日志里翻根因的功夫）；未声明时保留原有猜测口径。
+        const cause = data.degraded
+          ? `data-service 已声明降级：source=${data.source ?? "?"}——${data.note ?? "（无说明）"}`
+          : "疑似降级备源覆盖度不足";
+        return {
+          type,
+          error:
+            `payload shrunk (${rows.length} < ${existingCount} 的 70%)，` +
+            `${cause}，已保留现有数据`,
+          tookMs: Date.now() - started,
+        };
+      }
+      // 放行不等于不留痕：整表删旧插新会把 121 行没有行业的主数据换掉，这是已认下的代价
+      // （#32 的 (2)＝主人 10-04 定案），但必须在结果里说得出，不能让它长得像一次正常替换。
+      shrinkByDeclaration = `按上游声明放行有意子集（旧 ${existingCount} → 新 ${rows.length}）`;
     }
 
     // L1（O4）：重活移出主表写锁窗口——
@@ -278,6 +294,11 @@ async function _syncTypeInner(type: string): Promise<SyncResult> {
     let note: string | undefined;
     if (data.degraded) {
       note = `list degraded source=${data.source ?? "?"}${data.note ? `：${data.note}` : ""}`;
+    }
+    // #35／CR9-63：按"有意子集"声明放行过一次缩水，就要在结果里留下这笔账
+    // （否则"300 行换成 179 行"与一次正常替换在回执里长得一模一样）。
+    if (shrinkByDeclaration) {
+      note = note ? `${note}；${shrinkByDeclaration}` : shrinkByDeclaration;
     }
     return { type, count: rows.length, note, tookMs: Date.now() - started };
   } catch (e) {

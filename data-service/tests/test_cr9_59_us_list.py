@@ -241,6 +241,8 @@ def test_list_us_stocks_declaration() -> None:
     check("一页 20 行 ⇒ 留 17（NVDA＋16 个有行业的填充行）", len(rows) == 17, str(len(rows)))
     check("source 声明＝新浪美股名单（不是 akshare 主源）", meta["source"] == "sina-us-category-list", str(meta)[:90])
     check("覆盖面按设计缩水 ⇒ 恒带 degraded 声明", meta.get("degraded") is True, str(meta)[:90])
+    check("#35／CR9-63：『有意子集』另带自己的键（degraded 与 intentionalSubset 是两件事、不是一个布尔）",
+          meta.get("intentionalSubset") is True, str(meta)[:90])
     check("note 带上游自己声明的盘子数", "18241" in meta["note"], meta["note"][:160])
     check("note 报**剔了多少行**（VISA 空串／QQQ／ZZZTX 为 null）——砍掉 40% 的名单不许隐身",
           "剔掉 3 行" in meta["note"], meta["note"][:200])

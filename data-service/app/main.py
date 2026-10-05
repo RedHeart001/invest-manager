@@ -210,6 +210,8 @@ def products(
 
     CR9-59（2026-10-04）：`us` 自此可取，但它是**有界子集**（新浪排行名单的前 N 页，
     `US_LIST_PAGES`）且恒带 `degraded`/`note` 声明覆盖面——不是"美股全量"。
+    #35／CR9-63（2026-10-05）：这类"有意子集"另带 `intentionalSubset: true`，BFF 的降级
+    缩水闸据此放行（没有这个声明的缩水仍按备源劣化挡回＝`web/lib/sync.ts`）。
 
     CR9-31：响应恒带 `source`（这批数据真正的出网上游），走内部备源时另带
     `degraded`/`note`——覆盖面缩水必须对消费侧可见（R16），否则 BFF 只能猜。
