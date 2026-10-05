@@ -109,6 +109,15 @@ export function recordRefreshResult(result: SnapshotResult): void {
   const prev = readRefreshProgress();
   const done = [...(prev?.done ?? []), result];
   const types = prev?.types?.length ? prev.types : [result.type];
+  // #36／CR9-64（主人 10-05 取「甲」）：**账本只记真写入了行的那一轮**。
+  // 10-05 实测到两枚让它不再是可信记录的形态——crypto 三批全失败（`updated:0`、`snapshotAt:null`）
+  // 却被盖章；被挡（`skipped`）的 stock 把首次完成时刻从 01:01 **重盖章**成 16:27。
+  // 挡不挡本身不受影响（闸门还要"今日有 `snapshotAt`"那一半先成立），坏的是这句话：
+  // `skippedReason` 里的「整轮跑完于…」此时会说出一件没发生过的事。
+  // 所以这里不是把盖章删掉，是把它绑到"这一轮确实写了行"上：**没有写入 ⇒ 不动账本**
+  // （既新增不了，也覆盖不了已有的首次时刻）。
+  const lastCompleted = prev?.lastCompleted ?? {};
+  if (result.updated > 0) lastCompleted[result.type] = nowIso();
   writeProgress({
     startedAt: prev?.startedAt ?? nowIso(),
     types,
@@ -116,7 +125,7 @@ export function recordRefreshResult(result: SnapshotResult): void {
     current: done.length < types.length ? types[done.length] : null,
     outcome: "running",
     finishedAt: null,
-    lastCompleted: { ...(prev?.lastCompleted ?? {}), [result.type]: nowIso() },
+    lastCompleted,
   });
 }
 

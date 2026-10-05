@@ -179,6 +179,33 @@ describe("刷新腿进度状态位（CR9-60／#33 甲）", () => {
     expect(Number.isNaN(Date.parse(String(p?.lastCompleted.stock)))).toBe(false);
   });
 
+  // #36／CR9-64（主人 10-05 取「甲」）：盖章条件从"这一轮跑完了"收紧成"这一轮真写入了行"。
+  // 实测把这件事逼出来的两枚形态都在 10-05 白天那一轮里：crypto 三批全失败仍被盖章，
+  // 而被挡的 stock 把首次时刻从 01:01 重盖章成 16:27——闸门本身没被这两枚骗到
+  // （挡不挡还要"今日有 snapshotAt"那一半先成立），被骗的是读账本的人。
+  it("#36：一行都没写的那一类不进账本（全失败与被挡都不算「跑完过」）", () => {
+    startRefreshProgress(["crypto", "stock"]);
+    recordRefreshResult(res("crypto", { updated: 0, failedBatches: 3, snapshotAt: null }));
+    recordRefreshResult(res("stock", { updated: 0, skipped: true, snapshotAt: null }));
+    const p = readRefreshProgress();
+    expect(p?.done.length).toBe(2); // 逐类结果照旧留痕——收的是账本，不是观测
+    expect(p?.lastCompleted.crypto).toBeUndefined();
+    expect(p?.lastCompleted.stock).toBeUndefined();
+    expect(hasCompletionLedger()).toBe(false); // 空账本 ⇒ 闸门退回旧判据，而不是"跑完过"
+  });
+
+  it("🔁 #36：同一类先有真写入的盖章、后来一轮 updated=0 ⇒ 首次时刻保住不被重盖章，而真写入照常盖", () => {
+    startRefreshProgress(["stock", "fund"]);
+    recordRefreshResult(res("stock")); // updated=10 ⇒ 盖章
+    const first = readRefreshProgress()?.lastCompleted.stock;
+    expect(typeof first).toBe("string");
+    startRefreshProgress(["stock"]);
+    recordRefreshResult(res("stock", { updated: 0, skipped: true })); // 被挡的一轮
+    expect(readRefreshProgress()?.lastCompleted.stock).toBe(first); // 不许覆盖成"现在"
+    recordRefreshResult(res("fund", { updated: 7 })); // 真写入了的照常记
+    expect(typeof readRefreshProgress()?.lastCompleted.fund).toBe("string");
+  });
+
   it("CR9-61🔁：新一轮 start 不许抹掉上一轮的完成记录（跨轮合并，否则那次刷新白烧）", () => {
     startRefreshProgress(["stock", "fund"]);
     recordRefreshResult(res("stock"));
