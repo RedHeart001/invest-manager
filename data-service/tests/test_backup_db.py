@@ -608,6 +608,70 @@ def test_startup_catch_up_and_age_purge() -> None:
             bs._state.update(orig_state)
 
 
+def test_startup_hook_is_wired_into_start_scheduler() -> None:
+    """#38（10-06 反向验证挖出来的洞）：**`start_scheduler()` 真的会去查一次**——接线本身此前无人盯。
+
+    实测形状＝把 `start_scheduler()` 末尾那行 `startup_catch_up()` 注释掉，本套 **75/75 零红**：
+    三处 `#37` 断言都是**直接调函数**，而唯一经过 `start_scheduler()` 的那条 🔁 只断言"目录里
+    只剩 `state.json`"——接线消失时它**同样成立**（没调用 ⇒ 当然没产出）。所以"目录没动"
+    一直被当成"没去查"在读，而这两件事在接线断掉时是完全不同的两件事。
+
+    ⇒ 用**记录器**测接线：把 `request_run` 换成一只记账的假函数，本用例因此**不起线程、
+    不复制 63 MB、不碰任何真备份**，只回答一个问题——"起服务那一刻，补跑有没有被投递出去"。
+    两条断言的伪证者不同，且只有第一条本轮真跑过：**①**＝把 `start_scheduler()` 里那行
+    `startup_catch_up()` 注释掉 ⇒ **77/78、恰好这枚红**，detail 字面 `[]`（10-06 01:1x 实测）。
+    **②**（刚备过 ⇒ 一条都不投递）本轮**没有单独钻过**——它的伪证者是"把落后判定改成永远落后"，
+    那一类在旧形状下要靠"真投递、真落一份 63 MB"才看得见；搬进记录器之后它变成**零磁盘写入**
+    也读得到的一条，这是它的价值，不是我验过的证据。
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        boot = os.path.join(tmp, "boot")
+        os.makedirs(boot)
+        keys = ("BACKUP_DIR", "DB_PATH")
+        orig_env = {k: os.environ.get(k) for k in keys}
+        orig_state = dict(bs._state)
+        orig_request_run = bs.request_run
+        calls: list[str] = []
+        # 记录器：收下 trigger、只回"已接受"——真的补跑由 `startup_catch_up` 那条链去测（见上一个用例）
+        bs.request_run = lambda trigger="manual": (
+            calls.append(trigger), {"accepted": True, "note": "recorder"})[1]
+        try:
+            os.environ["BACKUP_DIR"] = boot
+            bs._state.update({"running": False, "lastRun": None, "lastResult": None, "runs": 0})
+
+            stale = (datetime.now(bs.TZ) - timedelta(hours=30)).isoformat(timespec="seconds")
+            bs._write_state(
+                {"lastRun": stale, "ok": True, "outcome": "completed", "runs": 1}, boot)
+            calls.clear()
+            bs.start_scheduler()
+            check("#38：落后 30 小时 ⇒ `start_scheduler()` 自己就把 startup-catchup 投递出去（接线在）",
+                  calls == ["startup-catchup"], str(calls))
+        finally:
+            bs.shutdown_scheduler()
+        check("#38：记录器把真补跑挡住 ⇒ 本用例一份快照都不产出（不占磁盘、不动 `backups/`）",
+              [f for f in os.listdir(boot) if bs.SNAPSHOT_NAME.match(f)] == [],
+              str(os.listdir(boot)))
+
+        try:
+            fresh = datetime.now(bs.TZ).isoformat(timespec="seconds")
+            bs._write_state(
+                {"lastRun": fresh, "ok": True, "outcome": "completed", "runs": 2}, boot)
+            calls.clear()
+            bs.start_scheduler()
+            check("🔁 #38：刚备过 ⇒ 起服务一条都不投递（同日反复重启的代价仍由 26 小时门限挡住）",
+                  calls == [], str(calls))
+        finally:
+            bs.shutdown_scheduler()
+            bs.request_run = orig_request_run
+            for k, v in orig_env.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+            bs._state.clear()
+            bs._state.update(orig_state)
+
+
 if __name__ == "__main__":
     test_backup_integrity_and_corrupt_cleanup()
     test_restore_rejects_invalid_backup()
@@ -618,6 +682,7 @@ if __name__ == "__main__":
     test_backup_captures_uncheckpointed_wal_rows()
     test_backup_state_survives_process_death()
     test_startup_catch_up_and_age_purge()
+    test_startup_hook_is_wired_into_start_scheduler()
     fails = [x for x in results if not x[1]]
     print(f"\n===== {len(results) - len(fails)}/{len(results)} 通过 =====")
     if fails:
