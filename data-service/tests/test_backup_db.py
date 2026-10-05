@@ -16,6 +16,8 @@ import os
 import sqlite3
 import sys
 import tempfile
+import time
+from datetime import datetime, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))) + "/scripts")
@@ -224,7 +226,32 @@ def test_backup_job_registered_and_rotates() -> None:
         os.environ.pop("BACKUP_HOUR", None)
 
         # ② 真的注册进了 APScheduler（不是只有一个函数没人调）
-        bs.start_scheduler()
+        # #37 之后 `start_scheduler()` 会顺带做一次"落后就补一份"的检查 ⇒ 本用例把备份目录
+        # 指到临时区并**预先写一份新鲜的 state.json**，让那次检查走 fresh 分支：
+        # 不投递线程、不碰仓库里的 `backups/`，本套其余断言的时序因此不变。
+        boot_dir = os.path.join(tmp, "boot")
+        os.makedirs(boot_dir)
+        orig_boot_env = (os.environ.get("BACKUP_DIR"), os.environ.get("DB_PATH"))
+        bs._write_state(
+            {"lastRun": datetime.now(bs.TZ).isoformat(timespec="seconds"),
+             "ok": True, "outcome": "completed", "runs": 1, "trigger": "unit-test"},
+            boot_dir,
+        )
+        os.environ["BACKUP_DIR"] = boot_dir
+        try:
+            bs.start_scheduler()
+        finally:
+            (d, p) = orig_boot_env
+            if d is None:
+                os.environ.pop("BACKUP_DIR", None)
+            else:
+                os.environ["BACKUP_DIR"] = d
+            if p is None:
+                os.environ.pop("DB_PATH", None)
+            else:
+                os.environ["DB_PATH"] = p
+        check("🔁 #37：新鲜 state.json ⇒ 起服务不投递补跑（同日多次重启不会顺手复制 63 MB）",
+              os.listdir(boot_dir) == [bs.STATE_NAME], str(os.listdir(boot_dir)))
         try:
             ids = [j.id for j in bs._scheduler.get_jobs()]
             nxt = bs._scheduler.get_jobs()[0].next_run_time
@@ -453,6 +480,134 @@ def test_backup_state_survives_process_death() -> None:
             bs._state.update(orig_state)
 
 
+def _wait_idle(timeout: float = 25.0) -> None:
+    """等 `request_run` 投出去的后台线程收尾——补跑是异步的，断言不能赌时序。"""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if not bs._state["running"]:
+            return
+        time.sleep(0.2)
+    raise AssertionError("补跑线程没有在 %ss 内收尾" % timeout)
+
+
+def test_startup_catch_up_and_age_purge() -> None:
+    """#37／CR9-65：起服务时"落后就补一份" ⇔ 不落后一个字节都不动；
+    而 30 天留存的删除**只可能发生在新备份成功之后**（顺序反过来＝一次失败清空备份）。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        src = os.path.join(tmp, "dev.db")
+        _make_db(src, rows=5)
+        out = os.path.join(tmp, "backups")
+        keys = ("DB_PATH", "BACKUP_DIR", "BACKUP_KEEP", "BACKUP_STALE_HOURS", "BACKUP_MAX_AGE_DAYS")
+        orig_env = {k: os.environ.get(k) for k in keys}
+        orig_state = dict(bs._state)
+        try:
+            os.environ.update({"DB_PATH": src, "BACKUP_DIR": out, "BACKUP_KEEP": "7"})
+
+            # ① 门限的读数面：非法/越界都不能把门限配成"每轮都补"或"全都删"
+            os.environ["BACKUP_STALE_HOURS"] = "abc"
+            check("#37：BACKUP_STALE_HOURS 非法 ⇒ 回落 26 小时而不是崩",
+                  bs._stale_hours() == 26, str(bs._stale_hours()))
+            os.environ["BACKUP_STALE_HOURS"] = "0"
+            check("#37：配成 0 ⇒ 夹到 1（绝不配成'每次起服务都重做一份'）",
+                  bs._stale_hours() == 1, str(bs._stale_hours()))
+            os.environ["BACKUP_MAX_AGE_DAYS"] = "-5"
+            check("#37：负数天数 ⇒ 夹到 1（『一个月』不能被读成『现在就全删』）",
+                  bs._max_age_days() == 1, str(bs._max_age_days()))
+            os.environ.pop("BACKUP_STALE_HOURS", None)
+            os.environ.pop("BACKUP_MAX_AGE_DAYS", None)
+            check("#37：默认是两个门限——补＝26 小时、删＝30 天",
+                  bs._stale_hours() == 26 and bs._max_age_days() == 30,
+                  "%s／%s" % (bs._stale_hours(), bs._max_age_days()))
+
+            # ② 盘上什么都没有 ⇒ 按"落后"处理并真的补出一份
+            r = bs.startup_catch_up()
+            check("#37：没有 state.json ⇒ reason=no-state 且投递补跑",
+                  r.get("triggered") is True and r.get("reason") == "no-state"
+                  and r.get("accepted") is True, str(r))
+            _wait_idle()
+            res = bs._state["lastResult"] or {}
+            snaps = [f for f in os.listdir(out) if bs.SNAPSHOT_NAME.match(f)]
+            check("#37：补的那一份 `trigger` 说得出自己是起服务补的（与 daily/manual 分得开）",
+                  res.get("trigger") == "startup-catchup" and res.get("ok") is True, str(res))
+            check("#37：补跑确实产出了一份快照", len(snaps) == 1, str(os.listdir(out)))
+
+            # ③ 刚刚补过 ⇒ 新鲜：不投递、目录里不多一份（同日反复重启的代价被门限挡住）
+            r2 = bs.startup_catch_up()
+            check("🔁 #37：lastRun 是刚才 ⇒ reason=fresh、不投递、不产出第二份",
+                  r2.get("triggered") is False and r2.get("reason") == "fresh"
+                  and len([f for f in os.listdir(out) if bs.SNAPSHOT_NAME.match(f)]) == 1,
+                  "%s｜%s" % (str(r2), str(os.listdir(out))))
+
+            # ④ 状态位在、但时刻读不出来 ⇒ 仍按落后处理（漏备份不可逆，多复制一份不是）
+            bs._write_state({"lastRun": "不是时刻", "ok": True}, out)
+            r3 = bs.startup_catch_up()
+            check("#37：state.json 载荷坏掉 ⇒ unreadable-state 也补（宁可信其有）",
+                  r3.get("triggered") is True and r3.get("reason") == "unreadable-state", str(r3))
+            _wait_idle()
+
+            # ⑤ 30 天留存：按文件名里的时刻判，连 sidecar 一起删，其余一个不动
+            aged = os.path.join(tmp, "aged")
+            os.makedirs(aged)
+            now = datetime.now(bs.TZ)
+            old = (now - timedelta(days=35)).strftime("%Y%m%d-%H%M%S")
+            recent = (now - timedelta(days=29)).strftime("%Y%m%d-%H%M%S")
+            _snapshot(aged, old)
+            _snapshot(aged, recent)
+            for suffix in ("-wal", "-shm"):
+                with open(os.path.join(aged, f"dev-{old}.db{suffix}"), "w", encoding="utf-8") as fh:
+                    fh.write("x")
+            with open(os.path.join(aged, "handmade.db"), "w", encoding="utf-8") as fh:
+                fh.write("keep me")
+            removed = bs.purge_old(aged, 30)
+            check("#37：35 天那一份被删且带走自己的 -wal/-shm",
+                  removed == [f"dev-{old}.db", f"dev-{old}.db-wal", f"dev-{old}.db-shm"],
+                  str(removed))
+            check("🔁 #37：29 天的那份与非快照文件一个不动",
+                  sorted(os.listdir(aged)) == [f"dev-{recent}.db", "handmade.db"],
+                  str(sorted(os.listdir(aged))))
+            check("#37：`state.json` 不在快照命名里 ⇒ 轮换与删除都碰不到它（#29 的口径继续成立）",
+                  bs._name_time(bs.STATE_NAME) is None and bs._name_time(f"dev-{old}.db") is not None)
+
+            # ⑥⑦ 顺序的另一半要用**另一组目录**：上面那次 purge_old 已经把 35 天的删掉了，
+            # 拿同一个目录去验"成功之后才删"就成了自证（第一版就是栽在这里）。
+            seq = os.path.join(tmp, "seq")
+            os.makedirs(seq)
+            _snapshot(seq, old)
+            _snapshot(seq, recent)
+            with open(os.path.join(seq, "handmade.db"), "w", encoding="utf-8") as fh:
+                fh.write("keep me")
+            seq_snaps = lambda: sorted(  # noqa: E731 只在本用例里用：比较口径＝快照文件，不含状态位
+                f for f in os.listdir(seq) if bs.SNAPSHOT_NAME.match(f))
+            expect = sorted([f"dev-{old}.db", f"dev-{recent}.db"])
+            os.environ["DB_PATH"] = os.path.join(tmp, "missing.db")
+            os.environ["BACKUP_DIR"] = seq
+            rf = bs.run_once("unit-test")
+            check("🔁 #37：源库不存在 ⇒ 备份失败，目录里的旧快照一个都没被删",
+                  rf.get("ok") is False and seq_snaps() == expect, str(seq_snaps()))
+            check("#37：失败的结果里没有 `aged` 这个键 ⇒ 删除这条动作根本没那么走到",
+                  "aged" not in rf, str(rf))
+            check("#37：但失败轮照样落状态位（#29 那条纪律不能被本刀带没）",
+                  os.path.exists(os.path.join(seq, bs.STATE_NAME)), str(os.listdir(seq)))
+
+            os.environ["DB_PATH"] = src
+            rs = bs.run_once("unit-test")
+            after = seq_snaps()
+            check("#37：新的一份成功做成之后，35 天那份才从目录里消失",
+                  rs.get("ok") is True and rs.get("aged") == 1 and f"dev-{old}.db" not in after,
+                  str(rs))
+            check("🔁 #37：同一次成功里 29 天的那份仍然留着（删除只按年龄，不按份数）",
+                  f"dev-{recent}.db" in after, str(after))
+        finally:
+            _wait_idle()
+            for k, v in orig_env.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+            bs._state.clear()
+            bs._state.update(orig_state)
+
+
 if __name__ == "__main__":
     test_backup_integrity_and_corrupt_cleanup()
     test_restore_rejects_invalid_backup()
@@ -462,6 +617,7 @@ if __name__ == "__main__":
     test_backup_run_once_end_to_end_and_paths()
     test_backup_captures_uncheckpointed_wal_rows()
     test_backup_state_survives_process_death()
+    test_startup_catch_up_and_age_purge()
     fails = [x for x in results if not x[1]]
     print(f"\n===== {len(results) - len(fails)}/{len(results)} 通过 =====")
     if fails:
