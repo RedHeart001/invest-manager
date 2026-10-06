@@ -257,6 +257,84 @@ def test_list_products_meta() -> None:
         akp.EM_LIMITER.acquire, akp.EM_LIMITER.on_success, akp.EM_LIMITER.on_failure = orig_limiter
 
 
+# ---------- `/products` 端点的 meta 透传（CR9-68／#40 丙） ----------
+
+
+def test_products_endpoint_passthrough_meta() -> None:
+    """provider 声明的那四个键，必须**整包**走出 HTTP 边界——这一跳此前零断言。
+
+    为什么单开一组（10-06 断言强度审计登记的 #40 (c)）：`intentionalSubset` 等四个键此前被断的
+    两处（`test_cr9_59_us_list.py:244-245`、本文件 `:400-401`）**都停在 provider／
+    `list_products_with_meta` 那一层**，而 `app/main.py` 用 `**meta` 把它们透传出去那一跳，
+    只有 ③／⑤ 真网窗口才读得到。⇒ 将来谁把 meta 收成白名单（`{"source": meta.get(...)}`），
+    ①② 都静默，而后果正是 CR9-63 要防的那件事＝**us 永远停在旧名单**（web 读不到声明 ⇒
+    缩水闸每一天都挡回同一份名单）。同族的 `/quotes` 已由 CR9-67 补了三句真调用，这一条补齐。
+
+    零出网：`list_products_with_meta` 整个换成假对象，只断端点自己那一跳。
+    """
+    import app.main as m
+    from app.providers.base import ProviderError
+
+    items = [{"code": "AAPL"}, {"code": "NVDA"}]
+    orig = m.list_products_with_meta
+    try:
+        # ① 四键齐的一轮（＝us 那种"有意子集"的真实形状）
+        m.list_products_with_meta = lambda provider, type_: (  # type: ignore[assignment]
+            items,
+            {"source": "sina-us-list", "degraded": True, "note": "只取前排 1 页", "intentionalSubset": True},
+        )
+        body = m.products(type="us")
+        check("CR9-68：四个 meta 键逐项在响应体里，且值与 provider 给的一字不差",
+              body.get("source") == "sina-us-list" and body.get("degraded") is True
+              and body.get("note") == "只取前排 1 页" and body.get("intentionalSubset") is True,
+              str(body)[:200])
+        check("CR9-68：既有三键形态不变（加键不是换契约，`count` 仍是 `len(items)`）",
+              body.get("type") == "us" and body.get("count") == 2 and body.get("products") == items,
+              str(body)[:160])
+
+        # ② 🔁 主源态：provider **不给** degraded/note ⇒ 端点也不许凭空造出来
+        m.list_products_with_meta = lambda provider, type_: (  # type: ignore[assignment]
+            items, {"source": "akshare"}
+        )
+        body2 = m.products(type="stock")
+        check("CR9-68🔁：provider 没声明降级 ⇒ `degraded`/`note`/`intentionalSubset` 不许被造出来",
+              "degraded" not in body2 and "note" not in body2 and "intentionalSubset" not in body2,
+              str(sorted(body2))[:200])
+
+        # ③ 🔁 显式的假值与 None 必须原样出去：`if v` 那种"过滤空值"的写法会吃掉它们，
+        #    而 web 侧读的正是 `degraded === true`／`snapshotAt ?? updatedAt` 这类"假也要在"的判据
+        m.list_products_with_meta = lambda provider, type_: (  # type: ignore[assignment]
+            items,
+            {"source": "akshare", "degraded": False, "note": None, "intentionalSubset": False},
+        )
+        body3 = m.products(type="bond")
+        check("CR9-68🔁：`degraded=False`／`note=None`／`intentionalSubset=False` 三个显式假值原样透传"
+              "（键必须在，不能被「空值过滤」顺手删掉）",
+              body3.get("degraded") is False and "note" in body3 and body3.get("note") is None
+              and body3.get("intentionalSubset") is False, str(sorted(body3))[:200])
+
+        # ④ 既有的两道映射仍在透传之前生效（未注册类型 400／上游失败 502）
+        from fastapi import HTTPException
+
+        try:
+            m.products(type="bogus")
+            check("CR9-68🔁：未注册类型仍 400（白名单闸在取数与透传之前）", False, "没抛 HTTPException")
+        except HTTPException as e:
+            check("CR9-68🔁：未注册类型仍 400（白名单闸在取数与透传之前）",
+                  e.status_code == 400, str(e.status_code))
+        m.list_products_with_meta = lambda provider, type_: (_ for _ in ()).throw(  # type: ignore[assignment]
+            ProviderError("empty from all sources")
+        )
+        try:
+            m.products(type="fund")
+            check("CR9-68🔁：上游 ProviderError 仍映射 502（不是带着半包 meta 返回 200）", False, "没抛")
+        except HTTPException as e:
+            check("CR9-68🔁：上游 ProviderError 仍映射 502（不是带着半包 meta 返回 200）",
+                  e.status_code == 502, str(e.status_code))
+    finally:
+        m.list_products_with_meta = orig  # type: ignore[assignment]
+
+
 # ---------- A 股名单名字清洗（#25 乙口径②） ----------
 
 
@@ -959,6 +1037,7 @@ if __name__ == "__main__":
     test_limiter_profile_single_source()
     test_akshare_out_of_bucket_observation()
     test_list_products_meta()
+    test_products_endpoint_passthrough_meta()
     test_stock_name_status_prefix()
     test_stock_list_backup_source()
     test_symbol_mapping()
