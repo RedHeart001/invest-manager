@@ -620,9 +620,11 @@ def test_samples_merged_pairs_and_near_miss() -> None:
     check("`nearMiss` 收的是“只过一道门槛”的对：三条全部来自 head 那族（overlap 过、sim 不过）",
           len(s["nearMiss"]) == 3 and all(d["failed"] == "sim" for d in s["nearMiss"]),
           str([(d["incoming"], d["failed"], d["shortfall"]) for d in s["nearMiss"]])[:220])
+    nm_first = s["nearMiss"][0] if s["nearMiss"] else {}
     check("排序按“没过那道还差多少”升序（不是按过了那道的超出量——那会把已经并掉的排到前面）",
           [d["shortfall"] for d in s["nearMiss"]] == sorted(d["shortfall"] for d in s["nearMiss"])
-          and abs(s["nearMiss"][0]["shortfall"] - 0.0455) < 0.001,
+          and abs(nm_first.get("shortfall", -1) - 0.0455) < 0.001
+          and str(nm_first.get("incoming", "")).endswith("ghijkl"),
           str([d["shortfall"] for d in s["nearMiss"]]))
     check("阈值随样本一起写（哪天这两个数变了，样本才不会失去解释）",
           s["thresholds"] == {"minSim": 0.5, "minOverlap": 0.8}, str(s["thresholds"]))
@@ -726,9 +728,11 @@ def test_samples_reach_state_file_from_the_event_path() -> None:
               CALLS.get("eastmoney-news") == 1 and CALLS.get("cls") == 1 and bool(sent), str(CALLS))
         check("事件路径的样本落到盘上：`lastResult.newsSamples.mergedPairs` 恰 1 条（没人手调 merge_news）",
               len(disk.get("newsSamples", {}).get("mergedPairs", [])) == 1, str(disk.get("newsSamples"))[:220])
+        pairs = ((disk.get("newsSamples") or {}).get("mergedPairs")) or []
+        stat_away = (disk.get("newsStats") or {}).get("mergedAway")
         check("🔁 同一份盘上载荷里两份账自洽：样本条数 == `newsStats.mergedAway`",
-              disk["newsSamples"]["mergedPairs"].__len__() == disk["newsStats"]["mergedAway"],
-              f'{len(disk["newsSamples"]["mergedPairs"])}/{disk["newsStats"]["mergedAway"]}')
+              len(pairs) == stat_away == 1,  # `== 1` 不许省：两边都空时它同样算"自洽"
+              f'{len(pairs)}/{stat_away}')
         check("落库 payload 里没有样本（这一条读的是**真 emit** 拿到的那份，不是手搭的）",
               "newsSamples" not in sent and "samples" not in sent, str(sorted(sent.keys()))[:200])
         check("🔁 上屏那层没被样本带跑：`note` 里既没有 `mergedPairs` 也没有 `nearMiss` 的字面",
