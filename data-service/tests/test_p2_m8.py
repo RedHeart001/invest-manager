@@ -1251,6 +1251,136 @@ def test_fund_holdings_missing_column_and_beijing_dates() -> None:
     check("CR9-16🔁：改用 beijing_now().year", "beijing_now().year" in src)
 
 
+# ---------- #42 丙（CR9-70）：读侧的「最近 N 日汇总」 ----------
+
+
+def test_limiter_window_rolls_up_the_days() -> None:
+    """`limitersWindow`＝把盘上最近 N 个日桶相加（主人 10-06 20:3x 的字＝「走丙」）。
+
+    为什么这条长在读数面（见「待你拍板」#42）：日桶已经把原料存着了，#27 第二步缺的只是
+    "把 7 格相加"的出口；换成"自起点累计"要多养一个清零出口 ⇒ 写侧一字不动。
+
+    **本刀自带的两条尺，两条都在下面钉着**：
+    ① `windowDays` 是**上限**不是覆盖天数——`coveredDays` 必须老实说"只有 2 天"，
+      否则 2 天的数会伪装成一周（10-06 我把进程内计数说成"已累积 3 天"就是同一个错）；
+    ② 它属"落盘／接线"族 ⇒ 最后那组**一次都不手调 `flush()`**，只走 `observe()`／`acquire()`，
+      因为上一轮的钻 #41 证明了"手调 flush 的那 11 条"对"接线被摘掉"是零红。
+
+    零出网；`LIMITER_STATE_FILE` 指到独立临时目录，临时族名 `cr9-70-*`，`finally` 摘干净。
+    """
+    import json
+    import shutil
+    import tempfile
+    from datetime import date, timedelta
+
+    import app.utils.limiter as lim
+
+    tmpdir = tempfile.mkdtemp()
+    path = os.path.join(tmpdir, "window.json")
+    prev_env = os.environ.get("LIMITER_STATE_FILE")
+    prev_interval = lim.FLUSH_MIN_INTERVAL_S
+    os.environ["LIMITER_STATE_FILE"] = path
+    FAMILY = "cr9-70-win"
+    GHOST = "cr9-70-ghost"  # 只住在盘上、本进程没有实例的那一族
+    today = lim.beijing_today()
+    yesterday = (date.fromisoformat(today) - timedelta(days=1)).isoformat()
+
+    def put(days_map: dict) -> None:
+        """直接铺盘上那份（测"读"的时候，输入必须来自文件而不是内存）。"""
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"day": today, "days": days_map}, f, ensure_ascii=False)
+
+    def fam(name: str) -> dict:
+        return lim.durable_window()["families"].get(name, {})
+
+    try:
+        # ① 只有今天有数：上限 7、覆盖 1，两件事必须分开可读
+        put({today: {FAMILY: {"granted": 3, "denied": 1, "seenTotal": 2, "seen": {"a": 1, "b": 1}}}})
+        view = lim.durable_window()
+        check("CR9-70：单有今天那一格时，`windowDays`＝请求上限 7 而 `coveredDays` 老实给 1 天",
+              view["windowDays"] == lim.WINDOW_DAYS == 7 and view["coveredDays"] == [today]
+              and view["families"][FAMILY]["granted"] == 3
+              and view["families"][FAMILY]["denied"] == 1, str(view)[:220])
+
+        # ② 跨日相加：三样都并，`coveredDays` 升序
+        put({
+            today: {FAMILY: {"granted": 3, "denied": 1, "seenTotal": 2, "seen": {"a": 1, "b": 1}}},
+            yesterday: {FAMILY: {"granted": 4, "denied": 2, "seenTotal": 1, "seen": {"a": 1}},
+                        GHOST: {"granted": 7, "denied": 0, "seenTotal": 0, "seen": {}}},
+        })
+        view = lim.durable_window()
+        check("CR9-70：相邻两天的 granted／denied／逐调用点 seen 全部相加，两族各自成账",
+              view["coveredDays"] == [yesterday, today]
+              and fam(FAMILY)["granted"] == 7 and fam(FAMILY)["denied"] == 3
+              and fam(FAMILY)["seen"] == {"a": 2, "b": 1} and fam(FAMILY)["seenTotal"] == 3
+              and fam(GHOST)["granted"] == 7, str(view)[:260])
+
+        # ③ 🔁 N 是**截断**而不只是求和：给 10 天而只要 3 天 ⇒ 第 4 近的那天不许进来
+        ten_days = {
+            (date.fromisoformat(today) - timedelta(days=n)).isoformat(): {
+                FAMILY: {"granted": 1, "denied": 0, "seenTotal": 0, "seen": {}}
+            }
+            for n in range(10)
+        }
+        put(ten_days)
+        three = lim.durable_window(days=3)
+        check("CR9-70🔁：`days=3` 真的只并最近 3 个有数之日（第 4 天那 1 次不许进读数；摘掉截断就红）",
+              three["coveredDays"] == sorted(ten_days)[-3:]
+              and three["families"][FAMILY]["granted"] == 3
+              and three["keptDays"] == 10, str(three)[:240])
+
+        # ④ 🔁 今天那格含**未落盘**的增量，且不双计（游标之后那半截才叫 outstanding）
+        put({today: {FAMILY: {"granted": 5, "denied": 0, "seenTotal": 0, "seen": {}}}})
+        inst = lim.FamilyLimiter(FAMILY, failure_threshold=10**9)
+        with lim._REGISTRY_LOCK:
+            lim._LIMITERS[FAMILY] = inst
+        inst.observe("ak.pending")
+        with_pending = lim.durable_window()
+        check("CR9-70：`observe()` 还没落盘就已经并进读数（读「总共多少次」不能读少这 ≤60 秒）",
+              with_pending["families"][FAMILY]["seenTotal"] == 1
+              and with_pending["families"][FAMILY]["granted"] == 5
+              and with_pending["fromDisk"] is False, str(with_pending)[:220])
+        lim.flush(force=True)
+        after_flush = lim.durable_window()
+        check("CR9-70🔁：落盘之后同一位数一个字不变（并两次＝把已进盘的再算一遍，那就是假账）",
+              after_flush["families"][FAMILY] == with_pending["families"][FAMILY],
+              f"{after_flush['families'][FAMILY]} vs {with_pending['families'][FAMILY]}")
+
+        # ⑤ 坏形状不 500，且 `seenTotal` 不信盘上那个已存字段
+        put({today: {GHOST: {"granted": "abc", "denied": None, "seenTotal": 999, "seen": "坏形状"}}})
+        bad = lim.durable_window()["families"].get(GHOST, {})
+        check("CR9-70：盘上被手改过的那一族读成 0／{}，`seenTotal` 是**重求和**而不是抄盘上那个 999",
+              bad.get("granted") == 0 and bad.get("denied") == 0
+              and bad.get("seen") == {} and bad.get("seenTotal") == 0, str(bad)[:180])
+
+        # ⑥ 🔁 事件路径那一条：一次都不手调 flush，只让 observe/acquire 自己去落盘
+        lim._LIMITERS.pop(FAMILY, None)
+        put({yesterday: {GHOST: {"granted": 1, "denied": 0, "seenTotal": 0, "seen": {}}}})
+        lim.FLUSH_MIN_INTERVAL_S = 0.0  # 把节流放到最松，好让"有没有接线"单独可见
+        ev = lim.FamilyLimiter(FAMILY, failure_threshold=10**9)
+        with lim._REGISTRY_LOCK:
+            lim._LIMITERS[FAMILY] = ev
+        ev.observe("ak.from-event")
+        ev.acquire(timeout=0.5)
+        ev_view = lim.durable_window()
+        check("CR9-70🔁：**这一组一次都没手调 flush**——只有事件自己落盘，今天才会进 `coveredDays`；"
+              "摘掉 `_maybe_dump()` 这条就红（上一轮那枚先绿的钻不许在本刀上重演）",
+              ev_view["coveredDays"] == [yesterday, today]
+              and ev_view["families"][FAMILY]["seenTotal"] == 1
+              and ev_view["families"][FAMILY]["granted"] >= 1
+              and ev_view["families"][GHOST]["granted"] == 1, str(ev_view)[:260])
+    finally:
+        lim.FLUSH_MIN_INTERVAL_S = prev_interval
+        with lim._REGISTRY_LOCK:
+            for name in (FAMILY, GHOST):
+                lim._LIMITERS.pop(name, None)
+        if prev_env is None:
+            os.environ.pop("LIMITER_STATE_FILE", None)
+        else:
+            os.environ["LIMITER_STATE_FILE"] = prev_env
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 if __name__ == "__main__":
     # #41 甲（CR9-69）之后 `acquire`/`observe` 会顺带落盘 ⇒ 整个 run 的落点指到临时目录。
     # 不许把仓库里那份 `runtime/limiter-state.json` 当测试产物写（CR9-51／#26 同族纪律：
@@ -1267,6 +1397,7 @@ if __name__ == "__main__":
         test_akshare_out_of_bucket_observation()
         test_limiter_counters_survive_a_restart()
         test_limiter_dumps_from_the_event_path()
+        test_limiter_window_rolls_up_the_days()
         test_list_products_meta()
         test_products_endpoint_passthrough_meta()
         test_stock_name_status_prefix()

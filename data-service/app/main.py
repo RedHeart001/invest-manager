@@ -88,7 +88,7 @@ async def health():
     # （② 落地后本端点更是双保险：并发等待已被 `MAX_INFLIGHT_WATCHDOGS` 钉住，
     #   取数线程"占满 40"这条路本身就不成立了。）
     from .utils.timeout import MAX_INFLIGHT_WATCHDOGS, abandoned_count, inflight_count
-    from .utils.limiter import durable_today, snapshot_all
+    from .utils.limiter import durable_today, durable_window, snapshot_all
 
     return {
         "status": "ok",
@@ -119,6 +119,11 @@ async def health():
         # （历次读数 11→10→47→2 非单调），所以 #27 第二步"拿一周计数定数值"取不到数。
         # 这一位读的是**落盘那份＋本进程未落盘的增量**＝"这一天到底出网多少次"，跨重启可读。
         "limitersDurable": durable_today(),
+        # #42 丙（CR9-70，主人 10-06 20:3x 的字＝「走丙」）：上面那一位只回**今天这一格**，而 #27
+        # 第二步的立项依据是"拿**一周**真实计数定数值"。缺的从来不是存储（日桶已经在盘上），
+        # 是"把 7 格相加"这一步的读数出口 ⇒ 汇总长在`读`侧，写侧与留存上限（`KEEP_DAYS=30`）
+        # 一字未动。`coveredDays` 会老实告诉你盘上到底只攒了几天——别把 2 天的数当一周读。
+        "limitersWindow": durable_window(),
     }
 
 

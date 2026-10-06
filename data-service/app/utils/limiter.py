@@ -362,6 +362,83 @@ def durable_today() -> dict:
         "flushFailures": _flush_failures,
     }
 
+
+# ---------- #42 丙（CR9-70）：读侧的「最近 N 日汇总」 ----------
+#
+# 为什么这条长在**读数面**而不是写侧（这是丙与乙的分工，不是实现偏好）：按日分桶已经把要用的
+# 原料全存着了，#27 第二步缺的只是"把 7 格相加"这一步的出口。改成"自起点累计"就得再养第二个
+# 机制（清零出口）——`denied` 里含着故障期的连续拒绝，永久累计会让限流值被上一次事故长期拖住。
+# ⇒ 存储形状、写路径、节流、留存上限一律不动；要更长的历史只改 `KEEP_DAYS` 这一个常数。
+WINDOW_DAYS = 7  # 就是立项依据里"一周"那个字面，不新造一个数
+
+
+def _as_delta(v: dict) -> dict:
+    """把盘上那一份归一成 `_bump()` 能吃的增量形状。
+
+    刻意**不**把 `seenTotal` 传下去：`_bump()` 是按合并后的 `seen` 重新求和的，这正是我们要的
+    口径（盘上那个已存字段可能来自旧形状或被人手改过，不信它）。`seen` 不是字典就当空——
+    与 `durable_today()` 同一条"坏文件不许让 `/health` 500"的纪律。
+    """
+    raw_seen = v.get("seen")
+    return {
+        "granted": _num(v.get("granted")),
+        "denied": _num(v.get("denied")),
+        "seen": dict(raw_seen) if isinstance(raw_seen, dict) else {},
+    }
+
+
+def durable_window(days: int = WINDOW_DAYS) -> dict:
+    """`/health` 的 `limitersWindow`：把盘上最近 N 个**有记录的**北京日相加（#42 丙）。
+
+    与 `durable_today()` 的分工＝"这一天多少次"与"这一周总共多少次"，两者读同一份文件、
+    同一条增量口径，谁也不替代谁（第二步要定的是速率，得两頭都有数才能看出趋势）。
+
+    两条必须让读者看得见的口径：
+    - **`coveredDays` 只列盘上真有的那些日**，`windowDays` 是请求的上限而非实际覆盖天数。
+      攒够一周之前这个读数会小于 7 天 ⇒ 天数本身必须可见，否则"7 日汇总"会在只有 2 天时
+      伪装成一周（把两天的数当一周读，10-06 我账上那条"已累积 3 天"就是同一个错）。
+      同理注意：**中间缺的那几天不会把区间缩回来**（ds 没跑的那两天本来就没有出网）。
+    - **今天那一格含本进程未落盘的增量**（与 `durable_today()` 一字同口径）。不双计：
+      `outstanding()` 读的是游标之后那半截，已经进盘的部分不会重复出现。
+    - `fromDisk`＝本进程对这些数一点都没贡献（全新进程、盘上有货），与 #29／#34／#41 同族。
+    """
+    data = read_state() or {"days": {}}
+    stored_days = data.get("days") or {}
+    # `sorted(..., reverse=True)` 取的是**最近的 N 个有数之日**；先夹到非负，
+    # 否则 `[:-1]` 这种负切片会把最新那一天（也就是今天）切掉。
+    keys = sorted(stored_days, reverse=True)[: max(0, days)]
+    families: dict[str, dict] = {}
+    for key in keys:
+        for name, v in (stored_days.get(key) or {}).items():
+            if isinstance(v, dict):
+                _bump(
+                    families.setdefault(
+                        name, {"granted": 0, "denied": 0, "seenTotal": 0, "seen": {}}
+                    ),
+                    _as_delta(v),
+                )
+    with _REGISTRY_LOCK:
+        limits = list(_LIMITERS.values())
+    pending = 0
+    for lim in limits:
+        d = lim.outstanding()
+        if d["granted"] or d["denied"] or d["seen"]:
+            pending += 1
+            _bump(
+                families.setdefault(
+                    lim.name, {"granted": 0, "denied": 0, "seenTotal": 0, "seen": {}}
+                ),
+                d,
+            )
+    return {
+        "windowDays": max(0, days),
+        "coveredDays": sorted(keys),  # 升序：让"区间"和"缺口"在一条 curl 里都读得出
+        "families": families,
+        "fromDisk": pending == 0 and bool(families),
+        "keptDays": len(stored_days),
+        "flushFailures": _flush_failures,
+    }
+
 # CR9-18（2026-09-27）：桶参数**只有一个来源**。
 # 旧实现 `get_limiter(name, **kwargs)` 是"首调用获胜"——同名族的 kwargs 只在创建那一刻
 # 生效，而谁是首调用由 import 顺序决定：`hotspot/pipeline.py` 的无参调用先创建 eastmoney
