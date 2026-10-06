@@ -519,6 +519,9 @@ def test_execute_success_branch_is_written_by_production() -> None:
         hs._write_state()
         check("🔁 「写进内存再落盘」不等于跑过一轮：`runs` 仍是 0（旧用例名谎称的那件事）",
               hs._state["runs"] == 0, f'runs={hs._state["runs"]}')
+        # 手填那份**必须先清掉**再跑 `_execute`：留着它，摘掉 `scheduler.py:104` 也照样绿＝
+        # 与这枚洞同形的自证（19:2x 钻 b 实测第一版就是这么漏的，改在此处而不是只在注释里说）
+        hs._state["lastResult"] = None
 
         hs.run_pipeline = lambda trigger="manual": payload
         res = hs._execute("unit-test-ok")
