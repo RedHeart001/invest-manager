@@ -210,6 +210,10 @@ describe("刷新腿进度状态位（CR9-60／#33 甲）", () => {
     startRefreshProgress(["stock", "fund"]);
     recordRefreshResult(res("stock"));
     const first = readRefreshProgress()?.lastCompleted.stock;
+    // #38／10-06 反向验证挖出来的：这条曾经"看不见回退"——把盖章整行删掉时 `first` 与后来的值
+    // 同为 `undefined`，`toBe` 照样成立 ⇒ 它只验得出"没被抹掉"，验不出"从来没记过"。
+    // 这条前置就是把"记过"先钉住，之后比较才有内容。（同文件上面那条 🔁 #36 已经有同款前置。）
+    expect(typeof first).toBe("string");
     startRefreshProgress(["fund"]); // 例如早上手动补一次 fund
     const p = readRefreshProgress();
     expect(p?.types).toEqual(["fund"]);
