@@ -304,10 +304,13 @@ def test_no_bucket_use_and_payload_key() -> None:
             "source": "eastmoney-news", "missing": ["tavily（未配置）"],
             "degraded": False, "note": None,
             # #34：桩件必须与真 `fetch_news` 同形（`run_pipeline` 直接按键取，缺了就是 KeyError，
-            # 这是刻意的——“计数丢了”不该被静默吞掉）。
+            # 这是刻意的——“计数丢了”不该被静默吞掉）。#43（CR9-71）之后 `samples` 同一条规矩。
             "stats": {"attempted": 3, "arrived": 2, "perSource": {"eastmoney-news": 1},
                       "raw": 1, "blank": 0, "kept": 1, "mergedAway": 0,
                       "truncated": 0, "crossSource": 0},
+            "samples": {"thresholds": {"minSim": 0.5, "minOverlap": 0.8},
+                        "nearMissKeep": 10, "nearMissTotal": 0,
+                        "mergedPairs": [], "nearMiss": []},
         }
         pl.structure_topics = lambda items, **kw: {"topics": [{"title": "甲"}], "engine": "llm", "note": None}
         pl.build_items = lambda topics, news, deadline=None: (
@@ -325,8 +328,13 @@ def test_no_bucket_use_and_payload_key() -> None:
           str({k: v for k, v in res.items() if "news" in k})[:160])
     check("#34：计数随 `run_pipeline` 的返回值出来（web/探针读的是这一份，不是 merge_news 的中间态）",
           res.get("newsStats", {}).get("attempted") == 3, str(res.get("newsStats"))[:160])
+    check("#43（CR9-71）：样本随同一份返回值出来，键名与 `newsStats` 平级（读样本不用碰 merge_news 的中间态）",
+          res.get("newsSamples", {}).get("nearMissKeep") == 10
+          and "mergedPairs" in res.get("newsSamples", {}), str(res.get("newsSamples"))[:200])
     check("🔁 计数**不进落库 payload**（那一列没有装它的地方；加列＝migration，按 CR8-8 要另立需求）",
           "newsStats" not in cap and "stats" not in cap, str(sorted(cap.keys()))[:200])
+    check("🔁 样本同样**不进 payload、不上屏**（主人 10-05 那条口径的第二次应用：读得到 ≠ 该给用户看）",
+          "newsSamples" not in cap and "samples" not in cap, str(sorted(cap.keys()))[:200])
 
 
 # ---------- 5. #34：满配那一轮的计数读得到（note 恰恰在这一轮是 None） ----------
@@ -551,12 +559,198 @@ def test_execute_success_branch_is_written_by_production() -> None:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+# ---------- 7. #43（CR9-71）：样本＝并掉的那一对 ⇔ 差一点就并的那一档 ----------
+
+
+def test_samples_merged_pairs_and_near_miss() -> None:
+    """阈值校准要的原料从此每轮都在——**光有 `mergedAway` 那个整数答不了“该不该动阈值”**。
+
+    为什么必须有 `nearMiss`（主人 10-07 问“样本怎么获取”的落点）：恒等式
+    `raw == blank + kept + mergedAway` 在“该合的没合”时两边照样自洽 ⇒ 只记被并掉的对，
+    把阈值调松或调紧都不会让任何一个现有数变红。`nearMiss`＝**恰好过了其中一道门槛**的对，
+    按“没过那道还差多少”升序留前 `NEAR_MISS_KEEP` 条——这才是漏并的可见形状。
+
+    标题用连续字母串（`_bigrams` 只去空白、按 2 字滑窗 ⇒ n 个互不相同的二元组），因为这一组
+    断的是**比值本身**（0.4545／0.636…），得能手算核对；`地产链…` 那两枚是仓库里既有的
+    “同板块不同事件”形状，留着是因为它长得像真新闻，而它恰恰**不该**进样本。
+    """
+    head = "abcdef"  # 5 个二元组
+    em = {"source": "eastmoney-news", "error": None, "items": [
+        news(head, url="https://em/1"),
+        news("地产链午后拉升", url="https://em/a"),
+        news("央行宣布降准", url="https://em/2"),
+        {"title": "", "url": "", "summary": "", "time": ""},  # 该被当噪声丢，且不许出现在样本里
+    ]}
+    cls = {"source": "cls", "error": None, "items": [
+        news("【央行宣布降准】", summary="转发时的长说明，够长了"),  # 两道都过 ⇒ mergedPairs
+        news("地产链龙头涨停"),  # 两道都不过 ⇒ 哪儿都不去
+        news(head + "ghijkl"),  # 11 元组含 head 那 5 个 ⇒ overlap 过、sim 不过
+        news(head + "mnopqrs"),  # 12 元组 ⇒ 同形状、shortfall 更大
+        news(head + "uvwxyzAB"),  # 13 元组 ⇒ 三条里离阈值最远的一条
+    ]}
+    m = pl.merge_news([em, cls], limit=25)
+    s = m["samples"]
+
+    check("不变式：`len(mergedPairs)` 恰等于 `stats.mergedAway`（样本与计数不是两本账）",
+          len(s["mergedPairs"]) == m["stats"]["mergedAway"] == 1,
+          f'pairs={len(s["mergedPairs"])} mergedAway={m["stats"]["mergedAway"]}')
+    p = s["mergedPairs"][0] if s["mergedPairs"] else {}
+    check("并掉的那一对**两条标题都在样本里**——这就是“样本”的形状，聚合数替代不了它",
+          p.get("incumbent") == "央行宣布降准" and p.get("incoming") == "【央行宣布降准】", str(p)[:200])
+    gi = pl._bigrams("央行宣布降准")
+    gj = pl._bigrams("【央行宣布降准】")
+    exp_sim, exp_overlap = pl._news_metrics(gi, gj)
+    check("比值与判据同一把尺：样本里那两个数**逐字等于** `_news_metrics` 对这两条标题的输出",
+          abs(p.get("sim", 0) - round(exp_sim, 3)) < 1e-9 and p.get("overlap") == round(exp_overlap, 3),
+          f'{p.get("sim")}/{p.get("overlap")} vs {round(exp_sim, 3)}/{round(exp_overlap, 3)}')
+    check("同一对再按实测锚死（`【…】` 那对＝5 个共同元组 / 并集 7 ⇒ 0.714 与 1.0）——上一条是按函数算的，"
+          "函数整体跑偏它发现不了，所以这里要有一格写死的数",
+          p.get("sim") == 0.714 and p.get("overlap") == 1.0, str(p)[:200])
+    check("两侧来源分开记（同家与跨家走的是同一把尺，要只看跨源由读的人按这两格筛）",
+          "eastmoney-news" in p.get("incumbentVia", []) and p.get("incomingVia") == "cls", str(p)[:200])
+    check("择优之后活下来的是哪一条＝`survivor`（这一格 `mergedAway` 里没有，不写就会让人以为被吞的总是后到的）",
+          p.get("survivor") == "incumbent", str(p.get("survivor")))
+    check("🔁 同板块的**不同事件**（两道都不过）⇒ 既没被并，也**不该**出现在样本任何一栏",
+          all("地产链龙头涨停" not in (d.get("incumbent", "") + d.get("incoming", ""))
+              for d in s["mergedPairs"] + s["nearMiss"]),
+          str([d.get("incoming") for d in s["nearMiss"]])[:200])
+    check("`nearMiss` 收的是“只过一道门槛”的对：三条全部来自 head 那族（overlap 过、sim 不过）",
+          len(s["nearMiss"]) == 3 and all(d["failed"] == "sim" for d in s["nearMiss"]),
+          str([(d["incoming"], d["failed"], d["shortfall"]) for d in s["nearMiss"]])[:220])
+    check("排序按“没过那道还差多少”升序（不是按过了那道的超出量——那会把已经并掉的排到前面）",
+          [d["shortfall"] for d in s["nearMiss"]] == sorted(d["shortfall"] for d in s["nearMiss"])
+          and abs(s["nearMiss"][0]["shortfall"] - 0.0455) < 0.001,
+          str([d["shortfall"] for d in s["nearMiss"]]))
+    check("阈值随样本一起写（哪天这两个数变了，样本才不会失去解释）",
+          s["thresholds"] == {"minSim": 0.5, "minOverlap": 0.8}, str(s["thresholds"]))
+    check("上限与实采分两格可见（没截断时也要能读出没截断——CR9-70 那条判据的同族应用）",
+          s["nearMissKeep"] == pl.NEAR_MISS_KEEP and s["nearMissTotal"] == 3 and len(s["nearMiss"]) == 3,
+          f'keep={s["nearMissKeep"]} total={s["nearMissTotal"]}')
+    check("空标题那行不产任何样本（它连 `kept` 都进不去，恒等式里在 `blank` 那一格）",
+          m["stats"]["blank"] == 1 and all(d.get("incumbent") and d.get("incoming")
+                                           for d in s["mergedPairs"] + s["nearMiss"]), str(m["stats"]))
+
+    mi = pl.merge_news([
+        {"source": "eastmoney-news", "error": None, "items": [news("央行宣布降准", url="", summary="短")]},
+        {"source": "cls", "error": None, "items": [news("央行宣布降准", url="https://cls/9", summary="短")]},
+    ], limit=25)
+    pi = mi["samples"]["mergedPairs"][0]
+    check("`survivor` 会翻面：先到没链接、后到有链接 ⇒ 换了代表，而**条数不因此多算**（`mergedAway` 仍是 1）",
+          pi["survivor"] == "incoming" and len(mi["samples"]["mergedPairs"]) == mi["stats"]["mergedAway"] == 1,
+          str(pi)[:200])
+
+    prev_keep = pl.NEAR_MISS_KEEP
+    try:
+        pl.NEAR_MISS_KEEP = 2
+        s2 = pl.merge_news([em, cls], limit=25)["samples"]
+        check("🔁 截断只切“排在后面的”：`nearMissTotal` 仍是 3，而留下的恰是最短那两条",
+              s2["nearMissTotal"] == 3 and len(s2["nearMiss"]) == 2
+              and [d["incoming"] for d in s2["nearMiss"]] == [d["incoming"] for d in s["nearMiss"]][:2],
+              str([(d["incoming"], d["shortfall"]) for d in s2["nearMiss"]])[:220])
+        check("`nearMissKeep` 跟着常量走（写死在断言里就看不见“截断发生了”这件事）",
+              s2["nearMissKeep"] == 2, str(s2["nearMissKeep"]))
+    finally:
+        pl.NEAR_MISS_KEEP = prev_keep
+
+
+def test_shortfall_and_metrics_share_one_ruler() -> None:
+    """`_news_metrics` 是**唯一**那把尺：判据、样本、shortfall 三处读的是同两个数。
+
+    为什么单独一组：#43 最大的风险不是采不到样本，而是采集侧偷偷另算一次比值——那样
+    “样本显示的比值”与“真正用来判定的比值”会在哪天重构时分叉，而两边都还是绿的。
+    """
+    g5 = {f"a{i:02d}" for i in range(5)}
+    g11 = g5 | {f"b{i:02d}" for i in range(6)}
+    sim, overlap = pl._news_metrics(g5, g11)
+    sf = pl._news_shortfall(sim, overlap)
+    check("包含关系 ⇒ overlap 1.0（过）、sim 5/11=0.4545（不过）⇒ 这是一条 `nearMiss`，failed=sim",
+          abs(sim - 5 / 11) < 1e-9 and abs(overlap - 1.0) < 1e-9 and sf is not None and sf[0] == "sim",
+          f"{sim}/{overlap}")
+    check("🔁 `_news_similar` 与这两个数是同一判据（不许出现“这里过、那里不过”的两把尺）",
+          pl._news_similar(g5, g11) is False
+          and pl._news_similar(g5, g11) == (sim >= pl.NEWS_DEDUPE_MIN_SIM
+                                            and overlap >= pl.NEWS_DEDUPE_MIN_OVERLAP),
+          f"{sim}/{overlap}")
+    ovl = pl._news_metrics({f"c{i:02d}" for i in range(9)}, {f"c{i:02d}" for i in range(2, 11)})
+    sf2 = pl._news_shortfall(*ovl)
+    check("错开两格 ⇒ sim 7/11=0.636（过）、overlap 7/9=0.778（不过）⇒ failed=overlap，shortfall 只算没过那道",
+          abs(ovl[0] - 7 / 11) < 1e-9 and abs(ovl[1] - 7 / 9) < 1e-9 and sf2 is not None
+          and sf2[0] == "overlap" and abs(sf2[1] - (pl.NEWS_DEDUPE_MIN_OVERLAP - ovl[1])) < 1e-9,
+          str(ovl))
+    check("两道都过 ⇒ 不是 nearMiss（它已经进 `mergedPairs`）；两道都不过 ⇒ 也不是（离阈值远，不是这一刀要看的）",
+          pl._news_shortfall(0.9, 0.95) is None and pl._news_shortfall(0.2, 0.3) is None, "both-or-neither")
+    check("空集合 ⇒ (0.0, 0.0) 而不是 ZeroDivisionError（`min()` 那个分母就是这处的坑）",
+          pl._news_metrics(set(), g5) == (0.0, 0.0) and pl._news_metrics(g5, set()) == (0.0, 0.0), "empty")
+
+
+# ---------- 8. #43：样本要由**真那一轮**送进状态位文件（一次都不手调 merge_news） ----------
+
+
+def test_samples_reach_state_file_from_the_event_path() -> None:
+    """CR9-69 那枚“先绿的钻”教的这件事，本刀出厂就带着：落盘／接线类断言必须有一条只从事件路径读。
+
+    全链只假在两个地方：三个**源函数**（`install_fake_sources` ⇒ 零出网）与 LLM／板块那两步
+    （`structure_topics`／`build_items`／`emit_ingest`）。中间四层——`fetch_news` → `merge_news`
+    → `run_pipeline` → `scheduler._execute` → `_write_state`——**一次都没手调**：
+    摘掉 `pipeline.py` 里 `result["newsSamples"]` 那一行，下面第一条就红（钻 71c 的靶子）。
+    """
+    import shutil
+    import tempfile
+
+    import app.hotspot.scheduler as hs
+
+    install_fake_sources({"eastmoney-news": [news("央行宣布降准", url="https://em/1"), news("abcdef", url="https://em/2")],
+                          "cls": [news("【央行宣布降准】"), news("abcdefghijkl")]})
+
+    tmpdir = tempfile.mkdtemp()
+    path = os.path.join(tmpdir, "hotspot-state.json")
+    prev_env = os.environ.get("HOTSPOT_STATE_FILE")
+    prev_state = dict(hs._state)
+    orig_pl = (pl.structure_topics, pl.build_items, pl.emit_ingest)
+    sent: dict = {}
+    os.environ["HOTSPOT_STATE_FILE"] = path
+    try:
+        hs._state.update({"running": True, "runs": 0, "lastRun": None,
+                          "lastResult": None, "catchUpResolved": None})
+        pl.structure_topics = lambda items, **kw: {"topics": [{"title": "甲"}], "engine": "llm", "note": None}
+        pl.build_items = lambda topics, news, deadline=None: (
+            [{"title": "甲", "summary": "", "boardTags": [], "sourceUrls": [], "relatedCodes": []}], [])
+        pl.emit_ingest = lambda payload: (sent.update(payload), {"inserted": 1})[1]
+        with with_key(""):
+            res = hs._execute("unit-test-samples")
+        disk = (hs.read_state() or {}).get("lastResult") or {}
+        check("前提先钉住：这一轮**真走完了**（两家各被调用一次、emit 拿到载荷），不是测试自己填的内存",
+              CALLS.get("eastmoney-news") == 1 and CALLS.get("cls") == 1 and bool(sent), str(CALLS))
+        check("事件路径的样本落到盘上：`lastResult.newsSamples.mergedPairs` 恰 1 条（没人手调 merge_news）",
+              len(disk.get("newsSamples", {}).get("mergedPairs", [])) == 1, str(disk.get("newsSamples"))[:220])
+        check("🔁 同一份盘上载荷里两份账自洽：样本条数 == `newsStats.mergedAway`",
+              disk["newsSamples"]["mergedPairs"].__len__() == disk["newsStats"]["mergedAway"],
+              f'{len(disk["newsSamples"]["mergedPairs"])}/{disk["newsStats"]["mergedAway"]}')
+        check("落库 payload 里没有样本（这一条读的是**真 emit** 拿到的那份，不是手搭的）",
+              "newsSamples" not in sent and "samples" not in sent, str(sorted(sent.keys()))[:200])
+        check("🔁 上屏那层没被样本带跑：`note` 里既没有 `mergedPairs` 也没有 `nearMiss` 的字面",
+              "mergedPairs" not in str(res.get("note")) and "nearMiss" not in str(res.get("note")),
+              str(res.get("note"))[:160])
+    finally:
+        pl.structure_topics, pl.build_items, pl.emit_ingest = orig_pl
+        hs._state.clear()
+        hs._state.update(prev_state)
+        if prev_env is None:
+            os.environ.pop("HOTSPOT_STATE_FILE", None)
+        else:
+            os.environ["HOTSPOT_STATE_FILE"] = prev_env
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 if __name__ == "__main__":
     test_source_order_and_attempts()
     test_merge_union_dedupe_and_pick()
     test_coverage_declaration()
     test_no_bucket_use_and_payload_key()
     test_news_stats_survive_a_full_merge()
+    test_samples_merged_pairs_and_near_miss()
+    test_shortfall_and_metrics_share_one_ruler()
+    test_samples_reach_state_file_from_the_event_path()
     test_state_file_and_from_disk_fallback()
     test_execute_success_branch_is_written_by_production()
     fails = [x for x in results if not x[1]]

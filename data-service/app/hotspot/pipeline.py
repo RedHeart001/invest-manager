@@ -203,17 +203,42 @@ NEWS_SOURCE_ORDER = ("eastmoney-news", "cls", "tavily")
 # 欠一次真 pipeline；校准前不要调这两个数。
 NEWS_DEDUPE_MIN_SIM = 0.5
 NEWS_DEDUPE_MIN_OVERLAP = 0.8
+# #43（CR9-71）：`nearMiss` 一次最多留几对。样本是"人工看"的东西，不是统计量——留得多不等于看得完。
+NEAR_MISS_KEEP = 10
+
+def _news_metrics(a: set[str], b: set[str]) -> tuple[float, float]:
+    """两道门槛各自的比值 `(Jaccard, 重合度)`——**判据与样本共用这一把尺**，别在采集侧另算一次。
+
+    任一侧为空 ⇒ `(0.0, 0.0)`：空标题既过不了任何一道门，也就不该在样本里出现（与 `_news_similar`
+    原来的 `if not a or not b` 同义，`min()` 那个分母也因此不会碰到零）。
+    """
+    if not a or not b:
+        return 0.0, 0.0
+    inter = len(a & b)
+    return inter / len(a | b), inter / min(len(a), len(b))
 
 
 def _news_similar(a: set[str], b: set[str]) -> bool:
     """两个标题的二元组集合是否够判"同一条"（两道门槛都要过，理由见上面那对常数）。
     任一侧为空 ⇒ 不算相似：财联社那类只有摘要、没有标题的条目，宁可留下重复也不误并。"""
-    if not a or not b:
-        return False
-    inter = len(a & b)
-    if inter / len(a | b) < NEWS_DEDUPE_MIN_SIM:
-        return False
-    return inter / min(len(a), len(b)) >= NEWS_DEDUPE_MIN_OVERLAP
+    sim, overlap = _news_metrics(a, b)
+    return sim >= NEWS_DEDUPE_MIN_SIM and overlap >= NEWS_DEDUPE_MIN_OVERLAP
+
+
+def _news_shortfall(sim: float, overlap: float) -> tuple[str, float] | None:
+    """**恰好只过一道门槛**时返回 `(没过那道, 还差多少)`，否则 None——这就是 `nearMiss` 的排序依据。
+
+    为什么用"没过那道还差多少"而不是"过了那道超出多少"：要判的是**漏并**（该合的没合），而漏并
+    的特征正是"那道门槛差一点点"。反过来看超出量，排出来的会是"最像的没并"这种我们已经并掉的对。
+    两道都过＝已经并了（进 `mergedPairs`）；两道都不过＝离阈值远，不是这一刀要看的。
+    """
+    ok_sim = sim >= NEWS_DEDUPE_MIN_SIM
+    ok_over = overlap >= NEWS_DEDUPE_MIN_OVERLAP
+    if ok_sim == ok_over:
+        return None
+    if ok_sim:
+        return ("overlap", NEWS_DEDUPE_MIN_OVERLAP - overlap)
+    return ("sim", NEWS_DEDUPE_MIN_SIM - sim)
 
 
 def _news_better(cand: dict, kept: dict) -> bool:
@@ -249,6 +274,13 @@ def merge_news(attempts: list[dict], limit: int = NEWS_LIMIT) -> dict:
         两者相加才等于 `items` 的条数——note 里"去重后 N 条"报的是截断**后**，别看混；
       · `crossSource`＝`via` 跨了 ≥2 家的条目数，**这才是 0.5/0.8 那两道门槛真正作用的对象**
         （同一家内的重复不需要阈值）。
+    `samples`（#43／CR9-71）＝**给那两道阈值校准用的成对标题**，与 `stats` 同住、同样不上屏：
+      · `mergedPairs`＝真的并掉了哪一对（`incumbent`／`incoming` 两条标题＋两侧来源＋`sim`/`overlap`
+        ＋`survivor`＝择优之后活下来的是哪一条），条数恒等于 `stats.mergedAway`；
+      · `nearMiss`＝**只过了一道门槛**的那些对里、按"没过那道还差多少"最小的前 `NEAR_MISS_KEEP` 条，
+        另带 `nearMissTotal`（实采多少）——**只有 `mergedPairs` 答不了"该合的没合"**：恒等式在漏并时
+        两边照样自洽，所以这一档才是"0.5/0.8 该不该动"的真正原料。每对都带两侧来源，因为同家与跨家
+        走的是同一把尺（`_news_similar` 不分家），要只看跨源的那一档由 `incomingVia` 判、不靠这里预设。
     **计数只留在这份结构里、不进 `note`**（主人 10-05 的字＝"合并前／并掉几条"这类数对用户没用，
     属面向开发者的数据）⇒ note 维持"几家到货、去重后几条、未到货是谁"，两者各说各的话。
     """
@@ -259,6 +291,10 @@ def merge_news(attempts: list[dict], limit: int = NEWS_LIMIT) -> dict:
     blank = 0
     merged_away = 0
     kept: list[dict] = []
+    # #43（CR9-71）：阈值校准要的原料。`mergedPairs`＝真的并掉了哪一对，`nearMiss`＝**差一点就并**的那一档。
+    # 只有前者看不见漏并（恒等式 `raw==blank+kept+mergedAway` 在"该合的没合"时照样自洽）。
+    merged_pairs: list[dict] = []
+    near_all: list[dict] = []
     for a in attempts:
         name = str(a.get("source") or "?")
         if a.get("error"):
@@ -279,18 +315,55 @@ def merge_news(attempts: list[dict], limit: int = NEWS_LIMIT) -> dict:
                 "via": [name],
             }
             grams = _bigrams(cand["title"])
-            hit = next(
-                (i for i, k in enumerate(kept) if _news_similar(grams, k["_grams"])), None
-            )
+            # 单次扫描：命中即 `break` ⇒ 代表条目仍是"第一个过门槛的那条"，与旧的 `next(...)` 同形。
+            # 未命中的那些比较顺手量一次短板（`nearMiss` 的原料），不另起第二轮循环＝不加一份成本。
+            hit: int | None = None
+            hit_ratios: tuple[float, float] = (0.0, 0.0)
+            best_gap: float | None = None
+            best_near: dict | None = None
+            for i, k in enumerate(kept):
+                sim, overlap = _news_metrics(grams, k["_grams"])
+                if sim >= NEWS_DEDUPE_MIN_SIM and overlap >= NEWS_DEDUPE_MIN_OVERLAP:
+                    hit, hit_ratios = i, (sim, overlap)
+                    break
+                gap = _news_shortfall(sim, overlap)
+                if gap is not None and (best_gap is None or gap[1] < best_gap):
+                    best_gap = gap[1]
+                    best_near = {
+                        "incumbent": k["title"],
+                        "incoming": cand["title"],
+                        "incumbentVia": list(k["via"]),
+                        "incomingVia": name,
+                        "sim": round(sim, 3),
+                        "overlap": round(overlap, 3),
+                        "failed": gap[0],
+                        "shortfall": round(gap[1], 4),
+                    }
             if hit is None:
+                if best_near is not None:
+                    near_all.append(best_near)
                 kept.append({**cand, "_grams": grams})
                 continue
             merged_away += 1
             group = kept[hit]
+            incumbent_via = list(group["via"])
+            incumbent_title = group["title"]
             if name not in group["via"]:
                 group["via"].append(name)
-            if _news_better(cand, group):  # 择优：换掉代表条目，但 `via` 要累计
+            take = _news_better(cand, group)  # 择优：换掉代表条目，但 `via` 要累计
+            if take:
                 kept[hit] = {**cand, "via": list(group["via"]), "_grams": grams}
+            merged_pairs.append({
+                "incumbent": incumbent_title,
+                "incoming": cand["title"],
+                "incumbentVia": incumbent_via,
+                "incomingVia": name,
+                "sim": round(hit_ratios[0], 3),
+                "overlap": round(hit_ratios[1], 3),
+                # 活下来的标题是哪一条：`mergedAway` 把"并掉"与"换了代表"混在同一个数里，
+                # 不写这一格，样本会让人以为被吞的那条总是输家。
+                "survivor": "incoming" if take else "incumbent",
+            })
 
     items = [{k: g[k] for k in ("title", "summary", "url", "time", "via")} for g in kept[:limit]]
     stats = {
@@ -305,6 +378,19 @@ def merge_news(attempts: list[dict], limit: int = NEWS_LIMIT) -> dict:
         "crossSource": sum(1 for g in kept if len(g["via"]) > 1),
     }
     degraded = len(items) == 0 or len(arrived) <= 1
+    # #43（CR9-71）：样本。`nearMiss` 按"没过那道还差多少"升序取前 `NEAR_MISS_KEEP` 对，
+    # 排序带上标题兜底⇒同一批输入两次跑出来的顺序可复现（否则三天后没法比这两枚样本）。
+    near_sorted = sorted(
+        near_all, key=lambda d: (d["shortfall"], d["incumbent"], d["incoming"])
+    )[:NEAR_MISS_KEEP]
+    samples = {
+        # 阈值随样本一起写：这两个数哪天变了，样本才不会失去解释。
+        "thresholds": {"minSim": NEWS_DEDUPE_MIN_SIM, "minOverlap": NEWS_DEDUPE_MIN_OVERLAP},
+        "nearMissKeep": NEAR_MISS_KEEP,  # 上限
+        "nearMissTotal": len(near_all),  # 实采多少——与 `nearMiss` 的条数不同形，别当截断没发生
+        "mergedPairs": merged_pairs,  # 条数恒等于 `stats.mergedAway`（断言锁住）
+        "nearMiss": near_sorted,
+    }
     if not items:
         note = "全部新闻源不可用" + (f"（{'；'.join(missing)}）" if missing else "")
     elif missing:
@@ -322,6 +408,8 @@ def merge_news(attempts: list[dict], limit: int = NEWS_LIMIT) -> dict:
         "degraded": degraded,
         "note": note,
         "stats": stats,
+        # #43（CR9-71）：与 `stats` 同一条路（进 `lastResult` → 状态位文件），**不进 note、不进 payload**
+        "samples": samples,
     }
 
 
@@ -844,6 +932,10 @@ def run_pipeline(trigger: str = "manual") -> dict:
         # 这一份就是"合并前逐源几条／并掉几条"的唯一去处）。它不进 `payload`——落库那列
         # 没有装它的地方，而加列＝migration，按 CR8-8 那条口径要另立需求。
         "newsStats": news["stats"],
+        # #43（CR9-71）：样本走 `newsStats` 同一条路（内存 `lastResult` → 覆写 `hotspot-state.json`
+        # → `GET /hotspots/status`），同样**不进 `payload`**：落库那列没地方装它，加列＝migration。
+        # 按键严格取（不用 `.get`）＝离线桩件少这个契约要当场 KeyError 崩掉，而不是"生产有、测试无"。
+        "newsSamples": news["samples"],
         "engine": struct["engine"],
         "degraded": payload["degraded"],
         "note": payload["note"],

@@ -40,6 +40,12 @@ STUB_STATS = {
     "blank": 0, "kept": 0, "mergedAway": 0, "truncated": 0, "crossSource": 0,
 }
 
+# #43（CR9-71）之后 `run_pipeline` 也按键取 `news["samples"]` —— 同一条纪律：桩件少契约就该崩在这里。
+STUB_SAMPLES = {
+    "thresholds": {"minSim": 0.5, "minOverlap": 0.8},
+    "nearMissKeep": 10, "nearMissTotal": 0, "mergedPairs": [], "nearMiss": [],
+}
+
 
 def test_build_items_deadline_expired() -> None:
     """deadline 已过期 → 不调用 map_board_products，但每个 topic 仍产出，带降级 note。"""
@@ -93,7 +99,7 @@ def test_run_pipeline_deadline_env() -> None:
     orig_emit = pl.emit_ingest
 
     pl.fetch_news = lambda **kw: {"items": [], "source": "test", "sources": ["test"], "note": None,
-                                  "degraded": False, "stats": STUB_STATS}
+                                  "degraded": False, "stats": STUB_STATS, "samples": STUB_SAMPLES}
     pl.structure_topics = lambda items, **kw: {"topics": [], "engine": "keyword", "note": None}
 
     def _build(topics, news, deadline=None):
@@ -183,7 +189,7 @@ def test_run_pipeline_reasons_split() -> None:
             "source": "eastmoney-news",
             "sources": ["eastmoney-news"],
             "note": "新闻多源合并：1/3 家到货；未到货：Tavily（Timeout）",
-            "degraded": True, "stats": STUB_STATS,
+            "degraded": True, "stats": STUB_STATS, "samples": STUB_SAMPLES,
         }
         pl.structure_topics = lambda items, **kw: {
             "topics": [{"title": "t"}],
@@ -215,7 +221,7 @@ def test_run_pipeline_reasons_split() -> None:
             "source": "tavily",
             "sources": ["tavily"],
             "note": None,
-            "degraded": False, "stats": STUB_STATS,
+            "degraded": False, "stats": STUB_STATS, "samples": STUB_SAMPLES,
         }
         pl.emit_ingest = lambda payload: (cap2.update(payload), {})[1]
         pl.run_pipeline(trigger="test")
