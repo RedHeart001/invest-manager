@@ -584,10 +584,13 @@ def test_samples_merged_pairs_and_near_miss() -> None:
     cls = {"source": "cls", "error": None, "items": [
         news("【央行宣布降准】", summary="转发时的长说明，够长了"),  # 两道都过 ⇒ mergedPairs
         news("地产链龙头涨停"),  # 两道都不过 ⇒ 哪儿都不去
-        news(head + "ghijkl"),  # 11 元组含 head 那 5 个 ⇒ overlap 过、sim 不过
-        news(head + "mnopqrs"),  # 12 元组 ⇒ 同形状、shortfall 更大
-        news(head + "uvwxyzAB"),  # 13 元组 ⇒ 三条里离阈值最远的一条
+        news(head + "uvwxyzAB"),  # 13 元组 ⇒ 离阈值最远（shortfall 0.1154）
+        news(head + "mnopqrs"),  # 12 元组 ⇒ 0.0833
+        news(head + "ghijkl"),  # 11 元组 ⇒ 最近（0.0455）
     ]}
+    # 三条 head 族的**到达顺序故意排成短板从大到小**：按到达顺序正好升序的话，"摘掉排序"与
+    # "保留排序"的输出会一字不差——10-07 钻 71d 第一次跑就是 87/87 零红，抓到的是我自己这处盲点
+    # （#40 那条"两侧输入长得一样"的同族）。样本身份下面两条按字面钉死，排序才被真的断到。
     m = pl.merge_news([em, cls], limit=25)
     s = m["samples"]
 
@@ -643,9 +646,9 @@ def test_samples_merged_pairs_and_near_miss() -> None:
     try:
         pl.NEAR_MISS_KEEP = 2
         s2 = pl.merge_news([em, cls], limit=25)["samples"]
-        check("🔁 截断只切“排在后面的”：`nearMissTotal` 仍是 3，而留下的恰是最短那两条",
+        check("🔁 截断只切“排在后面的”：`nearMissTotal` 仍是 3，而留下的恰是短板最小的两条（**不是到达最早的两条**）",
               s2["nearMissTotal"] == 3 and len(s2["nearMiss"]) == 2
-              and [d["incoming"] for d in s2["nearMiss"]] == [d["incoming"] for d in s["nearMiss"]][:2],
+              and [d["incoming"] for d in s2["nearMiss"]] == [head + "ghijkl", head + "mnopqrs"],
               str([(d["incoming"], d["shortfall"]) for d in s2["nearMiss"]])[:220])
         check("`nearMissKeep` 跟着常量走（写死在断言里就看不见“截断发生了”这件事）",
               s2["nearMissKeep"] == 2, str(s2["nearMissKeep"]))
