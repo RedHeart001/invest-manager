@@ -1005,3 +1005,15 @@ O1–O12 全量落地，明细见 [history/2026-09-13-cr1-全项目审查与O系
 ④ **本轮授权范围我按字收窄**＝只有 ② 这一件＋它的全量测试。**①（刀 5＝10-08 要不要落 docs）这轮没给字** ⇒ 上面那句"等你字①"**我不代结清**，那笔 docs 仍等你一句话；**③（crypto 屏上话的新字面）按我的推荐处理＝本轮一个字不改**，等 10-07 04:00 那份读数字面落在哪一档再谈；老账（阈值／UI 实点／CR8-9 诚实态／④ 正向／BK 等价性／push）不动。
 
 ⑤ **门禁计划与出网边界（跑之前先摊开）**＝① `tsc --noEmit`＋`npx vitest run`（零出网，本轮 web 侧预计零改动 ⇒ 数字应当不动）｜② **21 枚点名套件**、必带 `LIMITER_STATE_FILE` 指临时目录（离线夹具从此会写生产落点）｜⑤ **改后探针需要一次 ds 重启**（uvicorn 无 `--reload`）＝重启属你最难放行那一类，我不自己动，命令摊在收尾汇报里等你字｜③④ **本轮不跑**＝③ 会往东财／新浪桶里真打（p0 15＋p1 14），④ 的 p3 会烧一整轮 pipeline；更要紧的是**今晚 02:00 那轮的第一枚生产 `limiter-state.json` 就在今天这一天里**，此刻用探针把 `granted/denied` 打进 10-06 的桶，等于亲手污染 #27 第二步正要读的那个数。**⇒ 推荐＝③④ 留到 04:00 读数之后另开窗**（要今天跑也行，但那天的计数要按"含探针"重新解释）。
+
+**同日续 55 · CR9-70 落地＋全量测试（20:3x–20:5x）——一句话：三枚钻各自咬住，而"接线"那一条这次出厂就带着（上一轮是先绿的）**
+
+① **一笔码＝`607abf0`**（docs 先于落码＝`702969d`）。新增面只有三个符号：`WINDOW_DAYS = 7`、`_as_delta()`、`durable_window()`，加 `main.py` 一行 import 与一个键 `limitersWindow`。**"丙"这件事可以直接从 diff 验**：写侧（`flush`／`_maybe_dump`／`take_delta`）、存储形状、`FLUSH_MIN_INTERVAL_S`、`KEEP_DAYS=30` 全部零改动 ⇒ 没有引入第二个机制，也没有"自起点累计"那套需要被拆掉的东西。
+
+② **三枚原地回退实钻的字面**（判别力就是本刀的交付物，所以逐条记原文）：**钻 70a** 摘掉截断 ⇒ **1 条红**，detail＝`windowDays=3` 而 `coveredDays` 从 `2026-09-27` 排到 `2026-10-06`、`granted` 并成 **10**；**钻 70b** 把"并未落盘增量"那次合并摘掉（`for lim in limits:` → `for lim in ():`）⇒ **2 条红**：`observe()` 还没落盘并进读数那条给 `'fromDisk': True`、`seenTotal: 0`，它的 🔁 对侧给 `{'granted': 5, …, 'seenTotal': 1} vs {'granted': 5, …, 'seenTotal': 0}`＝"读少"与"双计"两侧同时可见；**钻 70c** 摘掉 `observe()`／`acquire()` 里的两处 `_maybe_dump()` ⇒ **3 条红**＝CR9-69 那两条事件路径断言（`None`、`{}`）**加上本刀自己那条 🔁**（`coveredDays: ['2026-10-05']`＝今天根本没进账）。复原＝`git checkout -- app/utils/limiter.py`（本轮合法：文件已提交），三份文件 sha256 与基线逐项一致（`10a151e0ba4adfa7`／`a0d6bdfd80d634af`／`fd9c08e4e99ef43d`）、`grep -c DRILL`＝0、复跑 **134/134**。
+
+③ **门禁读数**＝① `tsc_exit=0`（输出 0 字节）＋vitest **331/331（41 文件）**——本轮 web 零改动，这组是"确认未被扰动"；② **21 枚整批实跑＝708 项**、逐枚 `exit=0`（701−127＋134，增量恰等于 `p2_m8`；回执 `data-service/batch-70.out`）；③④ **有意不跑**（见上一条 ⑤ 段的额度与计数污染理由）；⑤ **欠**＝跑着的 ds **24996** 装的是 CR9-69 时点的码，`limitersWindow` 读不到 ⇒ 按 CR9-24 记「代码已改、未证进程」。
+
+④ **一条仪器错要记（它会再犯）**：批跑我写了 `LIMITER_STATE_FILE="$(mktemp -d)/…"`，而 `mktemp` 给的是 Git Bash 的 `/tmp/…`＝**Windows python 看不见**（实测 `/e/tmp` 不存在）。⇒ 那次"重定向"没生效，套件里真正保住生产落点的是它们各自的 `tempfile.mkdtemp()`。**能声称的只有实测结果**＝`data-service/runtime/limiter-state.json` 批跑后仍不存在（今晚第一枚 flush 的读数仍然干净）；**不能声称**"我设了环境变量所以安全"。下次要重定向就给 Windows 认得的绝对路径。
+
+⑤ **状态**＝两笔入库后 `dev` 领先 **110 笔**（锚点＝`607abf0`；这笔 docs 自己再 +1），tree 干净；服务＝ds **24996**（CR9-69 码＋`SYNC_CATCHUP=off`＋`HTTPS_PROXY`）／web **20492**；02:00 链＋03:30 备份＋04:00 自动读数都不需要我再动手。**⇒ 下一个可用 CR＝CR9-71、下一个待拍板＝#43。** 现在等你字的＝**刀 5＝10-08 这条要不要落进 docs**（你 20:1x 已口头给字，我没代结清）｜**⑤ 那句重启**（补法＝先 `netstat` 取监听 PID → `taskkill //F //T //PID <pid>` → 行内起：`PYTHONPATH=. SYNC_CATCHUP=off HTTPS_PROXY=http://127.0.0.1:7897 .venv/Scripts/python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000`，起后核 `limitersWindow` 键在不在＋监听 PID 变了）｜**③ crypto 屏上话**（仍等 04:00 字面）｜老账不动（阈值／UI 实点 7 项／CR8-9 诚实态／④ 正向一次／BK 成分等价性／push）。
