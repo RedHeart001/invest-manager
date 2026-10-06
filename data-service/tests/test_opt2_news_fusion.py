@@ -416,7 +416,7 @@ def test_state_file_and_from_disk_fallback() -> None:
                            "note": None, "newsStats": {"kept": 3, "raw": 7, "crossSource": 2}},
         })
         wrote = hs._write_state()
-        check("跑完一轮就把 lastResult 覆写落盘（成功轮的出口）",
+        check("落盘写侧的形状（这一条的内存是测试**手填**的，不等于跑过一轮——真跑一轮由下面那组盯）",
               wrote is True and os.path.exists(path), f"wrote={wrote}")
         s_mem = hs.status()
         check("内存非空 ⇒ fromDisk=False（本进程跑过与上个进程跑过，两格不许同形）",
@@ -479,6 +479,75 @@ def test_state_file_and_from_disk_fallback() -> None:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+def test_execute_success_branch_is_written_by_production() -> None:
+    """CR9-68（#40 乙）：状态位里"成功轮"那一格，必须由 `_execute` 的**成功分支**写出来。
+
+    为什么单开一组（10-06 断言强度审计登记的 #40 (b)）：上面那组里叫「成功轮的出口」的那条
+    （`:412-420`）其实是**测试自己**把 `lastResult` 写进内存、再直调 `hs._write_state()`——
+    它没有跑那一轮。全文件唯一真驱动 `_execute` 的是 `:450-461`，而那一支把 `run_pipeline`
+    换成抛 `RuntimeError` 的版本＝失败轮。⇒ `app/hotspot/scheduler.py:103-105` 那三行
+    （`lastRun`／`_state["lastResult"] = result`／`runs += 1`）此前**无人从调用点盯**：
+    摘掉 `:104`，成功轮的 `newsStats` 再也进不了内存与盘＝**#34 那个洞原样回来**，而这套照绿。
+
+    顺带把"用例名会替测试说谎"这一形状钉死：**落过盘 ⇔ 跑过一轮**是两件事，
+    所以第一组断言先只做"手填＋直调 `_write_state()`"，要求 `runs` 一动不动。
+    """
+    import shutil
+    import tempfile
+
+    import app.hotspot.scheduler as hs
+
+    tmpdir = tempfile.mkdtemp()
+    path = os.path.join(tmpdir, "hotspot-state.json")
+    prev_env = os.environ.get("HOTSPOT_STATE_FILE")
+    prev_state = dict(hs._state)
+    os.environ["HOTSPOT_STATE_FILE"] = path
+    payload = {
+        "trigger": "unit-test-ok",
+        "newsSources": ["eastmoney-news", "cls"],
+        "note": None,
+        "newsStats": {"kept": 9, "raw": 12, "crossSource": 3},
+    }
+    orig = hs.run_pipeline
+    try:
+        hs._state.update({
+            "running": True, "runs": 0, "lastRun": None,
+            "lastResult": None, "catchUpResolved": None,
+        })
+        # 只复现旧用例那个动作：手填内存 + 直接落盘，不经过 `_execute`
+        hs._state["lastResult"] = payload
+        hs._write_state()
+        check("🔁 「写进内存再落盘」不等于跑过一轮：`runs` 仍是 0（旧用例名谎称的那件事）",
+              hs._state["runs"] == 0, f'runs={hs._state["runs"]}')
+
+        hs.run_pipeline = lambda trigger="manual": payload
+        res = hs._execute("unit-test-ok")
+        check("成功轮的出口由生产写：`_execute` 回的就是 pipeline 那份载荷，内存 `lastResult` 与它同物",
+              res is payload and hs._state["lastResult"] is payload, str(res)[:120])
+        check("🔁 摘掉 `scheduler.py:104` ⇒ 红在这里：盘上那份 `lastResult.newsStats` 与内存同源",
+              ((hs.read_state() or {}).get("lastResult") or {}).get("newsStats", {}).get("crossSource") == 3,
+              str(hs.read_state())[:200])
+        check("成功轮要写 `lastRun`（失败轮不写 ⇒ 两态在状态位上必须不同形）",
+              isinstance(hs._state["lastRun"], str) and hs._state["lastRun"] != "",
+              str(hs._state["lastRun"]))
+        check("🔁 跑完一轮 ⇒ `runs` 恰好 +1（计数住在成功分支里，不在 `finally`）",
+              hs._state["runs"] == 1, f'runs={hs._state["runs"]}')
+        check("成功轮的出口同样释放 `running`（单飞锁不因为成功而卡住）",
+              hs._state["running"] is False, str(hs._state["running"]))
+        disk = (hs.read_state() or {}).get("lastResult") or {}
+        check("盘上成功那份**不带** `error` 键（只有失败轮出口才有＝两态不许在文件里同形）",
+              "error" not in disk, str(disk)[:160])
+    finally:
+        hs.run_pipeline = orig
+        hs._state.clear()
+        hs._state.update(prev_state)
+        if prev_env is None:
+            os.environ.pop("HOTSPOT_STATE_FILE", None)
+        else:
+            os.environ["HOTSPOT_STATE_FILE"] = prev_env
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 if __name__ == "__main__":
     test_source_order_and_attempts()
     test_merge_union_dedupe_and_pick()
@@ -486,6 +555,7 @@ if __name__ == "__main__":
     test_no_bucket_use_and_payload_key()
     test_news_stats_survive_a_full_merge()
     test_state_file_and_from_disk_fallback()
+    test_execute_success_branch_is_written_by_production()
     fails = [x for x in results if not x[1]]
     print(f"\n===== {len(results) - len(fails)}/{len(results)} 通过 =====")
     if fails:
