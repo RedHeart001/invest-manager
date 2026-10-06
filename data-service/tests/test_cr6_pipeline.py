@@ -46,6 +46,14 @@ STUB_SAMPLES = {
     "nearMissKeep": 10, "nearMissTotal": 0, "mergedPairs": [], "nearMiss": [],
 }
 
+# #44（CR9-72）之后 `run_pipeline` 解包 `build_items` 的第三个返回值（`build_items` 自己
+# 按键取 `mapped["pathForms"]`）⇒ 桩 build_items 的三处也必须带这一份，形状照真函数。
+STUB_PATHS = {
+    "byCode": 0, "byName": 0,
+    "requestsPerCodePath": 1, "requestsPerNamePath": 9,
+    "savedRequestsEstimate": 0, "emCodeRows": 0,
+}
+
 
 def test_build_items_deadline_expired() -> None:
     """deadline 已过期 → 不调用 map_board_products，但每个 topic 仍产出，带降级 note。"""
@@ -54,12 +62,14 @@ def test_build_items_deadline_expired() -> None:
 
     def _boom(board):
         calls["n"] += 1
-        return {"stocks": [], "note": None}
+        # #44（CR9-72）：`build_items` 现在按键取 `pathForms`，桩件少这个契约就是 KeyError——
+        # 与 CR9-62 那条"桩件比真函数少一个契约"同形，超时这一支本来也不该发过成分请求。
+        return {"stocks": [], "note": None, "pathForms": []}
 
     pl.map_board_products = _boom
     try:
         # deadline 设为过去时刻：立即判定超时
-        items, notes = pl.build_items(_topics(), {"items": []}, deadline=time.monotonic() - 1)
+        items, notes, paths = pl.build_items(_topics(), {"items": []}, deadline=time.monotonic() - 1)
     finally:
         pl.map_board_products = orig
 
@@ -67,6 +77,9 @@ def test_build_items_deadline_expired() -> None:
     check("P2-3：每个 topic 仍产出（不整段丢弃）", len(items) == 5, str(len(items)))
     check("P2-3：relatedCodes 为空（未映射）", all(i["relatedCodes"] == [] for i in items))
     check("P2-3：note 标注降级", any("超时" in n for n in notes), str(notes))
+    check("#44：一次都没发出去的轮，两格计数都是 0（超时早退不得被读成「BK 路径通了」）",
+          paths["byCode"] == 0 and paths["byName"] == 0 and paths["savedRequestsEstimate"] == 0,
+          str(paths)[:200])
 
 
 def test_build_items_within_deadline() -> None:
@@ -76,17 +89,23 @@ def test_build_items_within_deadline() -> None:
 
     def _ok(board):
         calls["n"] += 1
-        return {"stocks": [{"code": "000001", "name": "x"}], "note": None}
+        return {"stocks": [{"code": "000001", "name": "x"}], "note": None, "pathForms": ["code"]}
 
     pl.map_board_products = _ok
     try:
-        items, notes = pl.build_items(_topics(), {"items": []}, deadline=time.monotonic() + 999)
+        items, notes, paths = pl.build_items(_topics(), {"items": []}, deadline=time.monotonic() + 999)
     finally:
         pl.map_board_products = orig
 
     check("P2-3：未超时则正常映射（5 topic × 2 board）", calls["n"] == 10, str(calls))
     check("P2-3：未超时不加降级 note", not any("超时" in n for n in notes), str(notes))
     check("P2-3：未超时 relatedCodes 非空", all(len(i["relatedCodes"]) == 2 for i in items))
+    check("#44：计数是从**每一次真发出去的成分请求**累加的（10 次映射 ⇒ byCode=10，不是 byCode=1）",
+          paths["byCode"] == 10 and paths["byName"] == 0, str(paths)[:160])
+    check("#44：省下的是折算值而非常量——byCode 每走一次代码路径记 (名称扇出 − 代码扇出)",
+          paths["savedRequestsEstimate"]
+          == paths["byCode"] * (paths["requestsPerNamePath"] - paths["requestsPerCodePath"]),
+          str(paths)[:200])
 
 
 def test_run_pipeline_deadline_env() -> None:
@@ -104,7 +123,7 @@ def test_run_pipeline_deadline_env() -> None:
 
     def _build(topics, news, deadline=None):
         captured["deadline"] = deadline
-        return [], []
+        return [], [], dict(STUB_PATHS)
 
     pl.build_items = _build
     pl.emit_ingest = lambda payload: {}
@@ -196,7 +215,7 @@ def test_run_pipeline_reasons_split() -> None:
             "engine": "llm",
             "note": None,
         }
-        pl.build_items = lambda topics, news, deadline=None: (items, [board_note])
+        pl.build_items = lambda topics, news, deadline=None: (items, [board_note], dict(STUB_PATHS))
         pl.emit_ingest = lambda payload: (cap.update(payload), {})[1]
         res = pl.run_pipeline(trigger="test")
         check(
@@ -293,13 +312,17 @@ def test_board_code_shortcut() -> None:
             r["source"] == "em-concept" and r["stocks"][0]["code"] == "601012",
             str(r)[:120],
         )
+        check("#44：真发出去的那一发记成 `code`（清单按请求计，不按板块计）",
+              r["pathForms"] == ["code"], str(r.get("pathForms")))
         # 🔁 旁路代码查询：必须退回"按名称请求"的原行为，证明差异出自缓存命中而非改写语义
         orig_bc = pl._board_code
         pl._board_code = lambda *a, **k: None
         try:
             seen.clear()
-            pl.map_board_products("光伏设备")
+            r2 = pl.map_board_products("光伏设备")
             check("CR9-3a🔁：无代码时按名称请求（原行为）", seen == ["光伏设备"], str(seen))
+            check("#44🔁：同一板块退回名称时记成 `name`——两格分开，才读得出「名单通没通」",
+                  r2["pathForms"] == ["name"], str(r2.get("pathForms")))
         finally:
             pl._board_code = orig_bc
     finally:
@@ -310,6 +333,109 @@ def test_board_code_shortcut() -> None:
         pl._board_cache.clear()
 
 
+def test_board_path_stats_two_gates_and_free_signal() -> None:
+    """#44（CR9-72）：`_board_path_stats` 那六格各自咬得住什么。
+
+    这族是纯函数读数，所以每条都要先问「哪一处回退会让它红」——尤其**与扇出常数同写**那两条：
+    只断 `savedRequestsEstimate` 的绝对值，常数被人改成 5 时它照样绿。
+    """
+    prev = pl._board_cache.get("codes")
+    try:
+        pl._board_cache["codes"] = (time.time(), {
+            "光伏设备": {"em-concept": "BK0446"},
+            "电源设备": {"em-concept": "BK1033", "em-industry": "BK1033"},
+            "储能": {},
+        })
+        s = pl._board_path_stats(["code", "code", "name"])
+        check("#44：两格分开计数（代码路径 ⇔ 名称路径），不是一个 bool",
+              s["byCode"] == 2 and s["byName"] == 1, str(s))
+        check("#44：恒等式 `byCode + byName == 真发出去的成分请求次数`",
+              s["byCode"] + s["byName"] == 3, str(s))
+        check("#44：`emCodeRows` 数的是 (名, 源) 配对行而非板块个数（「储能」那行空 dict 不占一格）",
+              s["emCodeRows"] == 3, str(s["emCodeRows"]))
+        check("#44：省下的那条是**按实测扇出折算**，两个扇出常数必须与它同写（读的人能自己复算）",
+              s["savedRequestsEstimate"] == 16 and s["requestsPerNamePath"] == 9
+              and s["requestsPerCodePath"] == 1, str(s)[:200])
+        check("#44：折算用的两个常数就是模块里那一对（写死与取常量各断一次＝两种失败形态都要红）",
+              s["requestsPerNamePath"] == pl._BOARD_CONS_REQ_BY_NAME
+              and s["requestsPerCodePath"] == pl._BOARD_CONS_REQ_BY_CODE, str(s)[:160])
+
+        pl._board_cache["codes"] = (time.time(), {})
+        z = pl._board_path_stats([])
+        check("🔁 名单没通那一档：`emCodeRows` 归 0 ⇔ 映射表一条代码都没给（这就是那枚免费读数）",
+              z["emCodeRows"] == 0 and z["byCode"] == 0 and z["byName"] == 0
+              and z["savedRequestsEstimate"] == 0, str(z))
+        del pl._board_cache["codes"]
+        n = pl._board_path_stats(["name"])
+        check("缓存整个不存在时不抛（新进程首帧就是这个形态），计数照旧按发出去的那一算",
+              n["emCodeRows"] == 0 and n["byName"] == 1, str(n))
+        pl._board_cache["codes"] = (time.time(), {"A": {"em-concept": "BK0001"}})
+        a1 = pl._board_path_stats(["code", "name", "code"])
+        a2 = pl._board_path_stats(["name", "code", "code"])
+        check("🔁 计数与到达顺序无关（挡住「只看第一发」那类退化写法）", a1 == a2, str([a1, a2])[:200])
+    finally:
+        if prev is None:
+            pl._board_cache.pop("codes", None)
+        else:
+            pl._board_cache["codes"] = prev
+
+
+def test_board_paths_reach_state_file_from_the_event_path() -> None:
+    """#44：读数必须落到盘上，而这条断言**只从事件路径读**（一次都不手调 `_board_path_stats`）。
+
+    全链只假在四处：`fetch_news`／`structure_topics`／`map_board_products`（为零出网）／`emit_ingest`。
+    中间四层——真 `build_items` → `_board_path_stats` → `run_pipeline` → `scheduler._execute`
+    → `_write_state`——没人手调：摘掉 `result["boardPaths"]` 那一行、或摘掉 `build_items` 里
+    那句 `forms.extend(...)`，下面第一条就红（CR9-69 学到的「出厂自带一条只从事件读」）。
+    """
+    import shutil
+    import tempfile
+
+    import app.hotspot.scheduler as hs
+
+    tmpdir = tempfile.mkdtemp()
+    prev_env = os.environ.get("HOTSPOT_STATE_FILE")
+    prev_state = dict(hs._state)
+    orig = (pl.fetch_news, pl.structure_topics, pl.map_board_products, pl.emit_ingest)
+    sent: dict = {}
+    os.environ["HOTSPOT_STATE_FILE"] = os.path.join(tmpdir, "hotspot-state.json")
+    try:
+        hs._state.update({"running": True, "runs": 0, "lastRun": None,
+                          "lastResult": None, "catchUpResolved": None})
+        pl.fetch_news = lambda **kw: {"items": [], "source": "t", "sources": ["t"], "note": None,
+                                      "degraded": False, "stats": STUB_STATS, "samples": STUB_SAMPLES}
+        pl.structure_topics = lambda items, **kw: {
+            "topics": [{"title": "甲", "boards": ["B1", "B2"]}], "engine": "llm", "note": None}
+        pl.map_board_products = lambda board, limit=6: {
+            "stocks": [{"code": "601012", "name": "x"}], "source": "em-concept",
+            "note": None, "pathForms": ["code"]}
+        pl.emit_ingest = lambda payload: (sent.update(payload), {"inserted": 1})[1]
+        res = hs._execute("unit-test-paths")
+        disk = (hs.read_state() or {}).get("lastResult") or {}
+        p = disk.get("boardPaths") or {}
+        check("前提先钉住：这一轮**真走完了**（emit 拿到载荷、盘上有 lastResult），不是测试自己填的内存",
+              bool(sent) and bool(disk), str(res)[:150])
+        check("#44：盘上读得到 `boardPaths`，且两个板块各一发代码路径是被真 `build_items` 累加进来的",
+              p.get("byCode") == 2 and p.get("byName") == 0, str(p)[:200])
+        check("#44：扇出常数与读数出自**同一份载荷**（读它不用去 import 私有常量）",
+              p.get("requestsPerNamePath") == 9 and p.get("savedRequestsEstimate") == 16, str(p)[:200])
+        check("落库 payload 里没有这份读数（读的是真 emit 拿到的那一份，不是手搭的）",
+              "boardPaths" not in sent and "pathForms" not in str(sent),
+              str(sorted(sent.keys()))[:200])
+        check("🔁 上屏那层没被它带跑：`note` 里不含 `boardPaths`／`pathForms` 的字面",
+              "boardPaths" not in str(res.get("note")) and "pathForms" not in str(res.get("note")),
+              str(res.get("note"))[:160])
+    finally:
+        pl.fetch_news, pl.structure_topics, pl.map_board_products, pl.emit_ingest = orig
+        hs._state.clear()
+        hs._state.update(prev_state)
+        if prev_env is None:
+            os.environ.pop("HOTSPOT_STATE_FILE", None)
+        else:
+            os.environ["HOTSPOT_STATE_FILE"] = prev_env
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 if __name__ == "__main__":
     test_build_items_deadline_expired()
     test_build_items_within_deadline()
@@ -317,6 +443,8 @@ if __name__ == "__main__":
     test_run_pipeline_reasons_split()
     test_board_code_shortcut()
     test_run_pipeline_deadline_env()
+    test_board_path_stats_two_gates_and_free_signal()
+    test_board_paths_reach_state_file_from_the_event_path()
     fails = [x for x in results if not x[1]]
     print(f"\n===== {len(results) - len(fails)}/{len(results)} 通过 =====")
     if fails:

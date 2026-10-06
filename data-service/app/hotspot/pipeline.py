@@ -469,6 +469,12 @@ def _pick_col(df, *candidates: str):
 # 只有这个形态能喂给 *_cons_em 走短路，其余一律按名称回退。
 _BK_RE = re.compile(r"BK\d{3,8}$", re.IGNORECASE)
 
+# CR9-3(a) 的两条实测扇出（09-27 requests 层两次计数）：传板块名＝9 个东财请求（akshare 先重拉
+# 整张板块映射表），传 BK 代码＝1 个。#44（CR9-72）用它们折算"这一轮省下几发"，
+# 所以两个常数必须与折算结果同写——哪天扇出变了，那条估算才不会失去解释。
+_BOARD_CONS_REQ_BY_NAME = 9
+_BOARD_CONS_REQ_BY_CODE = 1
+
 
 def _board_names() -> list[tuple[str, str]]:
     """返回 [(板块名, 来源)]：EM 概念+行业 → 新浪行业+概念 → THS 概念。
@@ -550,6 +556,32 @@ def _board_code(board: str, source: str) -> str | None:
     if not entry:
         return None
     return entry[1].get(board, {}).get(source)
+
+
+def _board_path_stats(forms: list[str]) -> dict:
+    """#44（CR9-72）：这一轮真发出去的东财成分请求，按"送的是 BK 代码还是板块名"分两格。
+
+    **为什么要有它**＝CR9-3(a) 之后每条映射有两副面孔（代码 1 发 ⇔ 名称 9 发），而这件事
+    此前盘上零痕迹：`map_board_products` 的 `source` 只回给调用方，10-06 16:30 那份
+    `hotspot-state.json` 里连 `em-concept` 的字面都 grep 不到 ⇒ "东财名单通没通、BK 路径走没走"
+    只能靠再花一次真请求才知道。`emCodeRows` 就是那枚免费读数：**0 ⇔ 映射表没给出代码**。
+
+    `savedRequestsEstimate` 是按实测扇出**折算**的估算，不是计数器——常数一并写出去正是为了
+    让读的人能自己复算。计数单位＝每一次真发出去的成分请求（概念／行业各算一发，
+    试过就花了），不是"每个板块一次"。
+    """
+    by_code = forms.count("code")
+    by_name = forms.count("name")
+    entry = _board_cache.get("codes")
+    em_code_rows = sum(len(v) for v in entry[1].values()) if entry else 0
+    return {
+        "byCode": by_code,
+        "byName": by_name,
+        "requestsPerCodePath": _BOARD_CONS_REQ_BY_CODE,
+        "requestsPerNamePath": _BOARD_CONS_REQ_BY_NAME,
+        "savedRequestsEstimate": by_code * (_BOARD_CONS_REQ_BY_NAME - _BOARD_CONS_REQ_BY_CODE),
+        "emCodeRows": em_code_rows,
+    }
 
 
 def _keyword_board_names() -> list[str]:
@@ -755,9 +787,14 @@ def _sina_hot_topics(limit: int = 3) -> list[dict]:
 
 
 def map_board_products(board: str, limit: int = BOARD_STOCKS_PER_TOPIC) -> dict:
-    """板块成分映射：东财概念板 → 东财行业板 → 新浪行业/概念板（R15 多源降级）。"""
+    """板块成分映射：东财概念板 → 东财行业板 → 新浪行业/概念板（R15 多源降级）。
+
+    #44（CR9-72）新增返回键 `pathForms`＝本板块真发出去的每一次东财成分请求的形态
+    （`"code"`|`"name"`，概念/行业各计一发；没走到东财就是空列表）。调用方见 `_board_path_stats`。
+    """
     import akshare as ak
 
+    forms: list[str] = []
     if _EM.acquire(timeout=15):
         for fn, tag in (
             (ak.stock_board_concept_cons_em, "em-concept"),
@@ -765,6 +802,8 @@ def map_board_products(board: str, limit: int = BOARD_STOCKS_PER_TOPIC) -> dict:
         ):
             # CR9-3(a)：知道 BK 代码就按代码请求（1 个 HTTP），否则按名称（实测 9 个）。
             sym = _board_code(board, tag) or board
+            # #44：形态按发出去的那一算——用同一把 `_BK_RE`，不另立"什么算代码"的第二判据。
+            forms.append("code" if _BK_RE.fullmatch(sym) else "name")
             try:
                 df = _ak_guarded(lambda: fn(symbol=sym), 45.0, "board-constituents")
                 if df is None or len(df) == 0:
@@ -777,7 +816,7 @@ def map_board_products(board: str, limit: int = BOARD_STOCKS_PER_TOPIC) -> dict:
                 ]
                 _EM.on_success()
                 if stocks:
-                    return {"stocks": stocks, "source": tag, "note": None}
+                    return {"stocks": stocks, "source": tag, "note": None, "pathForms": forms}
             except Exception as e:  # noqa: BLE001
                 _EM.on_failure()
                 log.warning("board cons failed (%s %s→%s): %s", tag, board, sym, e)
@@ -785,11 +824,12 @@ def map_board_products(board: str, limit: int = BOARD_STOCKS_PER_TOPIC) -> dict:
 
     sina = _sina_board_products(board, limit)
     if sina["stocks"]:
-        return sina
+        return {**sina, "pathForms": forms}
     return {
         "stocks": [],
         "source": "none",
         "note": sina.get("note") or f"板块「{board}」成分全源不可用",
+        "pathForms": forms,
     }
 
 
@@ -830,7 +870,7 @@ def _topic_urls(topic: dict, news_items: list[dict], limit: int = 3) -> list[dic
 
 def build_items(
     topics: list[dict], news_meta: dict, deadline: float | None = None
-) -> tuple[list[dict], list[str]]:
+) -> tuple[list[dict], list[str], dict]:
     """CR6-P2-3：board 映射最坏可达 ~900s（5 topic × 2 board × 2 源 × 45s），
     `run_pipeline` 此前无整体超时 → `_state["running"]` 长期占用、所有触发被拒。
     此处接收 deadline，每轮 board 循环开头检查；超时即停止后续映射，但**每个 topic
@@ -838,6 +878,7 @@ def build_items(
     """
     notes: list[str] = []
     items: list[dict] = []
+    forms: list[str] = []
     timed_out = False
     for t in topics:
         related: list[dict] = []
@@ -848,6 +889,7 @@ def build_items(
                 timed_out = True
                 break
             mapped = map_board_products(board)
+            forms.extend(mapped["pathForms"])
             if mapped["note"]:
                 board_notes.append(mapped["note"])
             related.extend(
@@ -867,7 +909,7 @@ def build_items(
         )
     if timed_out:
         notes.append("pipeline 超时，部分 topic 未完成成分映射")
-    return items, notes
+    return items, notes, _board_path_stats(forms)
 
 
 def emit_ingest(payload: dict) -> dict:
@@ -892,7 +934,7 @@ def run_pipeline(trigger: str = "manual") -> dict:
     deadline = time.monotonic() + timeout_s
     news = fetch_news(deadline=deadline)
     struct = structure_topics(news["items"], deadline=deadline)
-    items, board_notes = build_items(struct["topics"], news, deadline=deadline)
+    items, board_notes, board_paths = build_items(struct["topics"], news, deadline=deadline)
     # CR8-1：旧实现把三件不相干的事 OR 成一个 `degraded`、再把三类 note 拼成一条
     # ≤500 字串，`web` 侧于是逐卡渲染「降级产出」横幅（一张卡一条、同批互相重复）。
     # 现在按成因分类，只有 ①② 进入落库契约：
@@ -936,6 +978,10 @@ def run_pipeline(trigger: str = "manual") -> dict:
         # → `GET /hotspots/status`），同样**不进 `payload`**：落库那列没地方装它，加列＝migration。
         # 按键严格取（不用 `.get`）＝离线桩件少这个契约要当场 KeyError 崩掉，而不是"生产有、测试无"。
         "newsSamples": news["samples"],
+        # #44（CR9-72）：BK 代码路径 vs 名称路径这一轮各走了几次、映射表给出多少行代码。
+        # 同一条路（内存 `lastResult` → `hotspot-state.json` → `GET /hotspots/status`），
+        # 不进 `payload`、不上屏——"读得到"≠"该上屏"。
+        "boardPaths": board_paths,
         "engine": struct["engine"],
         "degraded": payload["degraded"],
         "note": payload["note"],

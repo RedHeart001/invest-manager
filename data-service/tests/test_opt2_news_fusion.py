@@ -313,8 +313,12 @@ def test_no_bucket_use_and_payload_key() -> None:
                         "mergedPairs": [], "nearMiss": []},
         }
         pl.structure_topics = lambda items, **kw: {"topics": [{"title": "甲"}], "engine": "llm", "note": None}
+        # #44（CR9-72）之后 `run_pipeline` 解包三个值 ⇒ 桩 build_items 必须同形（少一个就是 ValueError，
+        # 而"生产有、测试无"正是 CR9-62 那条纪律要拦的形态）。
         pl.build_items = lambda topics, news, deadline=None: (
-            [{"title": "甲", "summary": "", "boardTags": [], "sourceUrls": [], "relatedCodes": []}], [])
+            [{"title": "甲", "summary": "", "boardTags": [], "sourceUrls": [], "relatedCodes": []}], [],
+            {"byCode": 0, "byName": 0, "requestsPerCodePath": 1, "requestsPerNamePath": 9,
+             "savedRequestsEstimate": 0, "emCodeRows": 0})
         pl.emit_ingest = lambda payload: (cap.update(payload), {"inserted": 0})[1]
         res = pl.run_pipeline(trigger="unit-test")
     finally:
@@ -718,8 +722,12 @@ def test_samples_reach_state_file_from_the_event_path() -> None:
         hs._state.update({"running": True, "runs": 0, "lastRun": None,
                           "lastResult": None, "catchUpResolved": None})
         pl.structure_topics = lambda items, **kw: {"topics": [{"title": "甲"}], "engine": "llm", "note": None}
+        # #44（CR9-72）之后 `run_pipeline` 解包三个值 ⇒ 桩 build_items 必须同形（少一个就是 ValueError，
+        # 而"生产有、测试无"正是 CR9-62 那条纪律要拦的形态）。
         pl.build_items = lambda topics, news, deadline=None: (
-            [{"title": "甲", "summary": "", "boardTags": [], "sourceUrls": [], "relatedCodes": []}], [])
+            [{"title": "甲", "summary": "", "boardTags": [], "sourceUrls": [], "relatedCodes": []}], [],
+            {"byCode": 0, "byName": 0, "requestsPerCodePath": 1, "requestsPerNamePath": 9,
+             "savedRequestsEstimate": 0, "emCodeRows": 0})
         pl.emit_ingest = lambda payload: (sent.update(payload), {"inserted": 1})[1]
         with with_key(""):
             res = hs._execute("unit-test-samples")
