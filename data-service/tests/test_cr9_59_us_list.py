@@ -270,13 +270,19 @@ def test_list_us_stocks_declaration() -> None:
 
 
 def test_list_us_stocks_paging() -> None:
-    p1 = ["NVDA"] + [f"A{i}" for i in range(PAGE_SIZE - 1)]
-    p4 = ["NVDA"] + [f"D{i}" for i in range(PAGE_SIZE - 1)]
+    # CR9-68（#40 丁）：两页的 NVDA 行**内容必须可区分**，否则"留前排那次"这条断言
+    # 只比了代码在不在，把去重改成"后来者覆盖"照样绿——活下来的其实是第 4 页那份而没人看过内容。
+    # 第 1 页那份＝真名单的形状；第 4 页那份故意换中文名与行业（`name` 取 `cname` 优先，
+    # `category` 进 `tags`，两处都是会被覆盖的字段）。
+    nvda_first = dict(NVDA, cname="英伟达公司")  # 与 NVDA 原样一致
+    nvda_last = dict(NVDA, cname="英伟达后排重复", category="消费电子", price="1.11")
+    p1 = [nvda_first] + [dict(NVDA, symbol=f"A{i}") for i in range(PAGE_SIZE - 1)]
+    p4 = [nvda_last] + [dict(NVDA, symbol=f"D{i}") for i in range(PAGE_SIZE - 1)]
     pages = {
-        1: page_of(p1),
+        1: jsonp20(p1, "p1"),
         2: page_of([f"B{i}" for i in range(PAGE_SIZE)]),
         3: page_of([f"C{i}" for i in range(PAGE_SIZE)]),
-        4: page_of(p4),
+        4: jsonp20(p4, "p4"),
     }
     rows, meta = listed(pages, 4)
     check("env=4 ⇒ 恰好 4 次请求", len(CALLS) == 4, str(len(CALLS)))
@@ -288,6 +294,10 @@ def test_list_us_stocks_paging() -> None:
     check("跨页重复代码去重（80 行里 NVDA 两次 ⇒ 79）", len(codes) == 79, str(len(codes)))
     check("去重后不出现重复主键", len(set(codes)) == len(codes))
     check("去重留前排那次（第 1 页优先，不被后面的页覆盖）", codes[0] == "NVDA", str(codes[:3]))
+    check("🔁 活下来的那份**内容**就是第 1 页的（名字与行业都取前排那次，后排那份没盖上来）",
+          rows[0]["name"] == "英伟达公司" and rows[0]["tags"] == ["半导体"], str(rows[0])[:200])
+    check("🔁 后排那份的内容在结果里一条都读不到（既不是两份都留，也不是字段级合并）",
+          not any("后排" in str(r) or "消费电子" in str(r) for r in rows), "后排那份出现在结果里")
     check("四页都满 ⇒ note 不提失败页数", "页失败" not in meta["note"], meta["note"][:160])
 
 
