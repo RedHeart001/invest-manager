@@ -145,6 +145,12 @@ class HkProvider(BaseProvider):
             raise ProviderError(f"hk quote has no price: {code}")
         return q
 
+    def touches_eastmoney(self, type_: str, codes: list[str]) -> bool:
+        """港股批量行情自己打 `HK_SPOT_HOSTS` 上的 `/api/qt/ulist.np/get`＝东财族
+        （下面 `get_quotes` 就是那次请求），所以这里恒 `True`（丙／CR9-67）。
+        与 A 股共用同一个 `eastmoney` 令牌桶正是批间隔必须按"真打东财"来睡的依据。"""
+        return bool(codes)
+
     def get_quotes(self, type_: str, codes: list[str]) -> dict[str, dict]:
         if type_ != "hk":
             raise ProviderNotSupported(f"hk provider serves hk only, got {type_}")

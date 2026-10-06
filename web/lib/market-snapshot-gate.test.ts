@@ -40,8 +40,16 @@ import { refreshAll, refreshSnapshot } from "./market-snapshot";
 function codes(n: number) {
   return Array.from({ length: n }, (_, i) => ({ code: String(600000 + i) }));
 }
+/** 丙／CR9-67 之后 `fetchQuotes` 回的是**批次信封**（`{quotes, usesEastmoney}`），不是裸 map。
+ *  这里给 `usesEastmoney: null`＝"这批问不出路由"，让下面 #23／CR9-61 那 15 条断言照旧走
+ *  回落判据（`EM_SNAPSHOT_TYPES`）——**语义一条都不动**；本文件的用例每个类型只有 1 个批次，
+ *  本来就睡不到批间隔，所以换形状不会改变任何一条断言的通过原因。
+ *  逐批限速本身的用例在 `market-snapshot-pacing.test.ts`。 */
 function quoteMap(rows: { code: string }[]) {
-  return Object.fromEntries(rows.map((r) => [r.code, { price: 10.5, changePct: 1.2 }]));
+  return {
+    quotes: Object.fromEntries(rows.map((r) => [r.code, { price: 10.5, changePct: 1.2 }])),
+    usesEastmoney: null,
+  };
 }
 
 describe("刷新腿的当日幂等闸门（#23）", () => {

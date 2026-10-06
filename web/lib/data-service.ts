@@ -109,20 +109,28 @@ export type Quote = {
   timestamp?: string | null;
 };
 
-/** 批量行情（一次外部请求），失败返回空对象由调用方降级 */
+/** 批量行情（一次外部请求），失败返回空对象由调用方降级。
+ *
+ * `usesEastmoney`（丙／CR9-67）＝ds 对它说"这一批按**主源**路由会不会打东财 `ulist.np`"，
+ * 刷新腿用它决定**这一批之后**要不要睡 5 秒。三态要说清：
+ *  - `true`／`false`＝ds 侧的新契约给了答案；
+ *  - `null`＝**不知道**（对着还没升级的 ds 跑、或这次请求超时／连不上被我们吞掉了）⇒
+ *    调用方必须按"不知道"处理，不许当成 `false`（回落见 `market-snapshot.shouldPaceBatch`）。
+ *    理由就在那条 CR9-9 的对照实验里：把限速关掉换来的是东财家族自己进 180s 熔断，
+ *    同族所有消费者（热点 pipeline、搜索富集、其它类型快照）一起连坐。 */
 export async function fetchQuotes(
   type: string,
   codes: string[],
-): Promise<Record<string, Quote>> {
-  if (codes.length === 0) return {};
+): Promise<{ quotes: Record<string, Quote>; usesEastmoney: boolean | null }> {
+  if (codes.length === 0) return { quotes: {}, usesEastmoney: null };
   try {
-    const data = await dsGet<{ quotes: Record<string, Quote> }>(
-      "/quotes",
-      { type, codes: codes.join(",") },
-      20_000,
-    );
-    return data.quotes ?? {};
+    const data = await dsGet<{
+      quotes?: Record<string, Quote>;
+      usesEastmoney?: boolean | null;
+    }>("/quotes", { type, codes: codes.join(",") }, 20_000);
+    const flag = typeof data.usesEastmoney === "boolean" ? data.usesEastmoney : null;
+    return { quotes: data.quotes ?? {}, usesEastmoney: flag };
   } catch {
-    return {};
+    return { quotes: {}, usesEastmoney: null };
   }
 }

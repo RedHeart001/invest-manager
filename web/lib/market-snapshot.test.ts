@@ -6,6 +6,7 @@ import {
   EM_BATCH_DELAY_MS,
   EM_SNAPSHOT_TYPES,
   buildSnapshotUpdate,
+  shouldPaceBatch,
 } from "./market-snapshot";
 
 describe("buildSnapshotUpdate（CR-09 ＋ 刀 1 的 snapshotAt）", () => {
@@ -84,5 +85,32 @@ describe("东财族批次限速（CR9-9）", () => {
 
   it("批间隔不低于源族桶自己的放行下限（min_interval 5s / rate_per_min 12）", () => {
     expect(EM_BATCH_DELAY_MS).toBeGreaterThanOrEqual(5000);
+  });
+});
+
+// CR9-67（丙，主人 2026-10-06 给字）：**睡不睡的判据从"这一类"改成"这一批"**。
+// 上面那张表（CR9-9 的实测结论）从这一刀起只剩一个用途＝**回落**，所以它的断言原样保留，
+// 新的一套住在下面。两枚钻子分别打在"标记被忽略"（回退成每类型判据）与"标记恒 False"上，
+// 清单见 `docs/FIX-LEDGER.md` 待拍板 #39 末段。
+describe("逐批限速判据 shouldPaceBatch（CR9-67／丙）", () => {
+  it("ds 说这批不打东财 ⇒ 不睡（fund 的场外净值批次＝10-06 实测每轮那 249 个白等的 5 秒）", () => {
+    expect(shouldPaceBatch("fund", false)).toBe(false);
+  });
+
+  it("🔁 ds 说这批要打 ⇒ 照旧睡满 5 秒（丙不许顺手把真碰东财的批次也放开）", () => {
+    expect(shouldPaceBatch("fund", true)).toBe(true);
+    expect(shouldPaceBatch("stock", true)).toBe(true);
+  });
+
+  it("问不出路由（老 ds 没这个键／那次取数没成功）⇒ 退回旧的每类型表：既不是一律睡也不是一律不睡", () => {
+    expect(shouldPaceBatch("fund", null)).toBe(true);
+    expect(shouldPaceBatch("stock", null)).toBe(true);
+    expect(shouldPaceBatch("crypto", null)).toBe(false);
+    expect(shouldPaceBatch("us", null)).toBe(false);
+  });
+
+  it("🔁 标记优先于类型名：stock 被告知不打东财也不睡、crypto 被告知要打就睡（判据只有一套真值）", () => {
+    expect(shouldPaceBatch("stock", false)).toBe(false);
+    expect(shouldPaceBatch("crypto", true)).toBe(true);
   });
 });

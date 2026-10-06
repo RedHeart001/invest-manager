@@ -146,7 +146,17 @@ def quotes(
         data = _chain_call(type, lambda p: {"quotes": p.get_quotes(type, code_list)})
     except ProviderError as e:
         raise HTTPException(status_code=502, detail=str(e))
-    return {"type": type, "quotes": data.get("quotes", {}), "note": data.get("note")}
+    # 丙／CR9-67：把"这一批要不要按东财族节奏走"交给调用方，是为了让刷新腿只给**真打东财**
+    # 的批次睡 5 秒（10-06 实测 fund 的 281 批里只有 31 批含场内代码，其余 249 批的 5 秒
+    # 保护的是一个 30 分钟缓存、且不占东财桶的场外净值路径）。按**主源**路由算＝与本轮实际
+    # 降级到哪家无关：令牌是向主源那条通道要的，而批间隔保护的是**桶**不是结果。
+    em_batch = get_provider_chain(type)[0].touches_eastmoney(type, code_list)
+    return {
+        "type": type,
+        "quotes": data.get("quotes", {}),
+        "note": data.get("note"),
+        "usesEastmoney": em_batch,
+    }
 
 
 # ---------- R13 新增：双源交叉验证（G3 / 批次 D） ----------

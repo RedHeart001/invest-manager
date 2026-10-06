@@ -6,7 +6,8 @@
 //   各的预算，理由与数字见 `app/sync_scheduler.py`）；手动触发是同一条路径
 // - 展示层仍以实时富集为准（P1 管线），快照只用于排序
 // - 限流友好：东财族批次间隔与源族桶放行速率同值（`EM_BATCH_DELAY_MS`，CR9-9）；
-//   任一批次失败不中断整体（R10），返回失败计数
+//   丙／CR9-67 之后按**这一批是不是真打东财**决定睡不睡（ds 在 `/quotes` 里回 `usesEastmoney`），
+//   不再按类型名整类一律睡；任一批次失败不中断整体（R10），返回失败计数
 
 import { fetchQuotes } from "./data-service";
 import { snapshotRefreshedToday } from "./freshness";
@@ -16,13 +17,30 @@ import { beijingStamp } from "./time";
 
 const BATCH = 100;
 
-/** 会打东财 ulist 批量通道的类型（CR9-9，2026-09-27 按源实测，不再靠猜）：
+/** **回落表**（丙／CR9-67 之后它只剩这一个用途）：正常轮次的限速判据住在 ds——
+ *  `/quotes` 的 `usesEastmoney` 说的是"**这一批**打不打东财"，而不是"这一类属不属于东财族"。
+ *  为什么还得留着它：读不到答案时（老 ds／请求超时／连不上）必须有个默认值，而那个默认值
+ *  只能往"照旧限速"偏，见 `shouldPaceBatch`。表本身仍是 CR9-9（2026-09-27 按源实测）的结论：
  *  - stock / bond / **fund** → `akshare_provider._em_ulist`；fund 只有**场内**部分打东财
- *    （实测 27954 只里 2821 只场内，落在 280 批中的 30 批），场外走 30 分钟缓存的全市场净值表单请求
+ *    （**10-06 10:2x 直读 dev.db 实测**＝28,013 只里 2,829 只场内，落在 281 批中的 **31** 批
+ *    ⇒ 其余 249 批那 1,245 秒保护的不是东财桶，是 `akshare-obs` 那条**只观测不限流**、
+ *    还带 30 分钟全市场缓存的场外净值路径——这就是丙的依据）
  *  - **hk** → `hk_provider.get_quotes`，与 A 股共用**同一个** eastmoney 源族令牌桶
  *  - crypto → CoinGecko（不属东财族）；us 不在刷新类型内 ⇒ 两者都不需要限速
  */
 export const EM_SNAPSHOT_TYPES = new Set(["stock", "fund", "bond", "hk"]);
+
+/** 这一批之后要不要睡 5 秒（丙／CR9-67 的判据，纯函数＝便于把三态都钉成断言）。
+ *
+ * `marker` 三态：`true`＝ds 说这批按主源路由会打东财 ulist；`false`＝不会（fund 里全是
+ * 场外净值那一类）；`null`＝**问不出来**（老 ds 没这个键／这次取数压根没成功）。
+ * `null` 落回 `EM_SNAPSHOT_TYPES` 那张**保守**的旧表，不落回"不限速"：CR9-9 的对照实验
+ * 实测过 1.5s 节奏下第 14 批就能让东财报 all-hosts 失败并**连坐熔断 180s**，而同族消费者
+ * 是热点 pipeline、搜索富集和其它类型的快照——一起陪葬。少睡一次代价太大，多睡一次只是慢。
+ */
+export function shouldPaceBatch(type: string, marker: boolean | null): boolean {
+  return marker ?? EM_SNAPSHOT_TYPES.has(type);
+}
 
 /** 东财族批间隔（CR9-9）：**与源族桶自己的放行速率同值**，不是随手调的礼貌性节流。
  *
@@ -63,6 +81,12 @@ export type SnapshotResult = {
    *  但完成账本里没有它）。标出来是为了让 ds 的 `results` 与页面上都能看出这一轮不是常规轮；
    *  续跑粒度＝整类重跑，不是批次游标。 */
   resumed?: boolean;
+  /** 丙／CR9-67 的读数：本轮跑了几个批次。没有它，"这一类到底睡了几批"只能拿
+   *  `tookMs` 反推——而 `tookMs` 里混着取数耗时与写库耗时，反推不出限速这件事。 */
+  batches?: number;
+  /** 本轮**实际睡了** 5 秒的批次数（＝批间隔的全部代价，`× EM_BATCH_DELAY_MS` 就是秒数）。
+   *  被 #23 挡下的轮次记 0：那一批一次都没发，说 0 比留空更准。 */
+  pacedBatches?: number;
 };
 
 function sleep(ms: number): Promise<void> {
@@ -201,6 +225,8 @@ function skipResult(type: string, doneAt: Date, skippedReason: string): Snapshot
     updated: 0,
     failedBatches: 0,
     tookMs: 0,
+    batches: 0,
+    pacedBatches: 0,
     snapshotAt: doneAt.toISOString(),
     skipped: true,
     skippedReason,
@@ -225,16 +251,27 @@ async function refreshSnapshotInner(type: string): Promise<SnapshotResult> {
       updated: 0,
       failedBatches: 0,
       tookMs: Date.now() - started,
+      batches: 0,
+      pacedBatches: 0,
       snapshotAt: null,
     };
   }
 
   let updated = 0;
   let failedBatches = 0;
+  let batches = 0;
+  let pacedBatches = 0;
   for (let i = 0; i < total; i += BATCH) {
     const codes = products.slice(i, i + BATCH).map((p) => p.code);
+    // 丙／CR9-67：这一批之后睡不睡，问的是**这一批打不打东财**（ds 在 `/quotes` 里给
+    // `usesEastmoney`），不再问"这一类属不属于东财族"。声明在 try 外面＝即使这批取数
+    // 整个失败（标记读不出来），限速也要按保守的那一支走，而不是跟着一起"跳过限速"。
+    let usesEastmoney: boolean | null = null;
+    batches += 1;
     try {
-      const quotes = await fetchQuotes(type, codes);
+      const got = await fetchQuotes(type, codes);
+      usesEastmoney = got.usesEastmoney;
+      const quotes = got.quotes;
       const rows = codes
         .map((code) => {
           const q = quotes[code];
@@ -257,8 +294,9 @@ async function refreshSnapshotInner(type: string): Promise<SnapshotResult> {
     } catch {
       failedBatches += 1;
     }
-    if (EM_SNAPSHOT_TYPES.has(type) && i + BATCH < total) {
+    if (shouldPaceBatch(type, usesEastmoney) && i + BATCH < total) {
       await sleep(EM_BATCH_DELAY_MS);
+      pacedBatches += 1;
     }
   }
   return {
@@ -268,6 +306,8 @@ async function refreshSnapshotInner(type: string): Promise<SnapshotResult> {
     failedBatches,
     tookMs: Date.now() - started,
     snapshotAt: updated > 0 ? snapshotAt.toISOString() : null,
+    batches,
+    pacedBatches,
   };
 }
 

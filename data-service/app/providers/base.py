@@ -41,6 +41,15 @@ class BaseProvider(ABC):
         """批量实时行情（供搜索结果价格富集）。返回 {code: quote}。"""
         raise ProviderNotSupported(f"{self.source} does not support get_quotes")
 
+    def touches_eastmoney(self, type_: str, codes: list[str]) -> bool:
+        """这一批代码按**本 provider 的路由**会不会打东财 ulist 通道（丙／CR9-67）。
+
+        默认 `False`：腾讯／新浪／新浪转债／yfinance／CoinGecko 都不走东财。
+        为什么由 provider 自己说而不是让调用方按类型名猜——判据（哪些代码走哪条通道）
+        本来就住在 `get_quotes` 里，两张表分开放迟早各说各话。
+        """
+        return False
+
 
 _QUOTE_REGISTRY: dict[str, BaseProvider] = {}
 _LIST_REGISTRY: dict[str, BaseProvider] = {}

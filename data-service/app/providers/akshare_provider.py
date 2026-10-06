@@ -387,6 +387,20 @@ class AkshareProvider(BaseProvider):
             "source": self.source,
         }
 
+    def touches_eastmoney(self, type_: str, codes: list[str]) -> bool:
+        """丙／CR9-67：这一批里有没有要走东财 `ulist.np` 的（`get_quotes` 的同一把尺）。
+
+        与下面 `get_quotes` 的分派住在**同一个类**＝刻意不让 web 再自己维护一张
+        "按类型名猜哪些打东财"的表（那是第二套真值，前缀规则一改就各说各话）。
+        场外净值那条走 `_fund_nav_table`（30 分钟全市场缓存、按 CR9-54 挂在**只观测不限流**
+        的 `akshare-obs` 上）⇒ 一批全是场外时答案是 `False`，web 不该为它睡 5 秒。
+        """
+        if not codes:
+            return False
+        if type_ == "fund":
+            return any(_is_exchange_traded_fund(c) for c in codes)
+        return True  # 本 provider 的 get_quotes：除 fund 之外一律 `_em_ulist`
+
     def get_quotes(self, type_: str, codes: list[str]) -> dict[str, dict]:
         if not codes:
             return {}

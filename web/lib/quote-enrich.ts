@@ -30,7 +30,7 @@ export async function fetchQuotesByType(
   const quoteMap = new Map<string, QuoteLike>();
   await Promise.all(
     Array.from(byType.entries()).map(async ([type, codes]) => {
-      const quotes = await fetchQuotes(type, codes);
+      const { quotes } = await fetchQuotes(type, codes);
       for (const [code, quote] of Object.entries(quotes)) {
         quoteMap.set(`${type}:${code}`, quote as QuoteLike);
       }
