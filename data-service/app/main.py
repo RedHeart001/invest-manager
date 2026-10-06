@@ -88,7 +88,7 @@ async def health():
     # （② 落地后本端点更是双保险：并发等待已被 `MAX_INFLIGHT_WATCHDOGS` 钉住，
     #   取数线程"占满 40"这条路本身就不成立了。）
     from .utils.timeout import MAX_INFLIGHT_WATCHDOGS, abandoned_count, inflight_count
-    from .utils.limiter import snapshot_all
+    from .utils.limiter import durable_today, snapshot_all
 
     return {
         "status": "ok",
@@ -115,6 +115,10 @@ async def health():
         # 东财桶"那几处补限流，前提是先有次数可看。`akshare-obs` 族刻意只 observe 不 acquire
         # ⇒ 这一位是纯观测，不会把任何一条取数路径改成"到限就拒"。
         "limiters": snapshot_all(),
+        # #41 甲（CR9-69，主人 10-06 的字＝"走甲"）：上面那一位是**进程内**的，重启即归零
+        # （历次读数 11→10→47→2 非单调），所以 #27 第二步"拿一周计数定数值"取不到数。
+        # 这一位读的是**落盘那份＋本进程未落盘的增量**＝"这一天到底出网多少次"，跨重启可读。
+        "limitersDurable": durable_today(),
     }
 
 

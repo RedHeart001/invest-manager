@@ -9,13 +9,27 @@
 - acquire() 阻塞排队等待，超时返回 False（调用方应转向备源，不硬等）
 - 熔断：连续失败 ≥failure_threshold → 冷却 cooldown_base 秒（指数递增至上限）
 - 线程安全：FastAPI 同步端点在线程池执行，用 RLock 保护状态
+
+**#41 甲（CR9-69）新增的一条前提**（主人 10-06 的字＝「走甲」）＝计数**落盘**。此前的计数住在
+`FamilyLimiter` 的实例字段里、族实例住在模块作用域 ⇒ 每次重启归零，历次 `/health` 读数
+`11→10→47→2` 非单调就是这个形状（10-06 18:2x 实测），而 #27 第二步的立项依据原文是
+"拿一周真实计数定数值"——不落地就永远攒不出"一周"，那条决定只能一直悬着。
+落法照 `backups/state.json`／`hotspot-state.json` 那一族：**按北京日分桶**、先 `.tmp` 再
+`os.replace`、写不进只 `log.warning`（观测不得拖垮主功能，CR9-45）、留存 30 天。
 """
 
 from __future__ import annotations
 
+import json
+import logging
+import os
 import threading
 import time
 from collections import deque
+
+from .timeutil import beijing_today
+
+log = logging.getLogger(__name__)
 
 
 class FamilyLimiter:
@@ -48,6 +62,11 @@ class FamilyLimiter:
         self._granted = 0
         self._denied = 0
         self._seen: dict[str, int] = {}
+        # #41 甲：落盘游标——`_flushed_*` 是"已经进过那一天桶里"的部分，差值才是待写的增量。
+        # 用差值而不是覆盖，重启后本进程从 0 累计的那半才会**加**进那一天的桶，不会抹掉它。
+        self._flushed_granted = 0
+        self._flushed_denied = 0
+        self._flushed_seen: dict[str, int] = {}
 
     # ---------- 查询状态 ----------
 
@@ -83,11 +102,48 @@ class FamilyLimiter:
         """
         with self._lock:
             self._seen[name] = self._seen.get(name, 0) + 1
+        _maybe_dump()  # 锁外落盘（锁内做文件 I/O 会把磁盘时间算进桶的等待）
+
+    # ---------- #41 甲：落盘用的两个读数 ----------
+
+    def _delta_locked(self) -> dict:
+        return {
+            "granted": self._granted - self._flushed_granted,
+            "denied": self._denied - self._flushed_denied,
+            "seen": {
+                k: v - self._flushed_seen.get(k, 0)
+                for k, v in self._seen.items()
+                if v - self._flushed_seen.get(k, 0) > 0
+            },
+        }
+
+    def outstanding(self) -> dict:
+        """本进程**还没进盘**的那半（不推进游标）⇒ `/health` 的读数不会读少。"""
+        with self._lock:
+            return self._delta_locked()
+
+    def take_delta(self) -> dict:
+        """取增量**并**推进游标（只有 `flush()` 走这条路，重复调用不会重复计数）。"""
+        with self._lock:
+            d = self._delta_locked()
+            self._flushed_granted = self._granted
+            self._flushed_denied = self._denied
+            self._flushed_seen = dict(self._seen)
+            return d
 
     # ---------- 取额度 ----------
 
     def acquire(self, timeout: float = 20.0) -> bool:
-        """等待额度。冷却中或等待超时返回 False（调用方转备源）。"""
+        """等待额度。冷却中或等待超时返回 False（调用方转备源）。
+
+        #41 甲：取额度这件事本身顺带落一次盘（节流在 `_maybe_dump` 里，锁外）。
+        """
+        try:
+            return self._acquire(timeout)
+        finally:
+            _maybe_dump()
+
+    def _acquire(self, timeout: float = 20.0) -> bool:
         deadline = time.monotonic() + timeout
         while True:
             with self._lock:
@@ -142,6 +198,169 @@ _REGISTRY_LOCK = threading.Lock()
 
 # #27：`state()["seen"]` 只带最高的几项（观测位不是台账，一条 curl 要能读完）
 _SEEN_TOP = 10
+
+# ---------- #41 甲（CR9-69）：把计数落盘 ----------
+#
+# 为什么要这一份文件（不是"顺手加个持久化"）：桶与计数都是**模块作用域对象**，重启即归零 ⇒
+# 历次 `/health` 读数 `11→10→47→2` 非单调（10-06 18:2x 实测）。而 #27 第二步（真给桶外那五处
+# 补限流）的立项依据原文是"**拿一周真实计数定数值**"——不落盘，"一周"在结构上永远取不到。
+#
+# 落地的几处口径，写在这里因为它们是**决定**不是实现细节（要改等主人的字）：
+# - **按北京日分桶**，不做"自某起点累计"：#27 要问的本来就是"这条路每天出多少次网"，
+#   分桶直接给这个数；累计则需要第二个清零出口，否则限流值会被上一次故障期的高拒绝率长期拖住。
+# - **留存 30 天**（`KEEP_DAYS`）＝与 `backup_scheduler` 那份同一口径，不新造一个数。
+# - **观测不得拖垮主功能**（CR9-45 同族）：写不进只 `log.warning`；落盘只发生在族锁**外**
+#   （`acquire`/`observe` 的收尾那一步），文件 I/O 的时间绝不会算进桶的等待里。
+# - **增量而非覆盖**：`take_delta()` 推进游标，所以重启后本进程从 0 累计的那半是**加**进
+#   那一天的桶，不会把上一个进程记的抹掉——这条才是本刀的存在理由。
+STATE_NAME = "limiter-state.json"
+KEEP_DAYS = 30
+FLUSH_MIN_INTERVAL_S = 60.0  # 落盘节流：这是"事后读得出"的观测位，不是每秒都要新的表
+
+_flush_lock = threading.Lock()
+_last_flush = 0.0
+_flush_failures = 0  # 只累加，给 /health 读"这份文件到底写没写成"
+
+
+def state_path() -> str:
+    """落点默认 `data-service/runtime/limiter-state.json`（该目录已在 `.gitignore`）。
+
+    `LIMITER_STATE_FILE` 整条覆盖——离线单测靠它指向临时目录，不许把仓库目录当测试产物落点。
+    """
+    env = os.environ.get("LIMITER_STATE_FILE", "")
+    if env:
+        return env
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    return os.path.join(root, "runtime", STATE_NAME)
+
+
+def read_state() -> dict | None:
+    """读回盘上那份；缺失／半截／形状不对一律当"没有"，**不抛**（健康检查不许因此 500）。"""
+    try:
+        with open(state_path(), encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("days"), dict):
+        return None
+    return data
+
+
+def _num(v: object) -> int:
+    """盘上那份可能被人手改过（或是旧形状）：非整数一律当 0，绝不让 `/health` 因此 500。"""
+    try:
+        return int(v)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0
+
+
+def _bump(bucket: dict, delta: dict) -> None:
+    """把一份增量并进那一天的某族桶里。"""
+    bucket["granted"] = _num(bucket.get("granted")) + _num(delta.get("granted"))
+    bucket["denied"] = _num(bucket.get("denied")) + _num(delta.get("denied"))
+    raw_seen = bucket.get("seen")
+    seen = raw_seen if isinstance(raw_seen, dict) else {}
+    for name, n in (delta.get("seen") or {}).items():
+        seen[name] = _num(seen.get(name)) + _num(n)
+    bucket["seen"] = seen
+    bucket["seenTotal"] = sum(_num(v) for v in seen.values())
+
+
+def flush(force: bool = True) -> bool:
+    """把每个族未落盘的增量并进今天那份，然后原子写盘。写不进只 warning、返回 False。
+
+    `force=False` 时按 `FLUSH_MIN_INTERVAL_S` 节流——事件路径上走的都是这一支。
+    **没有增量就一律不碰文件**：否则 mtime 会谎称"这个进程写过盘"。
+    """
+    global _last_flush, _flush_failures
+    if not force and time.monotonic() - _last_flush < FLUSH_MIN_INTERVAL_S:
+        return False
+    with _REGISTRY_LOCK:
+        limits = list(_LIMITERS.values())
+    deltas = {}
+    for lim in limits:
+        d = lim.take_delta()
+        if d["granted"] or d["denied"] or d["seen"]:
+            deltas[lim.name] = d
+    if not deltas:
+        return False
+    tmp = ""
+    with _flush_lock:
+        _last_flush = time.monotonic()
+        path = state_path()
+        data = read_state() or {"days": {}}
+        day = beijing_today()
+        bucket = data["days"].setdefault(day, {})
+        for name, d in deltas.items():
+            _bump(bucket.setdefault(name, {"granted": 0, "denied": 0, "seenTotal": 0, "seen": {}}), d)
+        # 轮换：只按日期字符串留最近 KEEP_DAYS 天（ISO 日期字典序＝时间序，不用解析）
+        for old in sorted(data["days"].keys())[:-KEEP_DAYS]:
+            data["days"].pop(old, None)
+        data["day"] = day
+        data["keptDays"] = len(data["days"])
+        tmp = path + ".tmp"
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, sort_keys=True)
+            os.replace(tmp, path)
+            return True
+        except (OSError, TypeError, ValueError) as e:
+            _flush_failures += 1
+            log.warning("limiter state could not be written: %s", e)
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            return False
+
+
+def _maybe_dump() -> None:
+    """事件路径上的节流落盘（`acquire`/`observe` 的锁外那一步）。任何意外都不许改变取额度的结果。"""
+    try:
+        flush(force=False)
+    except Exception as e:  # noqa: BLE001 观测面：CR9-45 那条口径在这里同样成立
+        log.warning("limiter dump failed: %s", e)
+
+
+def durable_today() -> dict:
+    """`/health` 的 `limitersDurable`：**跨重启**的今日累计（#27 第二步要的那个数）。
+
+    与 `limiters` 的分工要说清：那一位读的是"这个进程此刻的桶"（冷却、连续失败只有当下有意
+    义），这一位读的是"这一天累计了多少次"（只有落盘才读得到）。
+
+    读数形状＝**盘上那份 ＋ 本进程还没落盘的增量**（在内存里并一份，不为了读而写盘）——
+    只回落到盘上会把最近这 ≤60 秒的数读少，而 #27 要的恰恰是"到底多少次"。
+    `fromDisk` ＝ 本进程对这些数一点都没贡献（全新进程、盘上有货），与 #29／#34 那两枚同族口径。
+    """
+    data = read_state() or {"days": {}}
+    day = beijing_today()
+    stored = (data.get("days") or {}).get(day) or {}
+    families: dict[str, dict] = {}
+    for name, v in stored.items():
+        if isinstance(v, dict):
+            raw_seen = v.get("seen")
+            families[name] = {
+                "granted": _num(v.get("granted")),
+                "denied": _num(v.get("denied")),
+                "seenTotal": _num(v.get("seenTotal")),
+                "seen": dict(raw_seen) if isinstance(raw_seen, dict) else {},
+            }
+    with _REGISTRY_LOCK:
+        limits = list(_LIMITERS.values())
+    pending = 0
+    for lim in limits:
+        d = lim.outstanding()
+        if d["granted"] or d["denied"] or d["seen"]:
+            pending += 1
+            _bump(families.setdefault(lim.name, {"granted": 0, "denied": 0, "seenTotal": 0, "seen": {}}), d)
+    return {
+        "day": day,
+        "families": families,
+        "fromDisk": pending == 0 and bool(families),
+        "keptDays": len((data.get("days") or {})),
+        "flushFailures": _flush_failures,
+    }
 
 # CR9-18（2026-09-27）：桶参数**只有一个来源**。
 # 旧实现 `get_limiter(name, **kwargs)` 是"首调用获胜"——同名族的 kwargs 只在创建那一刻

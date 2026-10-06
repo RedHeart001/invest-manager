@@ -335,6 +335,225 @@ def test_products_endpoint_passthrough_meta() -> None:
         m.list_products_with_meta = orig  # type: ignore[assignment]
 
 
+# ---------- #41 甲（CR9-69）：计数落盘 ----------
+
+
+def test_limiter_counters_survive_a_restart() -> None:
+    """源族计数从此**跨重启**可读（主人 10-06 的字＝「#41 走甲」）。
+
+    为什么这一组必须存在（待拍板 #41 的实体）：`FamilyLimiter` 的 `_granted/_denied/_seen`
+    住在实例字段里、族实例住在模块作用域 ⇒ 每次重启归零，10-06 实测字面 `seenTotal=2`
+    而历次读数 `11→10→47→2` 非单调。#27 第二步（真给桶外那五处补限流）的立项依据原文是
+    "拿一周真实计数定数值"——不落盘，"一周"永远攒不出来，那条决定会一直悬着。
+
+    落法照 `backups/state.json`／`hotspot-state.json` 那一族：按北京日分桶、先 `.tmp` 再
+    `os.replace`、写不进只 `log.warning`、留存 30 天。**测的是三件独立的事**：
+    ① 数进得去（且观测族不虚增额度）；② 重启是**相加**而不是覆盖（这条才是本刀的存在理由）；
+    ③ 观测不得拖垮取额度（CR9-45 同族）。
+
+    零出网、零碰仓库目录：`LIMITER_STATE_FILE` 指到系统临时目录，临时族名用
+    `cr9-69-tmp*`，`finally` 里从注册表摘掉——不许把测试产物留在别人的读数面上。
+    """
+    import json
+    import shutil
+    import tempfile
+    from datetime import date, timedelta
+
+    import app.utils.limiter as lim
+
+    tmpdir = tempfile.mkdtemp()
+    path = os.path.join(tmpdir, "limiter-state.json")
+    prev_env = os.environ.get("LIMITER_STATE_FILE")
+    os.environ["LIMITER_STATE_FILE"] = path
+    FAMILY = "cr9-69-tmp"
+    GHOST = "cr9-69-ghost"  # 只存在于盘上、本进程没有实例的那一族
+    today = lim.beijing_today()
+
+    def fresh(name: str) -> lim.FamilyLimiter:
+        """换一个新实例顶掉注册表里那一族＝离线模拟"重启后从 0 开始数"。"""
+        inst = lim.FamilyLimiter(name, failure_threshold=10**9)
+        with lim._REGISTRY_LOCK:
+            lim._LIMITERS[name] = inst
+        return inst
+
+    def bucket() -> dict:
+        return ((lim.read_state() or {}).get("days") or {}).get(today, {}).get(FAMILY, {})
+
+    try:
+        # ① 一条观测进得去，且观测族不虚增额度
+        a = fresh(FAMILY)
+        a.observe("ak.foo")
+        wrote = lim.flush(force=True)
+        check("CR9-69：一条 observe 落进「今天」那一格，而 granted/denied 恒 0（观测族不虚增额度）",
+              wrote is True and bucket().get("seenTotal") == 1
+              and bucket().get("granted") == 0 and bucket().get("denied") == 0,
+              str(lim.read_state())[:220])
+
+        # ①b 游标推进：没有新增就别再写
+        snapshot = json.dumps(lim.read_state(), sort_keys=True, ensure_ascii=False)
+        again = lim.flush(force=True)
+        check("CR9-69🔁：同一批增量不会被并两次（第二次 flush 返回 False 且盘上那份一字未变）",
+              again is False and json.dumps(lim.read_state(), sort_keys=True, ensure_ascii=False) == snapshot,
+              str(bucket())[:180])
+
+        # ①c 取额度那条路同样落盘
+        a.acquire(timeout=0.5)
+        lim.flush(force=True)
+        check("CR9-69：acquire 的 granted 同样进账（不是只有观测族被持久化）",
+              bucket().get("granted") == 1, str(bucket())[:180])
+
+        # ② 重启＝相加，不是覆盖（本刀的存在理由）
+        b = fresh(FAMILY)
+        b.observe("ak.bar")
+        lim.flush(force=True)
+        after_restart = bucket()
+        check("CR9-69🔁：换新实例（重启近似）之后，「今天」那份是**相加**不是覆盖："
+              "seenTotal=2、granted 仍是上一进程那 1",
+              after_restart.get("seenTotal") == 2 and after_restart.get("granted") == 1
+              and set(after_restart.get("seen", {})) == {"ak.foo", "ak.bar"},
+              str(after_restart)[:220])
+
+        # ②b 读数面＝盘上那份 ＋ 本进程未落盘的那半（只回落盘上会读少）
+        b.observe("ak.baz")
+        view = lim.durable_today()
+        check("CR9-69：`durable_today()` 把未落盘的增量也并进读数（读「今天多少次」不能读少）",
+              view["families"][FAMILY]["seenTotal"] == 3 and view["fromDisk"] is False,
+              str(view)[:220])
+        lim.flush(force=True)
+        view2 = lim.durable_today()
+        check("CR9-69🔁：落盘之后同一位数不变，而 `fromDisk` 翻成 True（这些数不再由本进程贡献）",
+              view2["families"][FAMILY]["seenTotal"] == 3 and view2["fromDisk"] is True,
+              str(view2)[:220])
+
+        # ②c 留存上限 30 天
+        origin = date.fromisoformat(today)
+        stale = {
+            (origin - timedelta(days=n)).isoformat(): {GHOST: {"granted": 1, "denied": 0, "seenTotal": 0, "seen": {}}}
+            for n in range(1, 36)
+        }
+        stale[today] = {GHOST: {"granted": 0, "denied": 0, "seenTotal": 0, "seen": {}}}
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"day": today, "days": stale}, f, ensure_ascii=False)
+        b.observe("ak.qux")
+        lim.flush(force=True)
+        kept = sorted(((lim.read_state() or {}).get("days") or {}).keys())
+        check("CR9-69🔁：只留最近 30 天（与备份那条同一口径），最旧那几天被轮换掉而今天还在",
+              len(kept) == 30 and today in kept and "2026-09-01" not in kept, str(kept)[:220])
+
+        # ③ 观测不得拖垮取额度（CR9-45 同族）：写不进只 warning
+        blocker = os.path.join(tmpdir, "blocker")
+        with open(blocker, "w", encoding="utf-8") as f:
+            f.write("占位：blocker 是个文件，它下面的目录建不出来")
+        os.environ["LIMITER_STATE_FILE"] = os.path.join(blocker, "sub", "limiter-state.json")
+        b.observe("ak.while-unwritable")
+        acquired = b.acquire(timeout=0.5)
+        failed_flush = lim.flush(force=True)
+        check("CR9-69🔁：写不进 ⇒ flush 返回 False、`flushFailures` 递增，而 acquire/observe 的行为一个字没变",
+              failed_flush is False and acquired is True
+              and lim.durable_today()["flushFailures"] >= 1,
+              f"flush={failed_flush} acquired={acquired}")
+
+        # ③b 没有增量时连文件都不创建（不冒充"这个进程写过盘"）
+        os.environ["LIMITER_STATE_FILE"] = path
+        lim.flush(force=True)  # 先把上面那次没写成的增量并掉
+        # 删文件这一步要容错：如果落盘本身是坏的（＝钻 #41 那种回退），文件根本不存在，
+        # 那时必须让下面的断言给出精确红，而不是让套件崩在 FileNotFoundError 上（C34 演练口径）
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
+        check("CR9-69🔁：一条都没新增 ⇒ 返回 False 且**不把文件创建出来**（mtime 不许说谎）",
+              lim.flush(force=True) is False and not os.path.exists(path), "写了文件")
+
+        # ④ 坏文件一律当"没有"，非数值当 0（健康检查不 500）
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("{ 半截的 JSON")
+        check("CR9-69：半截 JSON ⇒ read_state 给 None、durable_today 不抛（观测位不能让 /health 500）",
+              lim.read_state() is None and isinstance(lim.durable_today(), dict), "corrupt")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"day": today, "days": {today: {GHOST: {
+                "granted": "abc", "denied": None, "seenTotal": [], "seen": "坏形状"}}}}, f)
+        ghost = lim.durable_today()["families"].get(GHOST, {})
+        check("CR9-69🔁：盘上被手改过的非数值一律读成 0（不是把「abc」原样交给 curl 那一侧的读者）",
+              ghost.get("granted") == 0 and ghost.get("denied") == 0
+              and ghost.get("seenTotal") == 0 and ghost.get("seen") == {}, str(ghost)[:180])
+    finally:
+        with lim._REGISTRY_LOCK:
+            for name in (FAMILY, GHOST):
+                lim._LIMITERS.pop(name, None)
+        if prev_env is None:
+            os.environ.pop("LIMITER_STATE_FILE", None)
+        else:
+            os.environ["LIMITER_STATE_FILE"] = prev_env
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+# ---------- #41 甲（CR9-69）的接线：落盘是不是**事件自己**触发的 ----------
+
+
+def test_limiter_dumps_from_the_event_path() -> None:
+    """#40 那把尺第一次量到**我自己新写的刀**（10-06 19:4x 钻 #41 时抓到）。
+
+    上面那一组 11 条**从头到尾都在手调 `lim.flush(force=True)`**——它证明的是"`flush()` 写得对"，
+    证明不了"`observe()`/`acquire()` 会去叫它"。实测：把 `_maybe_dump()` 整行摘掉，
+    那 123/123 **一条不红**，与 #40 (a)(b) 完全同形（生产那一步没人从调用点读）。
+
+    这一组只走事件路径：`observe()`／`acquire()` 之后**一次都不碰 flush**，看盘上有没有东西。
+    节流常数在这里是**被测试自己设定**的输入（设完恢复），不是被断言读的那个数——
+    与"演练不许改用例当输入读的常数"同族，区别在于这里改它是为了让"接线"单独可见，
+    而断言读的是**文件内容**。
+    """
+    import shutil
+    import tempfile
+
+    import app.utils.limiter as lim
+
+    tmpdir = tempfile.mkdtemp()
+    path = os.path.join(tmpdir, "wiring.json")
+    prev_env = os.environ.get("LIMITER_STATE_FILE")
+    prev_interval = lim.FLUSH_MIN_INTERVAL_S
+    os.environ["LIMITER_STATE_FILE"] = path
+    FAMILY = "cr9-69-wiring"
+    today = lim.beijing_today()
+
+    def fam() -> dict:
+        return ((lim.read_state() or {}).get("days") or {}).get(today, {}).get(FAMILY, {})
+
+    try:
+        lim.FLUSH_MIN_INTERVAL_S = 0.0  # 把节流放到最松，好让"有没有接线"单独可见
+        inst = lim.FamilyLimiter(FAMILY, failure_threshold=10**9)
+        with lim._REGISTRY_LOCK:
+            lim._LIMITERS[FAMILY] = inst
+
+        inst.observe("ak.from-observe")
+        check("CR9-69：`observe()` 自己就把数落盘（这一条**没有**调 flush）",
+              fam().get("seenTotal") == 1, str(lim.read_state())[:200])
+        inst.acquire(timeout=0.5)
+        check("CR9-69：`acquire()` 同样自己落盘——没有这条接线，「一周计数」永远攒不起来",
+              fam().get("granted", 0) >= 1, str(fam())[:200])
+
+        # 🔁 接线 ≠ 每出一条都动文件：把间隔抬回去 ⇒ 这一条留在内存里，等下一次 flush
+        lim.FLUSH_MIN_INTERVAL_S = 10**6
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass  # 落盘坏的那一档，让下面两条断言去红，别让套件崩在这里
+        inst.observe("ak.throttled")
+        check("CR9-69🔁：节流档下事件不再动文件（「最多一分钟写一次」这句话的可判别形式）",
+              not os.path.exists(path), "节流档下仍然写了盘")
+        check("CR9-69：内存那份 `state()` 与盘上那份是两件事——内存永远即时（观测不改变行为）",
+              inst.state()["seenTotal"] == 2 and not os.path.exists(path), str(inst.state())[:160])
+    finally:
+        lim.FLUSH_MIN_INTERVAL_S = prev_interval
+        with lim._REGISTRY_LOCK:
+            lim._LIMITERS.pop(FAMILY, None)
+        if prev_env is None:
+            os.environ.pop("LIMITER_STATE_FILE", None)
+        else:
+            os.environ["LIMITER_STATE_FILE"] = prev_env
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 # ---------- A 股名单名字清洗（#25 乙口径②） ----------
 
 
@@ -1033,27 +1252,45 @@ def test_fund_holdings_missing_column_and_beijing_dates() -> None:
 
 
 if __name__ == "__main__":
-    test_limiter()
-    test_limiter_profile_single_source()
-    test_akshare_out_of_bucket_observation()
-    test_list_products_meta()
-    test_products_endpoint_passthrough_meta()
-    test_stock_name_status_prefix()
-    test_stock_list_backup_source()
-    test_symbol_mapping()
-    test_chain()
-    test_tencent_parsers()
-    test_crypto_failure_negative_cache()
-    test_kline_null_ohlc_filtered()
-    test_fund_nav_failure_negative_cache()
-    test_fund_nav_empty_table_and_missing_columns()
-    test_fund_holdings_missing_column_and_beijing_dates()
-    test_abandoned_watchdog_count()
-    test_abandoned_count_race_narrow_window()
-    fails = [x for x in results if not x[1]]
-    print(f"\n===== {len(results) - len(fails)}/{len(results)} 通过 =====")
-    if fails:
-        print("失败项：")
-        for name, _, detail in fails:
-            print(f"  - {name}: {detail[:160]}")
+    # #41 甲（CR9-69）之后 `acquire`/`observe` 会顺带落盘 ⇒ 整个 run 的落点指到临时目录。
+    # 不许把仓库里那份 `runtime/limiter-state.json` 当测试产物写（CR9-51／#26 同族纪律：
+    # 用例不许把本机状态当常数读，也不许反过来污染它）。
+    import shutil as _sh
+    import tempfile as _tf
+
+    _tmp = _tf.mkdtemp()
+    _prev_env = os.environ.get("LIMITER_STATE_FILE")
+    os.environ["LIMITER_STATE_FILE"] = os.path.join(_tmp, "limiter-state.json")
+    try:
+        test_limiter()
+        test_limiter_profile_single_source()
+        test_akshare_out_of_bucket_observation()
+        test_limiter_counters_survive_a_restart()
+        test_limiter_dumps_from_the_event_path()
+        test_list_products_meta()
+        test_products_endpoint_passthrough_meta()
+        test_stock_name_status_prefix()
+        test_stock_list_backup_source()
+        test_symbol_mapping()
+        test_chain()
+        test_tencent_parsers()
+        test_crypto_failure_negative_cache()
+        test_kline_null_ohlc_filtered()
+        test_fund_nav_failure_negative_cache()
+        test_fund_nav_empty_table_and_missing_columns()
+        test_fund_holdings_missing_column_and_beijing_dates()
+        test_abandoned_watchdog_count()
+        test_abandoned_count_race_narrow_window()
+        fails = [x for x in results if not x[1]]
+        print(f"\n===== {len(results) - len(fails)}/{len(results)} 通过 =====")
+        if fails:
+            print("失败项：")
+            for name, _, detail in fails:
+                print(f"  - {name}: {detail[:160]}")
+    finally:
+        if _prev_env is None:
+            os.environ.pop("LIMITER_STATE_FILE", None)
+        else:
+            os.environ["LIMITER_STATE_FILE"] = _prev_env
+        _sh.rmtree(_tmp, ignore_errors=True)
     sys.exit(1 if fails else 0)
