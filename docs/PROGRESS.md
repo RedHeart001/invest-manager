@@ -1083,3 +1083,19 @@ O1–O12 全量落地，明细见 [history/2026-09-13-cr1-全项目审查与O系
 
 ⑤ **状态**＝本轮动 docs（FIX-LEDGER 待拍板 44 条＋门槛②⑤ 追加＋本段＋CODE-REVIEW 追加节）与 `data-service/`（`pipeline.py`＋两枚测试文件）；写这段之前重新 `date`＝**10-07 01:2x**（不从上一轮 00:5x 外推）。**⇒ 下一 CR＝CR9-73、下一待拍板＝#45。** 等他字的＝**CR8-9 诚实态**（他本人新标签页）／**push**（他自管）／刀 5 里 **OPT-3 是否落码**（前置实测 ②③ 未跑 ⇒ 按红线仍不写码）／BK 若今日仍不通，**改判与否**给他拍。
 
+**同日续 61 · CR9-72 落地（#44＝`boardPaths`）＋两枚自动化排定＋ds 第二次重启（10-07 01:3x–01:4x）**：一句话说完＝**"BK 路径这一轮走没走"从此是一条 curl 读得到的数，而 08:30 那枚 cron 会替我们把第一枚生产样本与第一枚路径读数一起带出来**。
+
+① **落点选在"每一次真发出去的成分请求"，不是"每个板块"**＝`map_board_products` 对概念／行业两次尝试各记一发 `pathForms`（`"code"|"name"`，形态判定复用既有 `_BK_RE.fullmatch` ⇒ **没有第二条"什么算代码"的尺**），`build_items` 累加成 `boardPaths`＝`{byCode, byName, requestsPerCodePath:1, requestsPerNamePath:9, savedRequestsEstimate, emCodeRows}` 进状态位。**`emCodeRows == 0 ⇔ 东财映射表没给出任何 BK 代码`**——这就是那枚免费信号；`savedRequestsEstimate` 是**按 09-27 实测扇出折算**的，所以两个扇出常数与它同写，读的人能自己复算。不进 `payload`、不上屏。
+
+② **diff 面就是"上屏零"的证明**＝`pipeline.py` 的 diff 里 `note` 的值一个字没动（只有 `"note": None` 旁边多了 `"pathForms": forms`）、`payload` 那段一行都没进 diff。这条不是顺手写的——`grep -E '^[-+]' | grep -E 'note|payload|"degraded"'` 是我跑完才做的检查，四行输出全是"加键"，没有"改值"。
+
+③ **arity 变化替我写了测试**＝`build_items` 改三元组之后，五处桩件与两处解包当场崩（`ValueError: not enough values to unpack`），同一笔里全部锁步补（`test_cr6_pipeline.py` 的 `_boom`／`_ok`／`_build`／:218 那枚 lambda ＋ `test_opt2_news_fusion.py` 两处 stub）。CR9-62 那次 `KeyError: 'stats'` 是被动撞到的，这次是**主动用形状去逼桩件表态**——这是我自己的账里第一次把那条教训反过来用。
+
+④ **四枚实钻各自咬住，而"红法不同"才是这次的真收获**：**72a** 摘 `forms.extend(...)` ⇒ `39/42`（3 NG，detail＝**键在而值全 0**）｜**72b** 摘 `result["boardPaths"]` ⇒ `40/42`（2 NG，detail＝`{}`＝**键根本不在**）｜**72c** 形态判定写死 `"code"` ⇒ **恰好 1 NG**（红在 🔁「退回名称记成 `name`」）｜**72d** 计数退化成 `1 if x in forms else 0` ⇒ `36/42`（6 NG，含 `byCode==10` 与事件路径两条）。72a／72b 同一批断言给出**两种不同 detail** ⇒ "没接线"与"接了但没值"确实是两处独立防线；若两枚钻的 detail 长得一样，就说明那批断言其实只有一条在起作用。钻后按 sha256 `b2b3b1ba…40c595c` 用 `cp` 备份复原（**本轮 `pipeline.py` 还没提交 ⇒ 不许用 `git checkout --`**，那条只适用于已提交文件——10-06 我用它抹掉过整个实现）、`grep -c DRILL`＝0、复跑 42/42。
+
+⑤ **门禁**＝① `tsc_exit=0`＋vitest **331/331（41 文件）**（web 零改动＝确认未扰动）｜② **21 枚整批实跑＝735→753**、逐枚 `exit=0`（唯一增量 `cr6_pipeline` 24→42；复算 `735−24+42=753` ✓；`gate2-72-exits.out` 21 行全 `exit=0`、批跑器把两种汇总形态分别解析并逐字打印，`NO_PARSE=0／TOTAL=753／NG_TOTAL=0`）｜③④ **有意不跑**（声明，理由已落门槛②：p3 只断 `lastResult` 那三个键在不在、p0/p1 走的是读路径，一条都不覆盖映射路径计数；08:30 那枚 cron 免费给同一件事）｜⑤ **新进程装载证据**＝`pipeline.py` mtime **01:36:57** < ds **21240** 的 StartTime **01:41:37**，`jobs` armed（今天 08:30／16:30），`/health` 顶层键含 `limitersWindow`（空档形态 `coveredDays:[]／fromDisk:false`），而 `lastResult` 既没有 `newsSamples` 也没有 `boardPaths`＝**预期的**（盘上那份是 10-06 旧码写的）。**出网账（本窗）＝1 次腾讯行情**（`p6_mcp` 既有项）；重启零出网（`hotspot-state.json` mtime 未变＋生产 `limiter-state.json` 仍不存在）。上一轮那条 `LIMITER_STATE_FILE` 指到 Git Bash `/tmp` 的仪器错，这次**正向证据到手**＝指到 `E:/…/runtime/probe-limiter-1007b.json`（Windows 绝对路径），跑完该文件真的出现（221 bytes），同时生产落点仍不存在＝负向证据。
+
+⑥ **两枚自动化已排且都读回了 `nextRunAt` 核对**：甲 `4967c4f2`＝**10-07 08:45:00 只读、零出网**（`newsSamples`＋`boardPaths`＋`limitersWindow`＋`limiter-state.json` 存不存在＋库内今日计数 ⇒ `data-service/morning-samples-1007.out`）；乙 `3b911a5c`＝**10-07 09:15:00 出网一次**（BK 结案命令 heredoc 版＋requests 层计数，额度上限 ≤15 个东财请求、只用一个板块、跑前先读东财 cooldown 并**原地等桶**而不是重启去清桶 ⇒ `data-service/bk-equiv-1007.out`）。两枚都 `deleteAfterRun`＋Auto Approval，时刻按"真收敛"算（08:30 起跑＋pipeline 预算 300s）。**一处要认的手滑**：乙的 prompt 里我把机主原话的「挪」打成了「挊」（转义数字一位之差，位置在引用句内、不影响执行语义）——已入库的自动化文本我没有为它单独 update 一次重发全文，先记在这里；要修一句话就给字。
+
+⑦ **状态**＝**四笔**入库＝`b5c2af7`（方案先于落码）→`c6516e1`（码与它自己的断言同一笔）→本笔（docs 收口）；`dev` 领先 **121**（锚点＝本笔之前的 `c6516e1` 为 120，这笔入库后＝121——计数天然落后自己一笔）、tree 干净；服务＝**ds 21240（01:41:37 起，装 CR9-72）／web 9176**，今晚 02:00 链两条腿都在。**阈值／扇出常数／`_EM` 桶参数／`payload`／note 字面：一行都没动。** ⇒ **下一 CR＝CR9-73、下一待拍板＝#45。** 等他字的＝**CR8-9 诚实态**（他本人新标签页）／**push**（他自管）／**BK 若 09:15 仍读不到，改判为上游长期态与否**／**10-08 刀 5 的顺序照哪一版走**（我给的版＝先零出网读 `limitersWindow`→逐类单点补 crypto／us→N／TTL→用既有 `/quote/verified` 采分歧率→p0/p1 放最后）。
+
