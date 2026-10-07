@@ -10,11 +10,14 @@ import { buildSearchText } from "./search-text";
 import { beijingStamp } from "./time";
 
 // G6（批次 D）：新增 hk（港股）
-// CR9-59（2026-10-04，主人「#32 甲」的字）：新增 **us（美股主数据）**——只进同步阶梯，
-// **不进刷新腿**（`app/api/market/refresh/route.ts:38` 的 `SNAPSHOT_TYPES` 是另一份名单，
-// 没跟着长），因为主人这轮明确"先不用开美股 tab" ⇒ 没有分类浏览就没有 `lastPrice` 的消费方，
-// 让夜跑去给几百只美股打现价是纯烧额度。也不进 `BROWSE_TYPES`（`lib/freshness.ts:27`）
-// ⇒ 美股不出现在分类浏览，也就不需要给它配陈旧说明那一档。
+// CR9-59（2026-10-04，主人「#32 甲」的字）：新增 **us（美股主数据）**——当时明确「先不用开
+// 美股 tab」⇒ 那轮只让它进同步阶梯，既不进 `SNAPSHOT_TYPES`（`app/api/market/refresh/route.ts`
+// 的 `SNAPSHOT_TYPES` 是另一份名单，没跟着长）也不进 `BROWSE_TYPES`（`lib/freshness.ts`）：
+// 没有分类浏览就没有 `lastPrice` 的消费方，让夜跑去给几百只美股打现价是纯烧额度。
+// 10-07 主人亲手撤了这句（「us 有了之后开新 tab」）：**两道名单现都已含 us**＝
+// `SNAPSHOT_TYPES`（CR9-74，实测 179 行 2 批、不打东财 ⇒ 刻意仍不进 `EM_SNAPSHOT_TYPES`）
+// 与 `BROWSE_TYPES`（CR9-75）。上面那段"为什么当时不进"的理由没有作废——它记录的是
+// "入口不存在时不要给这一类打价"这条依赖方向，将来谁摘掉 tab，刷新腿要跟着摘。
 export const SYNC_TYPES = ["stock", "fund", "bond", "crypto", "hk", "us"] as const;
 export type SyncType = (typeof SYNC_TYPES)[number];
 

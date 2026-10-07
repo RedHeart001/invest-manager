@@ -132,23 +132,34 @@ describe("陈旧说明只在有问题时出（#22(b) 改判：正常态一行字
     expect(n).toEqual([{ type: "stock", kind: "list", since: "2026-09-12" }]);
   });
 
-  it("无 tab 的类型不报（us 有主数据却没有入口 ⇒ 报了会把人引向不存在的分类）", () => {
+  // CR9-75 把成对的两半都留住：判据是"在不在 `BROWSE_TYPES` 名单里"，不是"有没有主数据"。
+  // 名单**内**（us 从 10-07 起在）会报 ⇒ 见下一条；名单**外**不报 ⇒ 本条。
+  it("名单外的类型不报（陈旧说明由 BROWSE_TYPES 圈定，不由主数据是否存在圈定）", () => {
     const n = staleNotes(
-      [{ type: "us", listAt: bj("2026-09-12", "22:02"), snapAt: null, maxPrice: null }],
+      [{ type: "future", listAt: bj("2026-09-12", "22:02"), snapAt: null, maxPrice: null }],
       TODAY,
     );
     expect(n).toEqual([]);
   });
 
-  it("五类同日陈旧 ⇒ 五条全报、按 tab 顺序（本函数不截断，上限是渲染层的事）", () => {
-    const old = (type: string) => ({ type, ...at("2026-09-01") });
+  it("us 进名单后同一条输入会报（CR9-75 的正半：驱动它的是名单，不是类型名）", () => {
     const n = staleNotes(
-      [old("hk"), old("crypto"), old("bond"), old("fund"), old("stock")],
+      [{ type: "us", listAt: bj("2026-09-12", "22:02"), snapAt: null, maxPrice: null }],
+      TODAY,
+    );
+    expect(n).toEqual([{ type: "us", kind: "list", since: "2026-09-12" }]);
+  });
+
+  it("六类同日陈旧 ⇒ 六条全报、按 tab 顺序（本函数不截断，上限是渲染层的事）", () => {
+    const old = (type: string) => ({ type, ...at("2026-09-01") });
+    // 输入刻意倒着给：证明输出顺序来自 `BROWSE_TYPES`，而不是来自调用方传进来的顺序
+    const n = staleNotes(
+      [old("us"), old("hk"), old("crypto"), old("bond"), old("fund"), old("stock")],
       TODAY,
     );
     // 截断放在 `browse.ts`（那里能一并给出 staleMore）；在这里 slice 会把第三类**静默藏掉**，
     // 而 10-02 的活体探针正是撞在这上面：stock／bond／crypto 同日陈旧，屏上只剩两条。
-    expect(n.map((x) => x.type)).toEqual(["stock", "fund", "bond", "crypto", "hk"]);
+    expect(n.map((x) => x.type)).toEqual(["stock", "fund", "bond", "crypto", "hk", "us"]);
   });
 
   it("list 优先于 snapshot：同一类两者都陈旧时只说一次（snapAt 为 null 时两者同源）", () => {
@@ -180,14 +191,20 @@ describe("陈旧说明只在有问题时出（#22(b) 改判：正常态一行字
   });
 });
 
-describe("分类浏览的类型集合（CR9-59 本轮刻意划下的边界）", () => {
-  // 主人 2026-10-04 的字＝"#32 甲先做，**先不用开美股 tab**" ⇒ 美股进主数据但不进分类浏览。
-  // 这条断言的作用不是证明"us 不在里面"这个事实，而是**锁住连带义务**：谁把 us 加进
-  // `BROWSE_TYPES`（开 tab），本条即红，逼他同时回答两件事——
-  //   ① 美股没有快照刷新（`SNAPSHOT_TYPES` 不含 us，见 CR9-59）⇒ `pending` 那档会夜夜说话；
-  //   ② `staleNotes` 的三档文案是否适用于英文名。
-  it("美股不进 BROWSE_TYPES（没有 tab ⇒ 没有陈旧说明的消费方）", () => {
-    expect(BROWSE_TYPES).not.toContain("us");
-    expect([...BROWSE_TYPES]).toEqual(["stock", "fund", "bond", "crypto", "hk"]);
+describe("分类浏览的类型集合（CR9-75：从「锁住不开」换成「锁住已答」）", () => {
+  // 主人 2026-10-04 的字＝「#32 甲先做，**先不用开美股 tab**」；10-07 14:0x 他亲手撤了这句
+  // （「us 有了之后开新 tab」）⇒ 本条换方向，可它原来那份用途一个字都不减：**把连带义务钉在
+  // 动名单的那一刻**——谁改 `BROWSE_TYPES`，就得在这里回答当初被预先问出的两件事：
+  //   ① 美股有没有快照刷新？⇒ 有。CR9-74 把 us 收进 `SNAPSHOT_TYPES`，10-07 13:41 实测
+  //      `total 179／updated 179／batches 2`，只读 SQL 复核 `priced=179 snapshotAtNotNull=179`
+  //      ⇒ `pending` 那一档不会夜夜说话（这才是 10-04 那条边界当时真正在防的事）。
+  //   ② 三档陈旧文案适用于英文名吗？⇒ 适用：屏上那句取的是 `STALE_PHRASE` 里的**中文类名**
+  //      （「美股」来自 `TYPE_LABEL`），不是标的自己的英文名。
+  // 名单继续逐字列出（追加三十五 ⑤：镜像生产的常量红是成本不是风险，改派生而不是放宽）。
+  // ⚠️ 一处仍未被证住的边界：`TABS`（住在客户端组件）与这份名单**没有交叉断言**——把 TABS
+  //    import 进 lib 测试会连带拖进 `next/navigation` ⇒ 两处一起动目前靠注释与本条。
+  it("美股进 BROWSE_TYPES（有 tab；两件连带义务都在上面答了）", () => {
+    expect(BROWSE_TYPES).toContain("us");
+    expect([...BROWSE_TYPES]).toEqual(["stock", "fund", "bond", "crypto", "hk", "us"]);
   });
 });

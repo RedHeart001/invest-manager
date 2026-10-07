@@ -22,9 +22,13 @@
 import { prisma } from "./prisma";
 import { beijingDateOf, beijingToday } from "./time";
 
-/** 分类浏览有 tab 的类型（见 `app/search/search-client.tsx` 的 `TABS`）。
- *  陈旧说明只报这几类：`us` 有主数据却没有入口 ⇒ 报一句会把人引向一个不存在的 tab。 */
-export const BROWSE_TYPES = ["stock", "fund", "bond", "crypto", "hk"] as const;
+/** 分类浏览有 tab 的类型（见 `app/search/search-client.tsx` 的 `TABS`，两处要一起动）。
+ *  陈旧说明只报这几类——判据是"有没有入口"，不是"有没有主数据"：给一个没有 tab 的类型
+ *  报一句，等于把人引向一个不存在的界面（`us` 在 10-04～10-07 之间就是这一档）。
+ *  ⚠️ 这条名单**不要求该类有数据**：`hk` 已在 tab 里而库里 0 行——`freshnessOfTypes` 的
+ *  `groupBy` 给不出这一行，`staleNotes` 里那句 `if (!row) continue`（现 :121）因此一个字的
+ *  说明都不出；`:60` 的注释记着同一件事。这是既有设计，不是漏报。 */
+export const BROWSE_TYPES = ["stock", "fund", "bond", "crypto", "hk", "us"] as const;
 
 export type Freshness = {
   type: string;
