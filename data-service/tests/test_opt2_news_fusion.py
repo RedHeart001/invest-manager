@@ -604,15 +604,15 @@ def test_samples_merged_pairs_and_near_miss() -> None:
     p = s["mergedPairs"][0] if s["mergedPairs"] else {}
     check("并掉的那一对**两条标题都在样本里**——这就是“样本”的形状，聚合数替代不了它",
           p.get("incumbent") == "央行宣布降准" and p.get("incoming") == "【央行宣布降准】", str(p)[:200])
-    gi = pl._bigrams("央行宣布降准")
-    gj = pl._bigrams("【央行宣布降准】")
+    gi = pl._bigrams(pl._normalize_news_title("央行宣布降准"))
+    gj = pl._bigrams(pl._normalize_news_title("【央行宣布降准】"))
     exp_sim, exp_overlap = pl._news_metrics(gi, gj)
-    check("比值与判据同一把尺：样本里那两个数**逐字等于** `_news_metrics` 对这两条标题的输出",
+    check("比值与判据同一把尺：样本里那两个数**逐字等于** `_news_metrics` 对这两条标题（按同一条归一化之后）的输出",
           abs(p.get("sim", 0) - round(exp_sim, 3)) < 1e-9 and p.get("overlap") == round(exp_overlap, 3),
           f'{p.get("sim")}/{p.get("overlap")} vs {round(exp_sim, 3)}/{round(exp_overlap, 3)}')
-    check("同一对再按实测锚死（`【…】` 那对＝5 个共同元组 / 并集 7 ⇒ 0.714 与 1.0）——上一条是按函数算的，"
-          "函数整体跑偏它发现不了，所以这里要有一格写死的数",
-          p.get("sim") == 0.714 and p.get("overlap") == 1.0, str(p)[:200])
+    check("同一对再按实测锚死——#45（CR9-73）之后 `【…】` 那对剥完装饰括号就是**同一条字符串** ⇒ 1.0/1.0"
+          "（剥之前是 0.714/1.0）；上一条是按函数算的，函数整体跑偏它发现不了，所以这里要有一格写死的数",
+          p.get("sim") == 1.0 and p.get("overlap") == 1.0, str(p)[:200])
     check("两侧来源分开记（同家与跨家走的是同一把尺，要只看跨源由读的人按这两格筛）",
           "eastmoney-news" in p.get("incumbentVia", []) and p.get("incomingVia") == "cls", str(p)[:200])
     check("择优之后活下来的是哪一条＝`survivor`（这一格 `mergedAway` 里没有，不写就会让人以为被吞的总是后到的）",
@@ -757,6 +757,69 @@ def test_samples_reach_state_file_from_the_event_path() -> None:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+def test_title_normalization_before_compare() -> None:
+    """#45 甲（CR9-73）：比对前剥包装——阈值两个都没动，动的是它们吃进去的字符串。
+
+    标题用的是**盘上真样本**（10-07 08:31 那批里唯一一枚近失，`sim 0.568／overlap 0.781`、
+    差 0.0188 没过 0.8），不是我造的形：拦下它的不是阈值宽严，是 cls 的电头「财联社10月7日电，」
+    与尾部截断两头一起压低了重合度。⇒ 这一组要同时钉住三件事：
+    ① 剥完这一对**要合**；② 剥之前那两枚比值**就是** 0.568/0.781（把"改之前的状态"锚死，
+    免得日后有人以为这层一直就在）；③ 语义开头**不许被剥**（「东方财富证券：……」这种是主体，
+    不是包装）＋剥完成空的不参与判定。
+    """
+    inc = "苹果将于北京时间11月3日公布第四财季财报 财报电话会将于11月3日上午6时举行"
+    raw_incoming = "财联社10月7日电，苹果将于北京时间11月3日公布第四财季财报，财报电话会将于1"
+
+    # ② 锚死"改之前"：同一把尺、不走归一化时，这对就是生产里那两枚数。
+    before = pl._news_metrics(pl._bigrams(inc), pl._bigrams(raw_incoming))
+    check("锚死改前状态：未剥包装时 `sim 0.568／overlap 0.781`（与生产样本逐字同数）⇒ 它当时**漏并**",
+          round(before[0], 3) == 0.568 and round(before[1], 3) == 0.781, str(before))
+    check("🔁 漏并的形状确认：`_news_similar` 对这俩原始标题判 False（改之前 `merge_news` 也确实没并它）",
+          pl._news_similar(pl._bigrams(inc), pl._bigrams(raw_incoming)) is False, str(before))
+
+    # ① 剥完要合（比值按同一把尺重算，不手写；同时钉两道都过）
+    norm_incoming = pl._normalize_news_title(raw_incoming)
+    after = pl._news_metrics(pl._bigrams(pl._normalize_news_title(inc)), pl._bigrams(norm_incoming))
+    check("剥完包装后两道门槛都过（这才是 0.5/0.8 不必动的正面证据）",
+          after[0] >= pl.NEWS_DEDUPE_MIN_SIM and after[1] >= pl.NEWS_DEDUPE_MIN_OVERLAP, str(after))
+    m = pl.merge_news([
+        {"source": "eastmoney-news", "error": None, "items": [news(inc, url="https://em/1")]},
+        {"source": "cls", "error": None, "items": [news(raw_incoming)]},
+    ], limit=25)
+    check("走真路径也并掉了：`mergedAway==1` 且样本里那两条标题**仍是原文**（样本记的是"
+          "上游给了什么，不是剥完之后长什么样——否则人工看样本会看不出电头存在过）",
+          m["stats"]["mergedAway"] == 1
+          and m["samples"]["mergedPairs"][0]["incoming"] == raw_incoming, str(m["stats"])[:200])
+
+    # ③ 语义开头不许剥（过度归一化的那一档）
+    check("🔁 主体名称不是包装：「东方财富证券：维持买入评级」一字不动"
+          "（正则要求电头必须收到 `电／讯` 这个标记才剥）",
+          pl._normalize_news_title("东方财富证券：维持贵州茅台买入评级") == "东方财富证券：维持贵州茅台买入评级",
+          repr(pl._normalize_news_title("东方财富证券：维持贵州茅台买入评级")))
+    check("🔁 名单里没有的开头一律不动（「电力设备板块午后拉升」的『电力』与电头无关）",
+          pl._normalize_news_title("电力设备板块午后拉升") == "电力设备板块午后拉升",
+          repr(pl._normalize_news_title("电力设备板块午后拉升")))
+    check("零宽字符（真样本里有一条末尾是 U+200C）剥掉；装饰括号成对剥掉",
+          pl._normalize_news_title("OpenAI发布成果‌") == "OpenAI发布成果"
+          and pl._normalize_news_title("【央行宣布降准】") == "央行宣布降准",
+          repr(pl._normalize_news_title("OpenAI发布成果‌")))
+    check("🔁 同板块的不同事件**仍然不许并**（归一化没有把两个数拉近到误并）",
+          pl._news_similar(pl._bigrams(pl._normalize_news_title("地产链午后拉升")),
+                           pl._bigrams(pl._normalize_news_title("地产链龙头涨停"))) is False, "")
+    check("🔁 剥完成空的标题不参与判定：两条『财联社日电，』都留在集合里（空 ⇔ 空 也不互并）",
+          pl.merge_news([
+              {"source": "cls", "error": None, "items": [news("财联社日电，"), news("财联社电，")]},
+          ], limit=25)["stats"]["kept"] == 2, "")
+
+    # 放置位置：这层归一**只在新闻去重这条路上**，没漏进共用的 `_bigrams`
+    check("🔁 归一没塞进共用尺：`_bigrams` 本身仍看得见电头（`_topic_urls` 的相关性打分不该跟着变）",
+          "财联" in pl._bigrams(raw_incoming)
+          and "财联" not in pl._bigrams(norm_incoming), repr(sorted(pl._bigrams(raw_incoming))[:4]))
+    check("两个阈值一个都没动（#45 甲的全部论证就建立在这条上——动的是包装，不是数）",
+          pl.NEWS_DEDUPE_MIN_SIM == 0.5 and pl.NEWS_DEDUPE_MIN_OVERLAP == 0.8,
+          f'{pl.NEWS_DEDUPE_MIN_SIM}/{pl.NEWS_DEDUPE_MIN_OVERLAP}')
+
+
 if __name__ == "__main__":
     test_source_order_and_attempts()
     test_merge_union_dedupe_and_pick()
@@ -764,6 +827,7 @@ if __name__ == "__main__":
     test_no_bucket_use_and_payload_key()
     test_news_stats_survive_a_full_merge()
     test_samples_merged_pairs_and_near_miss()
+    test_title_normalization_before_compare()
     test_shortfall_and_metrics_share_one_ruler()
     test_samples_reach_state_file_from_the_event_path()
     test_state_file_and_from_disk_fallback()
