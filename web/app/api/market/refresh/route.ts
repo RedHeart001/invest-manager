@@ -39,8 +39,11 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: blocked }, { status: 403 });
   }
   const type = req.nextUrl.searchParams.get("type") ?? "all";
-  // G6：纳入 hk（港股）
-  const SNAPSHOT_TYPES = ["stock", "fund", "bond", "crypto", "hk"];
+  // G6：纳入 hk（港股）。#46（CR9-74）：纳入 us——此前 `?type=all` 也叫不回 us 的价，
+  // 179 行 us 的 `lastPrice`/`snapshotAt` 恒空。us 现价由**备源腾讯的批量口**供（yfinance
+  // 没有批量接口，`openbb.get_quotes` 对超限直接声明"这一家不做"），它不打东财、不进
+  // `EM_SNAPSHOT_TYPES` ⇒ 这批不限速也不占东财桶。
+  const SNAPSHOT_TYPES = ["stock", "fund", "bond", "crypto", "hk", "us"];
   const types =
     type === "all" ? SNAPSHOT_TYPES : SNAPSHOT_TYPES.includes(type) ? [type] : null;
   if (!types) {

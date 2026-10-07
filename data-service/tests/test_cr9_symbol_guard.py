@@ -234,11 +234,108 @@ def test_error_message_names_subject_when_rate_limited() -> None:
         akp.EM_LIMITER.acquire = orig_acquire
 
 
+# ---------- E. #46（CR9-74）：us 批量要"声明不能"，好让会批量的那家顶上 ----------
+#
+# 为什么要这一组：`openbb.get_quotes` 逐只取、`codes[:20]` 截断，并且**每只失败都吞掉**——
+# 它从不抛异常。`chain_call` 只在异常时换源 ⇒ 腾讯（有真批量口）在批量路径上**永远轮不到**：
+# 快照刷新给 100 只 us，最多 20 只有价，剩下 80 只静默为空，而回执 `updated≥0` 看着像跑了。
+# 修法是把"我没有批量接口"变成**声明**（`ProviderNotSupported`），不是把上限偷偷调高、
+# 也不是让 web 去猜。单只现价路径（`get_quote`）不经过这里，CR9-52 的链序一个字节都没动。
+
+def _tencent_us_line(sym: str, ticker: str) -> str:
+    f = [""] * 40
+    f[1] = "测试美股"
+    f[2] = f"{ticker}.OQ"  # 串号守卫读的就是这一格（CR9-1 同族）
+    f[3] = "333.36"
+    f[4] = "330.00"
+    f[5] = "331.00"
+    f[6] = "1234"
+    f[30] = "2026-10-07 09:30:00"
+    f[31] = "3.36"
+    f[32] = "1.01"
+    return f'v_{sym}="{"~".join(f)}"'
+
+
+def _install_fake_tencent_us_http(tickers: list[str]) -> dict:
+    calls: dict = {"n": 0}
+    payload = ";".join(_tencent_us_line("us" + t, t) for t in tickers).encode("gbk")
+
+    class _Resp:
+        status_code = 200
+        content = payload
+
+        def raise_for_status(self) -> None:
+            return None
+
+    def _get(url, params=None, **kw):
+        calls["n"] += 1
+        return _Resp()
+
+    tp.requests = types.SimpleNamespace(get=_get)
+    return calls
+
+
+def test_us_batch_quotes_declare_inability() -> None:
+    import app.providers.openbb_provider as obb
+
+    codes20 = [f"A{i:02d}" for i in range(20)]
+    codes21 = codes20 + ["B01"]
+    calls: dict = {"n": 0}
+
+    def _fake_get_quote(self, type_, code):
+        calls["n"] += 1
+        return {"code": code, "price": 1.0, "source": self.source}
+
+    orig_gq = obb.OpenBBProvider.get_quote
+    obb.OpenBBProvider.get_quote = _fake_get_quote
+    tk = None
+    try:
+        # 1) 边界成对：>cap ⇒ 声明不能；==cap ⇒ 照旧逐只取
+        _expect_not_supported(
+            lambda: obb._provider.get_quotes("us", codes21),
+            "#46：21 只批量 ⇒ 不静默截成 20 条，而是抛 ProviderNotSupported")
+        check("#46：抛在循环**之前** ⇒ 一只 yfinance 请求都没发（不是先打 20 只再扔）",
+              calls["n"] == 0, f"实际发了 {calls['n']} 次")
+        calls["n"] = 0
+        got20 = obb._provider.get_quotes("us", codes20)
+        check("🔁 边界另一侧：正好 20 只不抛、照旧逐只取（cap 是能力声明不是新上限）",
+              calls["n"] == 20 and len(got20) == 20, f"calls={calls['n']} got={len(got20)}")
+        check("#46：cap 常数写死在断言里（改它＝改契约，得过这一格）",
+              obb._QUOTE_BATCH_CAP == 20, str(obb._QUOTE_BATCH_CAP))
+
+        # 2) 链上端到端：批量由腾讯一次供齐
+        calls["n"] = 0
+        tk = _install_fake_tencent_us_http(codes21)
+        res = chain_call("us", lambda p: {"quotes": p.get_quotes("us", codes21)})
+        q = res.get("quotes", {})
+        check("链按声明换源：21 只批量 ⇒ **21 只都有价**（此前是静默 0～20 只）",
+              len(q) == 21 and all(v.get("source") == "tencent" for v in q.values()),
+              f"n={len(q)} sources={sorted({v.get('source') for v in q.values()})}")
+        check("真批量的形状＝**一次**腾讯 HTTP 请求（不是 21 次逐只）",
+              tk["n"] == 1, f"腾讯被打了 {tk['n']} 次")
+        check("note 说的是「没有批量接口」而不是「主源挂了」（降级文案要如实指到成因）",
+              "no batch quote API" in (res.get("note") or ""), str(res.get("note"))[:200])
+
+        # 3) 链序与单只路径不受影响
+        check("🔁 us 链序一个字没动（CR9-52 由 `tencent_minute` 钉着：Yahoo 仍是单只现价主源）",
+              [p.source for p in get_provider_chain("us")] == ["yfinance", "tencent"],
+              str([p.source for p in get_provider_chain("us")]))
+        calls["n"] = 0
+        one = chain_call("us", lambda p: {"quotes": p.get_quotes("us", ["AAPL"])})
+        check("🔁 单只批量（1 只）仍由主源供 ⇒ 这条 raise 没有把 us 的现价主源换掉",
+              one["quotes"]["AAPL"]["source"] == "yfinance" and calls["n"] == 1,
+              str(one)[:200])
+    finally:
+        obb.OpenBBProvider.get_quote = orig_gq
+        _restore_tencent_http()
+
+
 def main() -> int:
     test_symbol_for_narrowing()
     test_provider_rejects_without_http()
     test_chain_behaviour()
     test_error_message_names_subject_when_rate_limited()
+    test_us_batch_quotes_declare_inability()
     passed = sum(1 for _n, ok, _d in results if ok)
     for name, ok, detail in results:
         if not ok:

@@ -43,7 +43,9 @@ function req(query: string, headers: Record<string, string> = {}) {
   } as unknown as NextRequest;
 }
 
-const TYPES = ["stock", "fund", "bond", "crypto", "hk"];
+// 这份名单**镜像 route 里的 `SNAPSHOT_TYPES`**（#46／CR9-74 收进 us）：下面三条断言都从它派生，
+// 所以"route 少给一类 / 多给一类"都会红在这里；新增类型时只有这一行需要跟着改。
+const TYPES = ["stock", "fund", "bond", "crypto", "hk", "us"];
 
 /** 替身 `refreshAll`：逐类"跑完"并按生产契约回调那一个函数（回调谁由 route 决定） */
 function emulateRound(types: string[], opts: { onResult?: (r: unknown) => void }) {
@@ -68,15 +70,15 @@ beforeEach(() => {
 });
 
 describe("/api/market/refresh 的进度接线（CR9-68／#40 甲）", () => {
-  it("`?type=all` ⇒ 起跑先把五类落进状态位（顺序就是执行顺序）", async () => {
+  it("`?type=all` ⇒ 起跑先把全部类型落进状态位（顺序就是执行顺序；#46 收了 us ⇒ 六类）", async () => {
     await POST(req("?type=all"));
     expect(startRefreshProgress).toHaveBeenCalledTimes(1);
     expect(startRefreshProgress.mock.calls[0][0]).toEqual(TYPES);
   });
 
-  it("🔁 route 交出去的那个回调**就是** `recordRefreshResult`：五类各记一次", async () => {
+  it("🔁 route 交出去的那个回调**就是** `recordRefreshResult`：每一类各记一次（条数跟着 TYPES，不再手写）", async () => {
     await POST(req("?type=all"));
-    expect(recordRefreshResult).toHaveBeenCalledTimes(5);
+    expect(recordRefreshResult).toHaveBeenCalledTimes(TYPES.length);
     expect(recordRefreshResult.mock.calls.map((c) => c[0].type)).toEqual(TYPES);
   });
 

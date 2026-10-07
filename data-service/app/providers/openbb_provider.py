@@ -52,6 +52,10 @@ def _proxies() -> dict | None:
 
 _session: requests.Session | None = None
 
+# #46（CR9-74）：yfinance 没有批量行情口，`get_quotes` 逐只取的上限。超过它就不是"慢一点"，
+# 而是"这一家不做这件事"——必须让链知道，否则备源在批量路径上永远轮不到。
+_QUOTE_BATCH_CAP = 20
+
 
 def _overseas_session() -> requests.Session:
     """trust_env=False 的独立会话：绕开全局 NO_PROXY=*，显式代理可用。"""
@@ -123,8 +127,18 @@ class OpenBBProvider(BaseProvider):
         }
 
     def get_quotes(self, type_: str, codes: list[str]) -> dict[str, dict]:
+        # #46（CR9-74）：**批量超出能力就明说，不许静默截断**。yfinance 没有批量接口，
+        # 这里逐只取、限 20；若调用方给了 100 只还照此返回，`chain_call` 看到的是"主源成功"
+        # ⇒ 备源永远轮不到 ⇒ 快照刷新那 100 只里只有 20 只有价，而回执 `updated≥0` 看着像跑了。
+        # `ProviderNotSupported` 会被链当作"这一家不做这件事"⇒ 批量落到腾讯（它有真批量口）。
+        # 单只现价路径（`get_quote`）不经过这里，CR9-52 定的 `["yfinance","tencent"]` 链序不动。
+        if len(codes) > _QUOTE_BATCH_CAP:
+            raise ProviderNotSupported(
+                f"yfinance has no batch quote API (cap={_QUOTE_BATCH_CAP}, asked {len(codes)}); "
+                "bulk quotes go to the backup that batches"
+            )
         out: dict[str, dict] = {}
-        for c in codes[:20]:  # yfinance 无批量接口，逐只取（限 20）
+        for c in codes[:_QUOTE_BATCH_CAP]:  # yfinance 无批量接口，逐只取（限 20）
             try:
                 out[c] = self.get_quote(type_, c)
             except ProviderError:
