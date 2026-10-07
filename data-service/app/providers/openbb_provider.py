@@ -52,9 +52,14 @@ def _proxies() -> dict | None:
 
 _session: requests.Session | None = None
 
-# #46（CR9-74）：yfinance 没有批量行情口，`get_quotes` 逐只取的上限。超过它就不是"慢一点"，
-# 而是"这一家不做这件事"——必须让链知道，否则备源在批量路径上永远轮不到。
-_QUOTE_BATCH_CAP = 20
+# #46（CR9-74）＋#48 乙（CR9-76）：yfinance **根本没有批量行情口**，所以它的批量能力就是 1。
+# 为什么不是 20（CR9-74 初值）：`get_quotes` 的调用方有两个，而我当初只按其中一个设计——
+# 快照刷新一次给 100 只（>20 会抛，对），分类浏览**一页正好 20 只**（`web/lib/browse.ts` 的
+# `PAGE_SIZE`，不抛 ⇒ 落进"逐只 20 发、每只失败都 `continue` 吞掉、最后交出一个可能为空的
+# dict 却不报错"那一支）。`chain_call` 只在异常时换源 ⇒ 会批量的腾讯在那 20 只这一档永远轮不到，
+# 而屏上会静默回退快照价（＝#46 登记的空壳本体里 `≤20` 没收的那半边）。
+# cap=1 是把这句话按真实定义写：**单只照旧走主源，任何 ≥2 只的批量一律声明不能**。
+_QUOTE_BATCH_CAP = 1
 
 
 def _overseas_session() -> requests.Session:
@@ -127,10 +132,11 @@ class OpenBBProvider(BaseProvider):
         }
 
     def get_quotes(self, type_: str, codes: list[str]) -> dict[str, dict]:
-        # #46（CR9-74）：**批量超出能力就明说，不许静默截断**。yfinance 没有批量接口，
-        # 这里逐只取、限 20；若调用方给了 100 只还照此返回，`chain_call` 看到的是"主源成功"
-        # ⇒ 备源永远轮不到 ⇒ 快照刷新那 100 只里只有 20 只有价，而回执 `updated≥0` 看着像跑了。
-        # `ProviderNotSupported` 会被链当作"这一家不做这件事"⇒ 批量落到腾讯（它有真批量口）。
+        # #46（CR9-74）＋#48（CR9-76）：**批量超出能力就明说，不许静默截断**。yfinance 没有批量
+        # 接口，逐只取不是"慢一点的批量"，是另一件事；若调用方给了 100 只还照此返回，`chain_call`
+        # 看到的是"主源成功" ⇒ 备源永远轮不到 ⇒ 快照刷新那 100 只里只有少数有价，而回执 `updated≥0`
+        # 看着像跑了。`ProviderNotSupported` 会被链当作"这一家不做这件事"⇒ 批量落到腾讯（真批量口）。
+        # cap 的取值理由（含"为什么不是 20"）写在上面的 `_QUOTE_BATCH_CAP`，两个调用方都要算进去。
         # 单只现价路径（`get_quote`）不经过这里，CR9-52 定的 `["yfinance","tencent"]` 链序不动。
         if len(codes) > _QUOTE_BATCH_CAP:
             raise ProviderNotSupported(
@@ -138,7 +144,7 @@ class OpenBBProvider(BaseProvider):
                 "bulk quotes go to the backup that batches"
             )
         out: dict[str, dict] = {}
-        for c in codes[:_QUOTE_BATCH_CAP]:  # yfinance 无批量接口，逐只取（限 20）
+        for c in codes:  # 走到这里 `len(codes) <= cap == 1`（上面的 raise 保证），逐只就是"单只"本身
             try:
                 out[c] = self.get_quote(type_, c)
             except ProviderError:

@@ -241,6 +241,11 @@ def test_error_message_names_subject_when_rate_limited() -> None:
 # 快照刷新给 100 只 us，最多 20 只有价，剩下 80 只静默为空，而回执 `updated≥0` 看着像跑了。
 # 修法是把"我没有批量接口"变成**声明**（`ProviderNotSupported`），不是把上限偷偷调高、
 # 也不是让 web 去猜。单只现价路径（`get_quote`）不经过这里，CR9-52 的链序一个字节都没动。
+#
+# ⚠️ 10-07 #48 乙把 cap 从 20 收到 **1**：CR9-74 当初按"快照刷新一次 100 只"设计 cap，漏了
+# **第二个调用方＝分类浏览一页正好 20 只**（`web/lib/browse.ts` 的 `PAGE_SIZE`）——那一档在 cap=20
+# 下不抛，于是逐只打 20 发、每只失败都被 `continue` 吞掉、最后交出一个可能为空的 dict 而不报错
+# ⇒ 腾讯在浏览路径上仍然轮不到。下面 1) 的"2 只／20 只"两格与 2b) 那一组就是这一档的收据。
 
 def _tencent_us_line(sym: str, ticker: str) -> str:
     f = [""] * 40
@@ -278,8 +283,10 @@ def _install_fake_tencent_us_http(tickers: list[str]) -> dict:
 def test_us_batch_quotes_declare_inability() -> None:
     import app.providers.openbb_provider as obb
 
+    codes2 = ["A00", "A01"]  # cap=1 之后，"两只"就已经是批量 —— #48 乙的最小那一格
     codes20 = [f"A{i:02d}" for i in range(20)]
     codes21 = codes20 + ["B01"]
+    codes2 = codes20[:2]  # 最小批量＝2 只：cap=1 之后"两只"就已经是批量（#48 乙）
     calls: dict = {"n": 0}
 
     def _fake_get_quote(self, type_, code):
@@ -290,18 +297,31 @@ def test_us_batch_quotes_declare_inability() -> None:
     obb.OpenBBProvider.get_quote = _fake_get_quote
     tk = None
     try:
-        # 1) 边界成对：>cap ⇒ 声明不能；==cap ⇒ 照旧逐只取
+        # 1) 边界成对（#48 乙之后 cap=1）：≥2 只 ⇒ 声明不能；正好 1 只 ⇒ 逐只取一次
         _expect_not_supported(
             lambda: obb._provider.get_quotes("us", codes21),
             "#46：21 只批量 ⇒ 不静默截成 20 条，而是抛 ProviderNotSupported")
         check("#46：抛在循环**之前** ⇒ 一只 yfinance 请求都没发（不是先打 20 只再扔）",
               calls["n"] == 0, f"实际发了 {calls['n']} 次")
         calls["n"] = 0
-        got20 = obb._provider.get_quotes("us", codes20)
-        check("🔁 边界另一侧：正好 20 只不抛、照旧逐只取（cap 是能力声明不是新上限）",
-              calls["n"] == 20 and len(got20) == 20, f"calls={calls['n']} got={len(got20)}")
+        _expect_not_supported(
+            lambda: obb._provider.get_quotes("us", codes2),
+            "#48 乙：**两只**就算批量 ⇒ 也声明不能（cap=1 是能力定义，不是把上限调到 20）")
+        check("#48 乙：2 只这一格同样**零次** yfinance 请求",
+              calls["n"] == 0, f"实际发了 {calls['n']} 次")
+        calls["n"] = 0
+        # 分类浏览一页的量＝20 只（`web/lib/browse.ts` 的 PAGE_SIZE）——改 cap 前这一格是 20 发
+        _expect_not_supported(
+            lambda: obb._provider.get_quotes("us", codes20),
+            "#48 乙：一页 20 只 ⇒ 不再逐只打 20 发，交给真会批量的那家")
+        check("#48 乙：20 只这一格**零次** yfinance 请求（改 cap 前这里是 20 发，且逐只失败会被吞掉）",
+              calls["n"] == 0, f"实际发了 {calls['n']} 次")
+        calls["n"] = 0
+        got1 = obb._provider.get_quotes("us", ["A00"])
+        check("🔁 边界另一侧：正好 1 只不抛、逐只取一次（cap=1 说的是「没有批量口」，不是「拒绝服务」）",
+              calls["n"] == 1 and len(got1) == 1, f"calls={calls['n']} got={len(got1)}")
         check("#46：cap 常数写死在断言里（改它＝改契约，得过这一格）",
-              obb._QUOTE_BATCH_CAP == 20, str(obb._QUOTE_BATCH_CAP))
+              obb._QUOTE_BATCH_CAP == 1, str(obb._QUOTE_BATCH_CAP))
 
         # 2) 链上端到端：批量由腾讯一次供齐
         calls["n"] = 0
@@ -315,6 +335,19 @@ def test_us_batch_quotes_declare_inability() -> None:
               tk["n"] == 1, f"腾讯被打了 {tk['n']} 次")
         check("note 说的是「没有批量接口」而不是「主源挂了」（降级文案要如实指到成因）",
               "no batch quote API" in (res.get("note") or ""), str(res.get("note"))[:200])
+
+        # 2b) 分类浏览那一页的真实形状经链（#48 乙的本体：一页 20 只，改前落进"逐只 20 发"那一支）
+        calls["n"] = 0
+        tk20 = _install_fake_tencent_us_http(codes20)
+        res20 = chain_call("us", lambda p: {"quotes": p.get_quotes("us", codes20)})
+        q20 = res20.get("quotes", {})
+        check("#48 乙：一页 20 只经链 ⇒ **20 只都有价且全来自腾讯**（改前＝逐只 20 发，或逐只失败被吞成空壳）",
+              len(q20) == 20 and all(v.get("source") == "tencent" for v in q20.values()),
+              f"n={len(q20)} sources={sorted({v.get('source') for v in q20.values()})}")
+        check("#48 乙：这一页只打**一次**腾讯 HTTP（不是 20 次逐只）",
+              tk20["n"] == 1, f"腾讯被打了 {tk20['n']} 次")
+        check("#48 乙：这一页**零次** yfinance 请求（cap=1 之后浏览路径不再碰 Yahoo）",
+              calls["n"] == 0, f"yfinance 发了 {calls['n']} 次")
 
         # 3) 链序与单只路径不受影响
         check("🔁 us 链序一个字没动（CR9-52 由 `tencent_minute` 钉着：Yahoo 仍是单只现价主源）",
