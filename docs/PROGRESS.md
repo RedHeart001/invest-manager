@@ -1214,3 +1214,18 @@ O1–O12 全量落地，明细见 [history/2026-09-13-cr1-全项目审查与O系
 ⑥ **自动化又"没跑过"一次**＝16:45 那枚 `ebddea79` 没留下 `afternoon-samples-1007.out`，`qoder_cron list` 现在为空 ⇒ "armed ≠ 跑过"是本账里第三次（04:00 那枚不存在、02:00 那枚被截断、这枚无回执）。**没丢的是数据**：`runtime/hotspot-state.json` mtime **16:31:01** 就是 16:30 那轮自己写的 ⇒ 16:30 样本批的读数在盘上，取它比等自动化更便宜（本轮未取，等字）。
 
 ⑦ **状态**＝dev 领先 **15 笔**（锚点＝17:01:43 实测 `git rev-list --count origin/dev..HEAD`＝15，含 `a94caed`；本笔之前 b2e7a32 之后＝14）；服务 ds **20568**（cap=1 已装、CR9-77 这条 raise 等重启）／web **13268**；16:30 那轮 cron 已成（`runs` 见状态位 16:31:01）⇒ **下一 CR＝CR9-78、下一待拍板＝#50**；未答岔口新增一条"要不要现在重启 ds 把 CR9-77 装上（顺带取 16:30 那份盘上读数）"。
+**同日续 69 · CR9-77 的 ⑤ 到手＋#45 丙的 day-1 两批读数与"剥前缀前后差"（主人 10-07 17:4x 的字＝「现在立刻重启，上面两件顺手做了，自动化开始」）**
+
+① **重启＋行为本体**（逐字在 FIX-LEDGER #49 块的「✅ ⑤ 到手」段）＝新进程 **23252**（`StartTime 17:48:22` > mtime `16:52:42`），`codes=CEG` 的 note 里出现 **`an empty batch is not a successful batch`** 这句话＋`source=tencent`／`price=300.4`／`currency=USD`。⇒ 与 15:41 那次同坐标对照：同一只、同一条单码路径，**那次是空壳、这次治好**。本窗出网＝Yahoo 1 次尝试（仍 429）＋腾讯 1 次。
+
+② **day-1 两枚样本批都到手**（都零出网取数）：08:53:48 批（自动化 `morning-samples-1007.out` 那枚还在）＋16:31:01 批（`trigger=post-market`、`tookMs 60384`、`degraded=False`、`topics=5`、`newsStats` raw 59／kept 46／mergedAway 13／truncated 21／crossSource 13、perSource cls 20＋东财 25＋tavily 14、arrived 3／attempted 3／blank 0）。库内 `HotspotDigest` 今日 **10 行**＝两批各 5。
+
+③ **剥前缀前后差重算（纯函数、零出网，落盘 `sim-before-after-1007.out`＋`samples-dump-selftest-1007.out`）**：先把尺自证——我用 `_bigrams`＋`_normalize_news_title` 重算的"剥后"值与账上记录的 13 对 sim **逐位吻合**，而 08:53 批记录的是"剥前"口径（那条近失 0.568/0.781 与我算的剥前一致＝它跑在 CR9-73 之前），两侧都对得上 ⇒ 这把尺可信。**结果**：16:31 批 **13 对里有 2 对是"只有剥前缀才并得成"**（SpaceX：剥前 ov 0.75<0.8 ⇒ 会留重复；英特尔：剥前 ov 0.692 ⇒ 同样留重复），11 对两态都并，**剥后反而不并＝0 对**；08:53 批 **0/12**（那批没遇到前缀形状）。⇒ **上午那句"甲 的收益要等数出来才知道"现在有数了：不是零，是一批 2 对**；而"降阈值"（乙）今天第二枚反证——那枚近失 `sim=0.24 ov=1.0` 是**长短包含**族（「欧洲汽车股走高」被长稿完全包含），降到 0.45 也够不着，降到 0.24 就会把不同新闻并掉。**丙 的前提不变**：day-2＝10-08 两批、day-3＝10-09 两批，最早 10-09 16:3x 判。
+
+④ **第三枚 `boardPaths`**＝`emCodeRows 0`／`byCode 0`／`byName 1`／`requestsPerNamePath 9`／`savedRequestsEstimate 0` ⇒ BK 映射表仍不给板块代码，193edec 那笔"上游长期态、映射落盘不立项"继续成立，这项监测照旧免费。桶账顺手读了：进程内自 17:48:22 起 `eastmoney granted 0／denied 0`（重启归零），durable 窗口 `granted 58／denied 63`、`coveredDays` 仅 10-07、`keptDays 1`；web `/api/health` 的 `refresh.us`＝`total 179／updated 179／failedBatches 0／tookMs 3367／snapshotAt 05:41:54Z`＝本地 13:41:54（第三本账，免费）。
+
+⑤ **一处自纠（instrument 读错列）**：我第一次查今日落库行数用 `where date='2026-10-07'` 得到 **0 行**——Prisma 的 `date`／`createdAt` 都是**数值 ms 列**，不是字符串。账本里今日原本有 5 行，所以那个 0 是我的查询错、不是新发现；按 `createdAt >= 本日00:00` 重查＝10 行。⇒ 追加三十八 ④「读到 0 行先 grep 账本再开口」的同族，这次是**先 grep 列类型再开口**。
+
+⑥ **自动化这一件按"armed≠跑过"改了设计**：取数逻辑固化成 `data-service/runtime/samples-dump.py`（本轮实测跑通过），cron 的命令只剩一行 ⇒ 脆的引号层从执行路径里拿掉（10-07 16:45 那枚没留下任何回执，它当时用的正是内联 heredoc＋多层引号）；并且在 prompt 里要求**跑的人自己回执**——文件存在性＋字节数＋原样引用 `lastRun=`／`小结：只有剥后并`／`newsStats=`／`boardPaths=`／`HotspotDigest 今日行数` 五行，失败要贴 stderr 不许粉饰。新排两枚：`720daede`＝10-08 08:45、`f8bd95e5`＝10-08 16:45（都 `deleteAfterRun`、Auto Approval），两枚的 `nextRunAt` 换算核对＝**1791420300000→08:45:00**、**1791449100000→16:45:00**（差正好 8h＝没有上次那种 +30min 漂移）。⇒ 另记一条工具口径：**`cat >>` 对"末尾即时间线"的文件（本文件、CODE-REVIEW）是对的，对"按编号分区"的 FIX-LEDGER 是错的**——本轮我踩了两次（两次都把块落到文件尾，都要再 splice 回去），下次往 FIX-LEDGER 插块一律锚点插入＋立刻读回上下文行号。
+
+⑦ **状态**＝dev 领先 **16 笔**（锚点＝**17:54:15 实测** `git rev-list --count origin/dev..HEAD`＝16，此刻本笔尚未提交⇒本笔落地后＝17，两个数都带时刻才算数）；服务 ds **23252**（**CR9-77 已装、⑤ 到手**）／web **13268**；门禁数字本轮未重跑（零代码改动⇒① 332/41、② 789 沿用）；两份新脚本与回执都在 gitignore 内（`runtime/` 与 `data-service/*.out`）⇒ tree 干净。⇒ **下一 CR＝CR9-78、下一待拍板＝#50**。
