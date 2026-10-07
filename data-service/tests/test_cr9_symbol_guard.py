@@ -363,12 +363,128 @@ def test_us_batch_quotes_declare_inability() -> None:
         _restore_tencent_http()
 
 
+# ---------- F. #49 乙（CR9-77）：整批皆空要抛，不许把空壳当"这一批成功了" ----------
+#
+# 为什么要这一组：`_QUOTE_BATCH_CAP` 收到 1 之后，**混排页（`type=all`）里那 1 只 us 仍走 yfinance**
+# （1 只不越上面那道批量闸），而循环里每只失败都被 `continue` 吞掉 ⇒ 返回 `{}` ⇒ `chain_call`
+# 看到的是"主源成功" ⇒ 会真批量的腾讯轮不到 ⇒ 那一行静默退回快照价。10-07 15:4x 第一枚实样本＝
+# ds 日志 `codes=CEG` 前面一行 `Crumb fetch rate-limited (HTTP 429)`，屏上那一行连「美元」后缀都没有
+# （后缀来自 `web/lib/browse.ts` 的 `q?.currency`＝实时在场才给值）。
+#
+# ⚠️ 这组的 🔁 半是**从实钻里长出来的**：原先设想的第三半"2 只里 1 只失败仍只交回有的那只"在这条
+# 路径上是**空集**——≥2 只在循环之前就 `ProviderNotSupported` 了。证据是那一格两侧都红、红因里
+# `yf=0 腾讯=1`（它实际测的是"换源"，不是"容忍部分失败"）。⇒ 成对的两半＝**全空要抛**／**单只成功不许被换源**。
+# 另一条必须钉住的区分＝这里抛的是"这次没拿到"（`ProviderError`），**不是**"这类我不做"
+# （`ProviderNotSupported`）——后者是上面 E 段与 `:142` 那条 fund 空 dict 的合法答复，两种空壳
+# 在返回体上同形，所以语义得分开。
+
+def _expect_plain_provider_error(fn, label: str) -> None:
+    """要求抛 `ProviderError`，且**不能**是子类 `ProviderNotSupported`（那是另一种答复）。"""
+    try:
+        fn()
+        check(label, False, "未抛异常")
+    except ProviderNotSupported as e:
+        check(label, False, f"抛成了 ProviderNotSupported（把「这次没拿到」写成「这类不做」）: {e}")
+    except ProviderError as e:
+        check(label + "（ProviderError，非 ProviderNotSupported）", True)
+    except Exception as e:  # noqa: BLE001
+        check(label, False, f"异常类型错误: {type(e).__name__}: {e}")
+
+
+def test_us_batch_all_empty_raises() -> None:
+    import app.providers.openbb_provider as obb
+
+    calls: dict = {"n": 0}
+
+    def _boom(self, type_, code):
+        calls["n"] += 1
+        raise ProviderError("yfinance: HTTP 429 (crumb rate-limited)")
+
+    orig_gq = obb.OpenBBProvider.get_quote
+    obb.OpenBBProvider.get_quote = _boom
+    try:
+        # 1) 单元：单码批量而这一只没拿到 ⇒ 抛，不许交回空 dict
+        _expect_plain_provider_error(
+            lambda: obb._provider.get_quotes("us", ["CEG"]),
+            "#49 乙：1 只、整批皆空 ⇒ 抛（此前是静默返回 {}）")
+        check("🔁 乙 确实先打了那一发（抛是在循环之后＝真的试过）",
+              calls["n"] == 1, f"实际发了 {calls['n']} 次")
+        try:
+            obb._provider.get_quotes("us", ["CEG"])
+            msg = "(没抛)"
+        except ProviderError as e:
+            msg = str(e)
+        check("抛的消息点名数量与「这批没拿到」（降级文案要指得到成因，CR9-30 同族）",
+              "got nothing for all 1 code" in msg, msg[:120])
+
+        # 2) 空 codes 维持原样：乙 没把"任何空答复"都扩成抛
+        calls["n"] = 0
+        empty = obb._provider.get_quotes("us", [])
+        check("🔁 空 codes 仍返回 {} 且不抛（那是调用方的事，CR9-74 的形状没被扩写）",
+              empty == {} and calls["n"] == 0, f"got={empty} calls={calls['n']}")
+    finally:
+        obb.OpenBBProvider.get_quote = orig_gq
+
+    # 3) 链上端到端：单码失败 ⇒ 换源到腾讯，且只打一次
+    def _boom2(self, type_, code):
+        raise ProviderError("yfinance: HTTP 429 (crumb rate-limited)")
+
+    obb.OpenBBProvider.get_quote = _boom2
+    tk = _install_fake_tencent_us_http(["CEG"])
+    try:
+        res = chain_call("us", lambda p: {"quotes": p.get_quotes("us", ["CEG"])})
+        q = res.get("quotes", {})
+        check("#49 乙：混排页里那 1 只 us 在主源 429 之后**有价**、来源＝备源（此前＝空壳）",
+              list(q.keys()) == ["CEG"] and q["CEG"].get("source") == "tencent",
+              f"keys={list(q.keys())} sources={sorted({v.get('source') for v in q.values()})}")
+        check("#49 乙：换源只打**一次**腾讯 HTTP", tk["n"] == 1, f"腾讯被打了 {tk['n']} 次")
+        check("note 说的是「got nothing（这次没拿到）」而不是「没有批量接口」（两种成因不能混成一句）",
+              "got nothing" in (res.get("note") or ""), str(res.get("note"))[:200])
+    finally:
+        obb.OpenBBProvider.get_quote = orig_gq
+        _restore_tencent_http()
+
+    # 4) 🔁 单只成功不许被换源（成对的另一半；"部分失败"那一格在 cap=1 下是空集，见上方注释）
+    def _ok(self, type_, code):
+        return {"code": code, "price": 1.5, "source": self.source, "currency": "USD"}
+
+    obb.OpenBBProvider.get_quote = _ok
+    tk2 = _install_fake_tencent_us_http(["GOOD"])
+    try:
+        res2 = chain_call("us", lambda p: {"quotes": p.get_quotes("us", ["GOOD"])})
+        check("🔁 那 1 只成功时仍由主源供、一次腾讯都不该打（乙 没把 us 的现价主源换掉）",
+              list(res2.get("quotes", {}).keys()) == ["GOOD"]
+              and res2["quotes"]["GOOD"]["source"] == "yfinance"
+              and tk2["n"] == 0 and res2.get("note") is None,
+              f"sources={sorted({v.get('source') for v in res2.get('quotes', {}).values()})} 腾讯={tk2['n']} 次 note={str(res2.get('note'))[:80]}")
+    finally:
+        obb.OpenBBProvider.get_quote = orig_gq
+        _restore_tencent_http()
+
+    # 5) 🔁 那条既有形状不许被顺手改掉：腾讯对 fund 批量交 {} 且**不请求**（`:142` 同一条的邻侧守卫）
+    calls2 = {"n": 0}
+
+    def _counting_get(url, params=None, **kw):
+        calls2["n"] += 1
+        raise AssertionError("fund 批量不该发请求")
+
+    orig_req = tp.requests
+    tp.requests = types.SimpleNamespace(get=_counting_get)
+    try:
+        got_fund = tp._provider.get_quotes("fund", ["000001", "110022"])
+        check("🔁 「这家不做这类」仍答 {}（乙 只把「这次没拿到」变抛；两种空壳必须分开答复）",
+              got_fund == {} and calls2["n"] == 0, f"got={got_fund} http={calls2['n']}")
+    finally:
+        tp.requests = orig_req
+
+
 def main() -> int:
     test_symbol_for_narrowing()
     test_provider_rejects_without_http()
     test_chain_behaviour()
     test_error_message_names_subject_when_rate_limited()
     test_us_batch_quotes_declare_inability()
+    test_us_batch_all_empty_raises()
     passed = sum(1 for _n, ok, _d in results if ok)
     for name, ok, detail in results:
         if not ok:

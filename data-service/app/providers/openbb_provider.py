@@ -149,6 +149,20 @@ class OpenBBProvider(BaseProvider):
                 out[c] = self.get_quote(type_, c)
             except ProviderError:
                 continue
+        # #49 乙（CR9-77）：**一只都没拿到不等于"这一批成功了"**。`chain_call` 只在异常时换源，
+        # 空 dict 在它眼里就是主源的成功答复 ⇒ 会真批量的腾讯轮不到 ⇒ 混排页（`type=all`）里往往
+        # 只有 1 只 us（cap=1 之后 `len(codes)==1` 不越上面的闸），Yahoo 一旦被节流那一行就静默
+        # 退回快照价。10-07 15:4x 第一枚实样本＝ds 日志 `codes=CEG` 前面一行是
+        # `Crumb fetch rate-limited (HTTP 429)`，而屏上那一行连「美元」后缀都没有（后缀来自
+        # `browse.ts` 的 `q?.currency`＝实时在场才给值）。
+        # **只动"整批皆空"这一支**：`test_cr9_symbol_guard.py` 钉着"腾讯对 `fund` 批量交 `{}`
+        # 且不请求"是合法答复（那是"这家不做这类"），它与"这家做这类但这次没拿到"在返回体上同形
+        # ——两种空壳必须分开，所以这里把后者抛给链，前者原样留着。空 `codes` 不抛（调用方的事）。
+        if codes and not out:
+            raise ProviderError(
+                f"yfinance got nothing for all {len(codes)} code(s); "
+                "an empty batch is not a successful batch (ask the backup that batches)"
+            )
         return out
 
     # ---------- 日 K ----------
