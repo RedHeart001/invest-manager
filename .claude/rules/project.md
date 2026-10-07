@@ -147,3 +147,7 @@ git diff --cached | grep -iE '(sk-|tvly-|ghp_|AKIA)[A-Za-z0-9_-]{10,}'     # 暂
   （临时回退修复 → 确认断言精确失败 → 恢复），这是 C34 的验收要求。
 - **装第三方技能必须用 `npx skills add <repo> --copy`**——裸 `add` 默认建软链 + `.agents/`，违反技能目录纪律
   （实体文件、无 `.agents/`）；装完核对 `git status` 与 `.claude/skills/README.md`。**执行前先读该 README。**
+- **速览只写"指向哪里"，不写"发生了什么"**：FIX-LEDGER 等主文件的速览/状态卡区块只留索引与当前状态字段，
+  过程明细、门禁读数、出网账、轮次计数等一律进 `docs/history/` 归档；单段速览超 ~500 字即触发"该进 history"自查。
+- **轮次计数不手写进文档**：`dev 领先 N 笔`、`本笔落地后 N` 等计数改用 `git rev-list --count origin/dev..HEAD` 现查，
+  避免每次落笔重算重写、与 git 历史失同步。
