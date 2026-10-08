@@ -239,7 +239,8 @@ export default async function ProductPage({
     <main className="mx-auto max-w-5xl px-6 py-8">
       {/* CR8-5：删面包屑——产品详情页没有固定父级，中间那级「搜索」是硬编码的谎报
           （从首页热点点进来也显示「搜索」）。
-          CR8-6：删完它是页内唯一回指缺口，故补「← 返回」（客户端组件，无历史时退化跳首页）。 */}
+          CR8-6：删完它是页内唯一回指缺口，故补「← 返回」（客户端组件；URL 没带 from
+          时不假装能回退，直接 push 推导目标——见 lib/provenance.ts 的 planBack）。 */}
       <PageBack />
 
       {/* ① 身份区 */}

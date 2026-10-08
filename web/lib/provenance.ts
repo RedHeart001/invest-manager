@@ -44,3 +44,33 @@ export function hrefForFrom(from: FromKey, q: string | null): string {
   if (from === "search") return q ? `/search?q=${encodeURIComponent(q)}` : "/search";
   return from === "chat" ? "/chat" : "/";
 }
+
+/**
+ * #56 甲（10-08 主人手测「粘贴链接后点返回没反应」）：返回按钮的**文案与行为必须取同一个键**。
+ * 旧实现文案按 `from`、行为按 `window.history.length > 1`，而历史条目数会把 about:blank、
+ * 新标签、同一 URL 重复回车都算成"可回退" ⇒ 出现"承诺回首页、实际回上一条历史"的错位。
+ *
+ * 判据＝URL 自己带来路（`?from=`，白名单内）＝应用内进入 ⇒ 那条历史必然存在 ⇒ 才敢 `back()`。
+ * `sessionStorage` 里的来路只用来选**推导目标**，不参与文案（它可能是上一次访问留下的）。
+ */
+export type BackPlan = {
+  readonly label: string;
+  readonly useHistoryBack: boolean;
+  readonly fallbackHref: string;
+};
+
+export function planBack(
+  rawFrom: string | null | undefined,
+  q: string | null,
+  stored: FromKey | null,
+): BackPlan {
+  const from = parseFrom(rawFrom);
+  if (from) {
+    return {
+      label: `← 返回${FROM_LABEL[from]}`,
+      useHistoryBack: true,
+      fallbackHref: hrefForFrom(from, q),
+    };
+  }
+  return { label: "← 返回", useHistoryBack: false, fallbackHref: hrefForFrom(stored ?? "home", q) };
+}
