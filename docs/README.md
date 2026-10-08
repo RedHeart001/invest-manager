@@ -15,8 +15,8 @@
 
 - **当前轮次**：CR9（开放）；CR8 已收尾
 - **未闭环项**：CR9-3（BK 成分等价性，只欠实网验收）、CR9-26（hk 列表，上游态）、G7（token 已配置且双侧生效，欠的是"上云前补完整身份鉴权"）、C31（Docker 验证，暂缓）
-- **待拍板**：**#52／#53 已定档**；**#51 判据已兑现 ⇒ 我建议定甲（打住）**（④ 最贵档白拿的读数：均值 4.1 秒/发 < `min_interval=5.0`，分桶不创造额度）；**#54／#55／#56 待字**（备份自愈只查启动那一刻／美股详情页日 K 三层永空／返回入口文案与行为不同键）。逐条状态与案由只读 [FIX-LEDGER.md](FIX-LEDGER.md) 的状态卡与「待拍板」节，本文件不并列第二套
-- **服务**：ds **26396**（10-08 21:15:08 起重，带 `HTTPS_PROXY`）／web **18492**——**这两个 PID 是当日实况，下轮请现查**（`Get-NetTCPConnection -State Listen -LocalPort 8000,3000 | Select -ExpandProperty OwningProcess`）；若 0 监听，起 ds 带 `SYNC_CATCHUP=off` + `HTTPS_PROXY`（只这两个前缀，**不要手设 `NO_PROXY`**）
+- **待拍板**：**#51 定档＝甲（打住，零代码零新立项）**；**#55 甲 已落地＝CR9-78**（K 线空态上屏一行诚实成因），其 乙／丙 仍待字；**#56 评估完成＝「先乙后甲」成立、两刀塌缩成同一处改动**，等「写」字；**#52 乙 的规则升格、#54 乙 的「写」字、④ 其余三档跑不跑、刀 5 主源档跑不跑**仍各等他一句字。逐条状态与案由只读 [FIX-LEDGER.md](FIX-LEDGER.md) 的状态卡与「待拍板」节，本文件不并列第二套
+- **服务**：ds **26396**（10-08 21:15:08 起重，带 `HTTPS_PROXY`）／web **18492**——23:0x 现查两枚都在监听；**CR9-78 是 web 侧改动，dev HMR 已装载并浏览器实测 ⇒ 没重启过任何一侧**。**这两个 PID 是当日实况，下轮请现查**（`Get-NetTCPConnection -State Listen -LocalPort 8000,3000 | Select -ExpandProperty OwningProcess`）；若 0 监听，起 ds 带 `SYNC_CATCHUP=off` + `HTTPS_PROXY`（只这两个前缀，**不要手设 `NO_PROXY`**）
 
 ## 文档地图
 
