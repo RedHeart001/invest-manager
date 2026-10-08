@@ -7,7 +7,7 @@
 
 个人投资理财辅助 Agent。四条原始需求：热点推送 / 智能搜索 / 产品详情页 / 金融分析 Agent。
 - **web/**：Next.js 15（App Router）+ React 19 + Prisma/SQLite —— 界面 + BFF，**唯一对外端口**，也是**唯一写库方**
-- **data-service/**：FastAPI **无状态取数服务**（不碰库、不落盘，compose 网络内 `expose 8000` 不发布到宿主机，采集结果经 HTTP 回调 web 落库）
+- **data-service/**：FastAPI **无业务状态的取数服务**（**不写业务库**——写库方只有 web；它会写自己的运行时状态文件与库快照，都在 `.gitignore` 内，口径见 [PLAN.md](PLAN.md)「为什么 data-service 不需要数据库配置」；compose 网络内 `expose 8000` 不发布到宿主机，采集结果经 HTTP 回调 web 落库）
 - **LLM**：OpenAI 兼容端点（DeepSeek/GLM）
 - **数据源**：akshare（东财/腾讯/新浪）、Tavily、yfinance 等免费源，全部走多源降级
 

@@ -66,7 +66,7 @@
 │  ├─ Tool Gateway：内置工具 + Skills + MCP client    │
 │  └─ Prisma → SQLite（单文件 dev.db，Docker 挂卷）   │
 ├─────────────────────────────────────────────────────┤
-│  data-service（Python FastAPI，无状态）             │
+│  data-service（Python FastAPI，无业务状态）         │
 │  ├─ Provider 层（统一行情 API：/quote /kline /list）│
 │  │   ├─ akshare_provider  → A股/基金/债券/港股      │
 │  │   ├─ openbb_provider   → 美股/加密/宏观          │
@@ -82,7 +82,7 @@
 └─────────────────────────────────────────────────────┘
 ```
 
-**为什么 data-service 不需要任何数据库配置**：它是无状态适配/计算层，只调外部数据源与 LLM，不建库、不写盘；全部持久化在 Next.js 侧 SQLite 单文件（`prisma migrate dev` 一键建表）。data-service 唯一需要的是 Python 3.12 虚拟环境 + `requirements.txt`，全部在项目目录内。
+**为什么 data-service 不需要数据库配置**（口径于 2026-10-08 限定，依据见本节末「ds 的落盘面」）：它是无业务状态的适配/计算层，只调外部数据源与 LLM——**业务库的写入方只有 Next.js 侧**（web 是唯一写库方），ds 不建表、不写业务库；业务持久化全在 Next.js 侧 SQLite 单文件（`prisma migrate dev` 一键建表）。⚠️ **「ds 完全不碰盘」已经不成立**：10-02 起三次落地让它写自己的运行时状态文件——`runtime/limiter-state.json`（CR9-69 限速计数落盘）、`runtime/hotspot-state.json`（CR9-62 热点状态位）、`backups/state.json` 与库快照（CR9-53 备份作业）；这些都**不是业务数据**、且全部落在 `.gitignore` 覆盖内（`data-service/runtime/`、`backups/`）。其中备份作业还会**只读**打开 `web/prisma/dev.db` 取在线备份（`backup_scheduler.py:96` 的 `_source_db()`），所以「碰库」这一项要按"只读、不写"读。data-service 需要的是 Python 3.12 虚拟环境 + `requirements.txt`，全部在项目目录内。
 
 **产出落库的统一模式**：data-service 的一切持久化产出（产品列表同步、热点 digest、深度研报）都**不直连数据库**，而是通过内部 HTTP 回调 Next.js 的 ingest 接口（`/api/*/ingest`）由 BFF 统一落库；异步任务状态由 data-service 内存任务注册表维护（task_id → status/result），BFF 轮询后更新 `ResearchReport.status`。
 
