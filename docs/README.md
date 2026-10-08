@@ -15,8 +15,8 @@
 
 - **当前轮次**：CR9（开放）；CR8 已收尾
 - **未闭环项**：CR9-3（BK 成分等价性，只欠实网验收）、CR9-26（hk 列表，上游态）、G7（token 已配置且双侧生效，欠的是"上云前补完整身份鉴权"）、C31（Docker 验证，暂缓）
-- **待拍板**：**#51 定档＝甲（打住，零代码零新立项）**；**#55 甲 已落地＝CR9-78**（K 线空态上屏一行诚实成因），其 乙／丙 仍待字；**#56 评估完成＝「先乙后甲」成立、两刀塌缩成同一处改动**，等「写」字；**#52 乙 的规则升格、#54 乙 的「写」字、④ 其余三档跑不跑、刀 5 主源档跑不跑**仍各等他一句字。逐条状态与案由只读 [FIX-LEDGER.md](FIX-LEDGER.md) 的状态卡与「待拍板」节，本文件不并列第二套
-- **服务**：ds **26396**（10-08 21:15:08 起重，带 `HTTPS_PROXY`）／web **18492**——23:0x 现查两枚都在监听；**CR9-78 是 web 侧改动，dev HMR 已装载并浏览器实测 ⇒ 没重启过任何一侧**。**这两个 PID 是当日实况，下轮请现查**（`Get-NetTCPConnection -State Listen -LocalPort 8000,3000 | Select -ExpandProperty OwningProcess`）；若 0 监听，起 ds 带 `SYNC_CATCHUP=off` + `HTTPS_PROXY`（只这两个前缀，**不要手设 `NO_PROXY`**）
+- **待拍板**：**#56 甲 已落地＝CR9-79**（返回按钮文案与行为同键，点击那一支待主人手测）；**#54 乙 已落地＝CR9-80**（备份陈旧检查改小时级复查，门限未动）；**#52 乙 已升格进 `.claude/rules/project.md`**，其 甲／丙 仍未拍板；**#55** 甲＝CR9-78 已落地、**乙 的前置探针已到手**（新浪能给 us 日 K，一发 10048 行、不经东财桶），乙 落码与 丙 仍待字；**#51 定档＝甲（打住）**、**#53 定档＝丙**（三处载体待改写）；**④ 定档＝10-09 17:15 一枚自动化一次跑完七枚**；**③ 主源档 A 格已填（此刻主源不可达，两形都在）、B 格由 09:35 那枚去拿**。逐条状态与案由只读 [FIX-LEDGER.md](FIX-LEDGER.md) 的状态卡与「待拍板」节，本文件不并列第二套
+- **服务**：ds **20764**（10-08 **23:56:19** 起重，`SYNC_CATCHUP=off`＋`HTTPS_PROXY`、没手设 `NO_PROXY`）／web **18492**（没碰，#56 甲 走 HMR）。装载自证＝`app/backup_scheduler.py` mtime 23:49:06 < StartTime，且 `/health` 第一眼就带 `staleCheckNextRun` ⇒ **CR9-80 在活进程里**。**这两个 PID 是当日实况，下轮请现查**（`Get-NetTCPConnection -State Listen -LocalPort 8000,3000 | Select -ExpandProperty OwningProcess`）；若 0 监听，起 ds 带 `SYNC_CATCHUP=off` + `HTTPS_PROXY`（只这两个前缀，**不要手设 `NO_PROXY`**）
 
 ## 文档地图
 
