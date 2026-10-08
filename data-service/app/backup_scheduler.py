@@ -27,6 +27,12 @@ scheduler 里没有一处引用它，`backups/` 目录是空的。单机自托�
   "昨晚到底备过没有"在断电重启后读不出来。⇒ 每轮结果**同时落 `backups/state.json`**
   （失败轮同样落），`health()` 在内存为空时回落到它并标 `fromDisk`。放在 `backups/` 里
   是因为 `rotate()` 只按 `SNAPSHOT_NAME` 删文件 ⇒ 这份状态永远不会被轮换碰掉。
+- **#54 乙（10-08 实测出来的缺口）**：补跑检查原本**只在进程启动那一刻比一次**，于是
+  "ds 连续活着跨过 03:30、而那一刻机器睡了"这一种错过永远补不上（10-06→10-08 那个
+  "两日一跳"的真机制就是它，不是缺功能）。⇒ 现在把同一条陈旧检查**每小时复查一次**，
+  错过一次 03:30 最迟在一个小时内补上，而不是等下一次重启。门限仍是 26 小时：正常节奏下
+  下一档 03:30 会先把 `state.json` 刷新，`age` 永远到不了 26 ⇒ 复查不会变成每天多复制一份
+  63 MB（这一条有断言钉着）。
 """
 
 from __future__ import annotations
@@ -43,6 +49,7 @@ from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 
 from scripts.backup_db import backup
 
@@ -53,7 +60,8 @@ DEFAULT_BACKUP_HOUR = 3
 DEFAULT_BACKUP_MINUTE = 30
 DEFAULT_KEEP = 7
 # #37／CR9-65（主人 10-05 的字）：**补**与**删**是两个门限，不是一个——
-# 落后 26 小时（错过一次每日 03:30 ＋ 2 小时容差）就起服务补一份；
+# 落后 26 小时（错过一次每日 03:30 ＋ 2 小时容差）就补一份（起服务时查一次，#54 乙之后
+# 每小时再查一次）；
 # 留存超过 30 天的一律删掉、不留底（正常节奏下 BACKUP_KEEP=3 会让文件活不过 3 天，
 # 这一档只在"机器长期不开、留下的全是一个月前的"时命中）。
 DEFAULT_STALE_HOURS = 26
@@ -71,6 +79,11 @@ SNAPSHOT_NAME = re.compile(r"^dev-(\d{8})-(\d{6})\.db$")
 # #29：备份结果的**磁盘状态位**。放在 backups/ 里而不在库里，是因为 `rotate()` 只按
 # SNAPSHOT_NAME 删文件 ⇒ 这个文件永远不会被轮换碰掉，而它要回答的恰是"昨晚到底备过没有"。
 STATE_NAME = "state.json"
+
+# 两枚 job 的 id：`nextRun` 必须按 id 取每日那一档，不能按 `get_jobs()` 的下标取——
+# 加了 #54 的每小时复查之后，下标 0 会是"下一小时的那次检查"而不是"明天的 03:30"。
+DAILY_JOB_ID = "daily-db-backup"
+STALE_CHECK_JOB_ID = "db-backup-stale-check"
 
 _scheduler: BackgroundScheduler | None = None
 _lock = threading.Lock()
@@ -346,8 +359,12 @@ def request_run(trigger: str = "manual") -> dict:
     return {"accepted": True, "note": "已提交后台执行，结果见 /health 的 dbBackup"}
 
 
-def startup_catch_up() -> dict:
-    """起服务时查一次：错过每日备份就当场补一份（#37／CR9-65，主人 10-05 的字）。
+def startup_catch_up(*, label: str = "startup") -> dict:
+    """查一次"最近这份备份是不是太旧了"，太旧就当场补一份（#37／CR9-65，主人 10-05 的字）。
+
+    两个调用点共用这一条：进程启动时一次（`start_scheduler` 末尾），以及**每小时复查一次**
+    （#54 乙，10-08 主人的字）。`label` 只进日志，用来把"起服务时补的"与"长驻着复查补的"
+    在日志里分开；投递出去的 `trigger` 仍是 `startup-catchup`（`state.json` 里的口径不变）。
 
     返回值只用于日志与断言，**不进 `/health`**——那一位已经有 `lastRun`/`ok`/`outcome`
     在说话，再加一个键只会让"这份是补的"和"这份是准的"混在一起；要说清是谁做的，
@@ -379,24 +396,25 @@ def startup_catch_up() -> dict:
             reason = "fresh" if age_h < stale_h else "stale-%dh" % age_h
         if reason == "fresh":
             log.info(
-                "backup startup check: last backup %dh ago (< %dh) ⇒ 不补跑", age_h, stale_h
+                "backup %s check: last backup %dh ago (< %dh) ⇒ 不补跑", label, age_h, stale_h
             )
             return {"triggered": False, "reason": reason, "ageHours": age_h}
         got = request_run("startup-catchup")
         # 这条用 warning：uvicorn 默认配置下 log.info 完全不打（门槛⑤ 记过的老账），
-        # 而"起服务时补了一份"必须第二天还能从日志里读出来。
+        # 而"补了一份"必须第二天还能从日志里读出来。
         log.warning(
-            "backup startup check: %s ⇒ 补一份（accepted=%s）", reason, got.get("accepted")
+            "backup %s check: %s ⇒ 补一份（accepted=%s）", label, reason, got.get("accepted")
         )
         return {
             "triggered": True,
             "reason": reason,
             "ageHours": age_h,
             "accepted": got.get("accepted"),
+            "label": label,
         }
     except Exception as e:  # noqa: BLE001 补跑不许拖垮起服务（CR9-45 同族）
-        log.warning("backup startup check failed: %s", e)
-        return {"triggered": False, "reason": "error"}
+        log.warning("backup %s check failed: %s", label, e)
+        return {"triggered": False, "reason": "error", "label": label}
 
 
 def start_scheduler() -> None:
@@ -415,6 +433,20 @@ def start_scheduler() -> None:
     )
     _scheduler.start()
     log.info("db backup scheduler started: daily %02d:%02d (Asia/Shanghai)", hour, minute)
+    # #54 乙（主人 10-08 的字）：同一条陈旧检查每小时复查一次。防的是这一种形状＝ds 连续活着
+    # 跨过 03:30，而那一刻机器睡着 ⇒ cron 没触发、也没有"下一次启动"来补（10-06→10-08 那个
+    # "两日一跳"就是它）。门限不变，所以正常节奏下这一枚永远走 fresh 分支（有断言钉着）。
+    _scheduler.add_job(
+        lambda: startup_catch_up(label="hourly"),
+        IntervalTrigger(hours=1),
+        id=STALE_CHECK_JOB_ID,
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+        # 机器睡着时这一档会 misfire；醒来后一小时内仍然值得补查一次——它查的是盘上的
+        # `state.json`，不在启动路径上，不会因为"刚起过服务"而重复复制 63 MB。
+        misfire_grace_time=3600,
+    )
     # #37：cron 只覆盖"那一刻机器醒着且 ds 在跑"——10-03 与 10-05 两夜它两次都没触发，
     # 而盘上不会有任何一句话说"今天没有备份"。⇒ 起服务时补一次检查，把"错过"变成"补上"。
     # 放在 start 之后：job 先注册上，补跑这一份的 `nextRun` 才是可读的。
@@ -440,17 +472,23 @@ def health() -> dict:
     此时 `runs` 是**那份文件累计的次数**，不是本进程的次数。
     """
     last = _state["lastResult"] or {}
-    next_run = None
+    # #54 乙之后调度器里有**两枚** job，而 `get_jobs()` 的顺序按下次触发时刻排——每小时那枚
+    # 永远排在 03:30 之前。⇒ `nextRun` 必须按 id 取"下一档每日备份"，不能被复查顶掉；
+    # 复查那一枚另开一键，这样"错过 03:30 有没有人在盯"在 curl 里读得出来。
+    daily_run = check_run = None
     if _scheduler is not None:
-        jobs = _scheduler.get_jobs()
-        if jobs:
-            next_run = str(jobs[0].next_run_time)
+        for job in _scheduler.get_jobs():
+            if job.id == "daily-db-backup":
+                daily_run = str(job.next_run_time)
+            elif job.id == STALE_CHECK_JOB_ID:
+                check_run = str(job.next_run_time)
     out = {
         "lastRun": _state["lastRun"],
         "ok": last.get("ok"),
         "outcome": last.get("outcome"),
         "runs": _state["runs"],
-        "nextRun": next_run,
+        "nextRun": daily_run,
+        "staleCheckNextRun": check_run,
         "fromDisk": False,
     }
     if out["lastRun"] is None:

@@ -253,14 +253,24 @@ def test_backup_job_registered_and_rotates() -> None:
         check("🔁 #37：新鲜 state.json ⇒ 起服务不投递补跑（同日多次重启不会顺手复制 63 MB）",
               os.listdir(boot_dir) == [bs.STATE_NAME], str(os.listdir(boot_dir)))
         try:
-            ids = [j.id for j in bs._scheduler.get_jobs()]
-            nxt = bs._scheduler.get_jobs()[0].next_run_time
-            check("①：daily-db-backup 已注册为 job", ids == ["daily-db-backup"], str(ids))
+            jobs = {j.id: j for j in bs._scheduler.get_jobs()}
+            check("①：daily-db-backup 已注册为 job", "daily-db-backup" in jobs,
+                  str(sorted(jobs)))
+            check("#54 乙：同一条陈旧检查另注册一枚每小时复查（ds 长驻时错过 03:30 也能补）",
+                  bs.STALE_CHECK_JOB_ID in jobs
+                  and jobs[bs.STALE_CHECK_JOB_ID].trigger.interval == timedelta(hours=1),
+                  str([(k, str(v.trigger)) for k, v in sorted(jobs.items())]))
+            nxt = jobs["daily-db-backup"].next_run_time
             check("①：下次触发时刻是 03:30（Asia/Shanghai）",
                   (nxt.hour, nxt.minute) == (3, 30), str(nxt))
             check("①：/health 的 dbBackup 带得出下一档时刻（"
                   "这样才能把'今天还没到 03:30'与'job 根本没注册'分开读）",
                   "03:30" in str(bs.health().get("nextRun")), str(bs.health()))
+            h = bs.health()
+            check("#54 乙：两枚 job 之后 `nextRun` 仍必须是每日那一档，复查另开一键"
+                  "（按下标取 jobs[0] 在这里会拿错）",
+                  "03:30" in str(h.get("nextRun")) and h.get("staleCheckNextRun") is not None,
+                  str(h))
         finally:
             bs.shutdown_scheduler()
         check("🔁 ①：shutdown 后调度器置 None（服务停了不会有 job 残留）", bs._scheduler is None)
@@ -652,6 +662,23 @@ def test_startup_hook_is_wired_into_start_scheduler() -> None:
               [f for f in os.listdir(boot) if bs.SNAPSHOT_NAME.match(f)] == [],
               str(os.listdir(boot)))
 
+        # #54 乙：**注册上不等于会查**（同 #38 那条教训）。把每小时那一枚 job 的函数直接调一次，
+        # 问的是"长驻着的 ds 在错过 03:30 之后，下一次复查会不会真的把补跑投递出去"。
+        try:
+            os.environ["BACKUP_DIR"] = boot
+            bs._state.update({"running": False, "lastRun": None, "lastResult": None, "runs": 0})
+            bs._write_state(
+                {"lastRun": (datetime.now(bs.TZ) - timedelta(hours=30)).isoformat(timespec="seconds"),
+                 "ok": True, "outcome": "completed", "runs": 1}, boot)
+            bs.start_scheduler()
+            calls.clear()
+            hourly = {j.id: j for j in bs._scheduler.get_jobs()}[bs.STALE_CHECK_JOB_ID]
+            hourly.func()
+            check("#54 乙：落后 30 小时 ⇒ 每小时那一枚真的投递补跑（不必等下一次重启）",
+                  calls == ["startup-catchup"], str(calls))
+        finally:
+            bs.shutdown_scheduler()
+
         try:
             fresh = datetime.now(bs.TZ).isoformat(timespec="seconds")
             bs._write_state(
@@ -659,6 +686,10 @@ def test_startup_hook_is_wired_into_start_scheduler() -> None:
             calls.clear()
             bs.start_scheduler()
             check("🔁 #38：刚备过 ⇒ 起服务一条都不投递（同日反复重启的代价仍由 26 小时门限挡住）",
+                  calls == [], str(calls))
+            hourly = {j.id: j for j in bs._scheduler.get_jobs()}[bs.STALE_CHECK_JOB_ID]
+            hourly.func()
+            check("🔁 #54 乙：刚备过 ⇒ 每小时复查同样不投递（正常节奏下它不会每天多复制一份 63 MB）",
                   calls == [], str(calls))
         finally:
             bs.shutdown_scheduler()

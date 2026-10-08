@@ -176,9 +176,10 @@ def _phase_a_never_ran(tmp: str) -> None:
         bb = body.get("dbBackup")
         check("①：/health 带 dbBackup 位，且是 dict（不是裸布尔——'今天没跑过'与'跑失败'必须分得开）",
               isinstance(bb, dict), str(bb))
-        check("①：从未跑过且磁盘无状态 ⇒ ok=None／lastRun=None／fromDisk=False（#29 后形状多两键）",
+        check("①：从未跑过且磁盘无状态 ⇒ ok=None／lastRun=None／fromDisk=False"
+              "（#29 后形状多两键；#54 乙 后再多一键 staleCheckNextRun＝每小时复查那一档）",
               bb == {"lastRun": None, "ok": None, "outcome": None, "runs": 0,
-                     "nextRun": None, "fromDisk": False}, str(bb))
+                     "nextRun": None, "staleCheckNextRun": None, "fromDisk": False}, str(bb))
     finally:
         bs._state.clear()
         bs._state.update(saved)
