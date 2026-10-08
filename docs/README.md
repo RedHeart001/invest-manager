@@ -14,7 +14,7 @@
 ## 当前状态（随 FIX-LEDGER 同步）
 
 - **当前轮次**：CR9（开放）；CR8 已收尾
-- **未闭环项**：CR9-3（BK 等价性，上游态）、CR9-26（hk 列表，上游态）、G7（token 配置，已配置待验证）、C31（Docker 验证，暂缓）
+- **未闭环项**：CR9-3（BK 成分等价性，只欠实网验收）、CR9-26（hk 列表，上游态）、G7（token 已配置且双侧生效，欠的是"上云前补完整身份鉴权"）、C31（Docker 验证，暂缓）
 - **待拍板**：#51（现价与批量分桶，与 #27 第二步同批判读）、#52（一次性 at 静默消失）、#53（day 口径改批次）
 - **服务**：ds 18572 / web 18492（若 0 监听，起 ds 带 `SYNC_CATCHUP=off` + `HTTPS_PROXY`）
 
@@ -31,7 +31,7 @@
 ## 常用命令
 
 - **起服务**：ds 带 `SYNC_CATCHUP=off` + `HTTPS_PROXY`；web `npm run dev`
-- **跑测试**：web `npx tsc --noEmit && npx vitest run`；ds 18 个点名套件逐套 `exit=0`（名单见 [FIX-LEDGER.md](FIX-LEDGER.md)「验证门槛」）；集成 `node web/scripts/verify-all.mjs`（7 套件）
+- **跑测试**：web `npx tsc --noEmit && npx vitest run`；ds 离线套件逐套 `exit=0`；集成 `node web/scripts/verify-all.mjs`。**点名的套件清单与各项现值只读 [FIX-LEDGER.md](FIX-LEDGER.md)「验证门槛」**——本文件不复述计数（计数会随重组漂移）
 - **查状态**：`curl :8000/health`（ds）、`curl :3000/api/health`（web）
 
 ## 文档维护约定
