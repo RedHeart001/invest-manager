@@ -83,6 +83,10 @@ def test_provider_caches_bounded() -> None:
     sina = SinaProvider()
     check("sina _cache 为 Lru", isinstance(sina._cache, Lru))
     check("sina _cache 有上限", sina._cache.capacity == 256, str(sina._cache.capacity))
+    # #55 乙：us 一条一只≈一万行，与 fund 共用 256 上限＝把驻留内存交给他浏览 history
+    check("sina _us_cache 为 Lru", isinstance(sina._us_cache, Lru))
+    check("sina _us_cache 有上限（默认 8，不跟 fund 的 256）",
+          sina._us_cache.capacity == 8, str(sina._us_cache.capacity))
 
 
 if __name__ == "__main__":

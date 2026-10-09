@@ -350,8 +350,9 @@ def test_us_batch_quotes_declare_inability() -> None:
               calls["n"] == 0, f"yfinance 发了 {calls['n']} 次")
 
         # 3) 链序与单只路径不受影响
-        check("🔁 us 链序一个字没动（CR9-52 由 `tencent_minute` 钉着：Yahoo 仍是单只现价主源）",
-              [p.source for p in get_provider_chain("us")] == ["yfinance", "tencent"],
+        check("🔁 us 链序的前两家一个字没动（CR9-52 由 `tencent_minute` 钉着：Yahoo 仍是单只现价主源）"
+              "＋#55 乙 追加的第三家＝新浪（只在前两家都不给时才轮到它）",
+              [p.source for p in get_provider_chain("us")] == ["yfinance", "tencent", "sina"],
               str([p.source for p in get_provider_chain("us")]))
         calls["n"] = 0
         one = chain_call("us", lambda p: {"quotes": p.get_quotes("us", ["AAPL"])})
@@ -478,6 +479,145 @@ def test_us_batch_all_empty_raises() -> None:
         tp.requests = orig_req
 
 
+# ---------- G. #55 乙（CR9-81）：us 日 K 的第二家＝新浪，挂在链尾 ----------
+#
+# 为什么要这一组：10-08 主人手测「粘贴美股没数据」的机制＝us 日 K 在链上只有一家会真给数据
+# （Yahoo），而腾讯那条 K 线腿对 us 码直接抛 NotSupported（不发请求就拒）⇒ Yahoo 一限流整屏就空。
+# 本组证的是**路由**（谁在什么时候被打、note 说不说得出成因），**不证**"新浪真有那只票"——
+# 后者是 10-09 00:00 那枚只读探针的产出（一发 10048 行），且只覆盖 1 只（179 只的覆盖率仍未证）。
+
+def test_us_kline_second_source() -> None:
+    import app.providers.openbb_provider as obb
+    import app.providers.sina_provider as sp
+
+    fake = [
+        {"date": "2026-10-06", "open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5, "volume": 10.0},
+        {"date": "2026-10-07", "open": 1.5, "high": 2.5, "low": 1.0, "close": 2.0, "volume": 20.0},
+    ]
+    sina_calls: dict = {"n": 0, "symbols": []}
+
+    def _fake_series(self, symbol: str) -> list[dict]:
+        sina_calls["n"] += 1
+        sina_calls["symbols"].append(symbol)
+        return [dict(r) for r in fake]
+
+    orig_us_series = sp.SinaProvider._us_series
+    orig_gk = obb.OpenBBProvider.get_kline
+    # 整组套一层腾讯假 HTTP：这条腿本该"不发请求就拒"，装上它就把"万一发了"也变成离线计数而不是真出网
+    tk = _install_fake_tencent_http(())
+    sp.SinaProvider._us_series = _fake_series
+    try:
+        # 1) 正向（承重的那枚）：Yahoo 挂 ⇒ 链尾的新浪供出 candles
+        def _boom(self, type_, code, start=None, end=None, interval="1d"):
+            raise ProviderError("yfinance kline failed: HTTP 429 Too Many Requests")
+
+        obb.OpenBBProvider.get_kline = _boom
+        res = chain_call("us", lambda p: p.get_kline("us", "CEG", start="2026-09-25", end="2026-10-09"))
+        check("#55 乙：Yahoo 挂 ⇒ 链尾新浪供出 candles（10-09 之前这一格是「全链失败」、屏上只剩空态）",
+              res.get("source") == "sina" and len(res.get("candles", [])) == 2, str(res)[:160])
+        check("#55 乙：这一路只打了新浪一发、腾讯那条腿一次请求都没发",
+              sina_calls["n"] == 1 and sina_calls["symbols"] == ["CEG"] and tk["n"] == 0,
+              f"sina={sina_calls} 腾讯={tk['n']}")
+        note = res.get("note") or ""
+        check("#55 乙：note 两头都说得出——自己是不复权／没成交额，以及主源为什么没用",
+              "不复权" in note and "amount 恒为 null" in note and "已降级至 sina" in note and "429" in note,
+              note[:240])
+
+        # 2) 🔁 成对的另一半：Yahoo 给得出时根本不该走到新浪（乙 没换主源、也没多花一发）
+        def _ok(self, type_, code, start=None, end=None, interval="1d"):
+            return {"type": type_, "code": code, "interval": "1d",
+                    "source": self.source, "candles": [dict(r) for r in fake[:1]]}
+
+        obb.OpenBBProvider.get_kline = _ok
+        sina_calls["n"] = 0
+        res2 = chain_call("us", lambda p: p.get_kline("us", "AAPL"))
+        check("🔁 Yahoo 成功时链走不到新浪（us 日 K 主源仍是它，乙 只是多备一家）",
+              res2.get("source") == "yfinance" and sina_calls["n"] == 0 and res2.get("note") is None,
+              f"source={res2.get('source')} sina={sina_calls['n']} note={str(res2.get('note'))[:80]}")
+
+        # 3) 三家都不给 ⇒ 仍是一句 all sources failed（#55 甲 那句上屏成因照样归一得出）
+        def _boom2(self, type_, code, start=None, end=None, interval="1d"):
+            raise ProviderError("yfinance kline failed: ConnectionResetError(10054)")
+
+        obb.OpenBBProvider.get_kline = _boom2
+        sp.SinaProvider._us_series = lambda self, symbol: (_ for _ in ()).throw(
+            ProviderError(f"sina us kline empty: {symbol}")
+        )
+        try:
+            chain_call("us", lambda p: p.get_kline("us", "CEG"))
+            msg, raised = "(没抛)", False
+        except ProviderError as e:
+            msg, raised = str(e), True
+        check("#55 乙：三家都不给时仍抛 all sources failed（web 空态归一的判据就是这串前缀）",
+              raised and "all sources failed" in msg, msg[:200])
+
+        # 4) 🔁 fund 那条腿没被 us 分支改写打散
+        sp.SinaProvider._us_series = _fake_series
+        orig_series = sp.SinaProvider._series
+        sp.SinaProvider._series = lambda self, symbol: [dict(r) for r in fake]
+        try:
+            r3 = sp._provider.get_kline("fund", "159915", start="2026-09-25", end="2026-10-09")
+            check("🔁 fund 仍由新浪供、note 仍是原来那句（us 分支没顺手改掉场内那条腿）",
+                  r3.get("source") == "sina" and r3.get("note") == "备源数据（新浪，不复权）"
+                  and len(r3.get("candles", [])) == 2, str(r3)[:160])
+        finally:
+            sp.SinaProvider._series = orig_series
+
+        # 5) 窗口两形都要认（本轮实测挖出来的既有坑，不是预防性设计）
+        for label, win in (("YYYY-MM-DD", ("2026-09-25", "2026-10-09")),
+                           ("YYYYMMDD", ("20260925", "20261009"))):
+            r = sp._provider.get_kline("us", "CEG", start=win[0], end=win[1])
+            check(f"#55 乙：窗口两形都认 ⇒ {label} 出 2 根（改前 ISO 形被切成 `2026--09-9-`、整段过滤成空）",
+                  len(r.get("candles", [])) == 2, f"{label} → {len(r.get('candles', []))} 根")
+
+        # 6) 码清洗：路径是拼进 URL 的（`staticdata/us/{symbol}`），放过非 ASCII／越界就是白送注入面
+        check("#55 乙：us 码＝裸 ticker 直送（含 BRK.A 这类带点号的，库内 us 码就有）",
+              sp._us_symbol("brk.a") == "BRK.A" and sp._us_symbol(" CEG ") == "CEG",
+              f"{sp._us_symbol('brk.a')}/{sp._us_symbol(' CEG ')}")
+        check("#55 乙：清洗拒空／拒非 ASCII／拒超长／拒路径分隔符",
+              sp._us_symbol("") is None and sp._us_symbol("贵A") is None
+              and sp._us_symbol("A" * 11) is None and sp._us_symbol("CEG/../../x") is None,
+              f"'' →{sp._us_symbol('')} 贵A →{sp._us_symbol('贵A')} 11字 →{sp._us_symbol('A'*11)}")
+        _expect_not_supported(lambda: sp._provider.get_kline("us", "600519"),
+                              "#55 乙：A 股码问新浪 us 腿 → 拒（清洗不放过数字码）")
+        _expect_not_supported(lambda: sp._provider.get_kline("us", "CEG", interval="1m"),
+                              "#55 乙：us 分钟线仍拒（乙 只补日 K，没顺手扩能力）")
+
+        # 7) 一 fetch 整段历史 ⇒ 同一只第二次不许再打上游
+        class _DF:
+            def __init__(self, rows):
+                self._rows = rows
+
+            def __len__(self):
+                return len(self._rows)
+
+            def iterrows(self):
+                return enumerate(self._rows)
+
+        hits = {"n": 0}
+        orig_rwt = sp.run_with_timeout
+
+        def _fake_rwt(fn, timeout, label):
+            hits["n"] += 1
+            return _DF([dict(r) for r in fake]), None
+
+        sp.run_with_timeout = _fake_rwt
+        try:
+            sp.SinaProvider._us_series = orig_us_series  # 这一枚要走真缓存逻辑，不能带假实现
+            prov = sp.SinaProvider()  # 新实例＝空缓存，免得被同进程别处的读数污染
+            prov.get_kline("us", "MSFT", start="2026-09-25", end="2026-10-09")
+            r_b = prov.get_kline("us", "MSFT", start="2026-09-25", end="2026-10-09")
+            check("#55 乙：同一只第二次走 6 小时缓存、不再打新浪（重复开页面＝零上游）",
+                  hits["n"] == 1 and len(r_b.get("candles", [])) == 2,
+                  f"看门狗被打了 {hits['n']} 次")
+        finally:
+            sp.run_with_timeout = orig_rwt
+    finally:
+        sp.SinaProvider._us_series = orig_us_series
+        obb.OpenBBProvider.get_kline = orig_gk
+        _restore_tencent_http()
+
+
 def main() -> int:
     test_symbol_for_narrowing()
     test_provider_rejects_without_http()
@@ -485,6 +625,7 @@ def main() -> int:
     test_error_message_names_subject_when_rate_limited()
     test_us_batch_quotes_declare_inability()
     test_us_batch_all_empty_raises()
+    test_us_kline_second_source()
     passed = sum(1 for _n, ok, _d in results if ok)
     for name, ok, detail in results:
         if not ok:
