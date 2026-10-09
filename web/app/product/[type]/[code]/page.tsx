@@ -11,6 +11,7 @@ import { dsGet, type Quote } from "@/lib/data-service";
 import { priceWithCurrency } from "@/lib/currency";
 import { fetchEvents, narrowByDates, pickEventDates } from "@/lib/events";
 import { getKlineRange, normalizeRange, type KlineResult } from "@/lib/kline";
+import { quoteClockText } from "@/lib/market-clock";
 import { detectPhases } from "@/lib/phases";
 import { buildProfile, isExchangeTradedFund, type QuoteEnriched } from "@/lib/profile";
 import { prisma } from "@/lib/prisma";
@@ -234,6 +235,9 @@ export default async function ProductPage({
 
   const tableRows = [...closes].slice(-15).reverse();
   const changePct = quote?.changePct ?? null;
+  // #58：时间戳是**那个市场的本地墙上时间**（上游原样透传、`_ts_iso` 只归一形态不换钟），
+  // 屏上必须点名是哪个钟——否则一条正确的数会被读成「过期一天」（主人 10-09 报 F 那一格的原话）。
+  const quoteClock = quote ? quoteClockText(type, quote.timestamp) : null;
 
   return (
     <main className="mx-auto max-w-5xl px-6 py-8">
@@ -295,7 +299,7 @@ export default async function ProductPage({
               )}
               <span className="ml-auto text-xs text-zinc-400">
                 来源：{quote.source}
-                {quote.timestamp ? ` · ${quote.timestamp}` : ""}
+                {quoteClock ? ` · ${quoteClock}` : ""}
               </span>
             </div>
             {/* CR7-3/B1：R13 双源交叉验证的按需入口（方案 ①，2026-09-24 拍板） */}
