@@ -325,7 +325,7 @@ export default async function ProductPage({
       {/* ③④ 主图区 + 变化解读区 */}
       {kline ? (
         <ProductCharts
-          key={`${type}:${code}`}
+          key={`charts:${type}:${code}`}
           type={type}
           code={code}
           initialKline={effectiveKline}
@@ -444,7 +444,9 @@ export default async function ProductPage({
       </section>
 
       {/* ⑥ 深度分析入口（P5 / M5：多角色研报，与聊天 L2 工具同一链路） */}
-      <ResearchPanel key={`${type}:${code}`} type={type} code={code} name={product.name} />
+      {/* 换标的时靠 key 强制重挂载；前缀是必需的——这两枚是同一个 <main> 的兄弟，
+          key 字面相同会被 React 判成重复（`lib/jsx-key-guard.test.ts` 的 R1 就是钉这件事）。 */}
+      <ResearchPanel key={`research:${type}:${code}`} type={type} code={code} name={product.name} />
 
       <p className="mt-8 text-xs text-zinc-400">
         行情数据来自免费源，可能有延迟；阶段划分与事件标注仅代表时间上的相关性，可能相关而非因果；
