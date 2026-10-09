@@ -39,6 +39,9 @@ FENCE = re.compile(r"^\s*```")
 QUANT_AFTER = set("个条枚行项次句要上入两段–—~-～至到")
 POINTER_HINT = ("搬", "归档", "指针", "history")
 APPEND_OWNER = "CODE-REVIEW.md"  # 「追加N」这一族节次的归属文件（只有它欠留指针行）
+# 元文本豁免：一句话里在**谈**某个标签不存在／是样例，就不是对它的引用。判据＝同一行含下列词之一。
+# 已知残留（诚实边界）：真断链若恰好写在带这些词的句子里，会被这一档豁免放过——所以豁免行会单独计数打出来。
+META_MARKERS = ("不存在", "没有编号", "未登记", "悬空", "样例", "样本", "假链接", "误抓", "豁免")
 
 
 def read(path):
@@ -147,6 +150,17 @@ def has_pointer_on(path, label):
     return False
 
 
+def line_iter(text):
+    """逐行给出正文（跳过 ``` 代码块内部，框图里的 `[x](y)` 不是链接）。"""
+    inside = False
+    for line in text.split("\n"):
+        if FENCE.match(line):
+            inside = not inside
+            continue
+        if not inside:
+            yield line
+
+
 def link_scan(root):
     active = active_docs(root)
     history = history_docs(root)
@@ -162,30 +176,40 @@ def link_scan(root):
             if m:
                 items.add(m.group(1))
     broken = []
-    counts = {"append": 0, "item": 0, "link": 0}
+    counts = {"append": 0, "item": 0, "link": 0, "meta_exempt": 0}
     for path in active:
         rel = os.path.relpath(path, root).replace(os.sep, "/")
-        text = strip_fences(read(path))
-        for lab in iter_labels(text):
-            counts["append"] += 1
-            if lab not in all_labels:
-                broken.append("%s: 「%s」在任何标题里都不存在" % (rel, lab))
-            elif (lab not in active_labels
-                  and os.path.basename(path) == APPEND_OWNER
-                  and not has_pointer_on(path, lab)):
-                # 只有「拥有追加节的文件」欠一行指针；别的文件引用它，标签能落地就算通
-                broken.append("%s: 「%s」已搬进归档，但原地没有带标签的指针行" % (rel, lab))
-        for m in ITEM_REF.finditer(text):
-            counts["item"] += 1
-            if m.group(1) not in items:
-                broken.append("%s: 「第 %s 项」在 FIX-LEDGER 与归档里都没有条目行" % (rel, m.group(1)))
-        for m in MD_LINK.finditer(text):
-            target = m.group(1).split("#")[0].strip()
-            if not target or target.startswith(("http:", "https:", "mailto:")):
-                continue
-            counts["link"] += 1
-            if not os.path.exists(os.path.normpath(os.path.join(os.path.dirname(path), target))):
-                broken.append("%s: 链接目标不存在 %s" % (rel, target))
+        for line in line_iter(read(path)):
+            meta = any(k in line for k in META_MARKERS)
+            for lab in iter_labels(line):
+                if meta:
+                    counts["meta_exempt"] += 1
+                    continue
+                counts["append"] += 1
+                if lab not in all_labels:
+                    broken.append("%s: 「%s」在任何标题里都不存在" % (rel, lab))
+                elif (lab not in active_labels
+                      and os.path.basename(path) == APPEND_OWNER
+                      and not has_pointer_on(path, lab)):
+                    # 只有「拥有追加节的文件」欠一行指针；别的文件引用它，标签能落地就算通
+                    broken.append("%s: 「%s」已搬进归档，但原地没有带标签的指针行" % (rel, lab))
+            for m in ITEM_REF.finditer(line):
+                if meta:
+                    counts["meta_exempt"] += 1
+                    continue
+                counts["item"] += 1
+                if m.group(1) not in items:
+                    broken.append("%s: 「第 %s 项」在 FIX-LEDGER 与归档里都没有条目行" % (rel, m.group(1)))
+            for m in MD_LINK.finditer(line):
+                target = m.group(1).split("#")[0].strip()
+                if not target or target.startswith(("http:", "https:", "mailto:")):
+                    continue
+                if meta:
+                    counts["meta_exempt"] += 1
+                    continue
+                counts["link"] += 1
+                if not os.path.exists(os.path.normpath(os.path.join(os.path.dirname(path), target))):
+                    broken.append("%s: 链接目标不存在 %s" % (rel, target))
     return broken, counts, len(all_labels)
 
 
@@ -201,7 +225,10 @@ def report(root="."):
     print("== 超标报警 ==")
     print("\n".join(hits) if hits else "（无）")
     broken, counts, labels = link_scan(root)
-    print("== 断链扫描：引用数=%s，已知标签数=%d ==" % (counts, labels))
+    print("== 断链扫描：真引用 追加=%d／第N项=%d／链接=%d，元文本豁免=%d，已知标签数=%d =="
+          % (counts["append"], counts["item"], counts["link"], counts["meta_exempt"], labels))
+    print("   （豁免＝同一行含 %s 之一——那一行是在**谈**这个标签而不是引用它；这一档的残留见文件头注）"
+          % "／".join(META_MARKERS))
     print("\n".join(broken) if broken else "断链＝0")
     return len(hits), len(broken)
 
@@ -215,8 +242,10 @@ def selftest():
                     "# review\n\n#### 追加一 · 活着的一节\n正文\n\n"
                     "追加十二 已整节搬至 docs/history/2026-01-01-x.md（归档，这一行就是留着的指针）\n\n"
                     "追加十三 的教训还在别处被引用，可这一行什么都没留\n\n"
-                    "追加九百九十九 是悬空标签\n\n"
+                    "追加九百九十九 是盘上查无此节的一个编号\n\n"
                     "按纪律在门槛节追加一行带出处、原句不动（动词用法，不是节次）\n\n"
+                    "元文本豁免样例：这一行说『追加九百九十九』这个标签在盘上不存在，是在谈它，不是引用它\n\n"
+                    "样例：第 999 项 这种写法在盘上不存在，这一行是在谈它（豁免），不是引用它\n\n"
                     "```\n│  product/[type]/[code](图表) / chat(统一Agent)  │\n│ [x](gone-inside-fence.md) │\n```\n")
         io.open(os.path.join(root, "docs", "FIX-LEDGER.md"), "w",
                 encoding="utf-8", newline="\n").write(
@@ -236,6 +265,7 @@ def selftest():
             "搬走且带指针不误报": "「追加十二」" not in joined,
             "动词用法不误报": "「追加一」" not in joined and "追加一行" not in joined,
             "代码块内链接不误报": "gone-inside-fence.md" not in joined,
+            "元文本豁免计入而非静默放过": counts["meta_exempt"] >= 2 and "追加九百九十九」在任何标题" in joined,
             "归档标题计入集合": labels == 3,
         }
     finally:
