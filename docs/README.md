@@ -15,8 +15,8 @@
 
 - **当前轮次**：CR9（开放）；CR8 已收尾
 - **未闭环项**：CR9-3（BK 成分等价性，只欠实网验收）、CR9-26（hk 列表，上游态）、G7（token 已配置且双侧生效，欠的是"上云前补完整身份鉴权"）、C31（Docker 验证，暂缓）
-- **待拍板**：**#56 甲 已落地＝CR9-79**（返回按钮文案与行为同键，点击那一支待主人手测）；**#54 乙 已落地＝CR9-80**（备份陈旧检查改小时级复查，门限未动）；**#52 乙 已升格进 `.claude/rules/project.md`**，其 甲／丙 仍未拍板；**#55** 甲＝CR9-78 已落地、**乙 的前置探针已到手**（新浪能给 us 日 K，一发 10048 行、不经东财桶），乙 落码与 丙 仍待字；**#51 定档＝甲（打住）**、**#53 定档＝丙**（三处载体待改写）；**④ 定档＝10-09 17:15 一枚自动化一次跑完七枚**；**③ 主源档 A 格已填（此刻主源不可达，两形都在）、B 格由 09:35 那枚去拿**。逐条状态与案由只读 [FIX-LEDGER.md](FIX-LEDGER.md) 的状态卡与「待拍板」节，本文件不并列第二套
-- **服务**：ds **20764**（10-08 **23:56:19** 起重，`SYNC_CATCHUP=off`＋`HTTPS_PROXY`、没手设 `NO_PROXY`）／web **18492**（没碰，#56 甲 走 HMR）。装载自证＝`app/backup_scheduler.py` mtime 23:49:06 < StartTime，且 `/health` 第一眼就带 `staleCheckNextRun` ⇒ **CR9-80 在活进程里**。**这两个 PID 是当日实况，下轮请现查**（`Get-NetTCPConnection -State Listen -LocalPort 8000,3000 | Select -ExpandProperty OwningProcess`）；若 0 监听，起 ds 带 `SYNC_CATCHUP=off` + `HTTPS_PROXY`（只这两个前缀，**不要手设 `NO_PROXY`**）
+- **待拍板**：**#55 甲＋乙 都已落地（CR9-78／CR9-81），丙 由主人 10-09 定为不做**；**#53 丙 已落笔**＝判读单位改「批」，现值＝**已到手 4 批／45 对里 4 对 ⇒ 门槛（≥3 批）已过**，16:45 那枚是第 5 批、当场可下结论；**#52 乙 已升格进规则文件，甲／丙 仍等他定档**（推荐＝零出网类继续排、要主动打上游类改人工，理由在 10-09 被到场实测换过一次）；**#54 乙／#56 甲／#51 甲 均已落地**。逐条状态与案由只读 [FIX-LEDGER.md](FIX-LEDGER.md) 的状态卡与「待拍板」节，本文件不并列第二套
+- **服务**：ds **1164**（10-09 **12:14:20** 起重，`SYNC_CATCHUP=off`＋`HTTPS_PROXY`，装的是含 CR9-81 的码＝`sina_provider.py` mtime 12:11:44 < StartTime，且 `/kline?type=us` 当场回 `source=sina`）／web **6108**（`npm run dev`）——**两侧都是 10-09 中午按主人的字新起的**（机器 11:34:14 重启后两端 0 监听）。**这两个 PID 是当日实况，下轮请现查**（`Get-NetTCPConnection -State Listen -LocalPort 8000,3000`）；若 0 监听，起 ds 带 `SYNC_CATCHUP=off` + `HTTPS_PROXY`（只这两个前缀，**不要手设 `NO_PROXY`**），并记住**起 ds 会自带一轮热点 pipeline**（10-09 12:14 那次实测 70.0s／5 topics／东财桶打到 cooldown 165.9s＝一次重启不免费）
 
 ## 文档地图
 
