@@ -356,7 +356,11 @@ export default async function ProductPage({
         {tableRows.length > 0 && (
           <div className="rounded-xl border border-zinc-200 bg-white p-4">
             <h3 className="text-xs font-medium text-zinc-500">
-              日线数据（最近 {tableRows.length} 条 / 来源：{effectiveKline.source}
+              {/* #57 乙：曲线的末点以前只在日期轴上能看出来，页面一个字不说（`DCM` 那一形＝画到六年前）。
+                  这里只说"画到哪天为止"——不判断这只还活着没有（那是可投资性，归主人）。
+                  末点＝`tableRows[0]`：这份列表来自 `klineDaily.findMany({orderBy:{date:"asc"}})`（lib/kline.ts:369），
+                  而 `tableRows` 是它 `slice(-15).reverse()` ⇒ 第一行就是最新的一根，与「最近 N 条」同源同向。 */}
+              日线数据（最近 {tableRows.length} 条，画到 {tableRows[0]?.date ?? "-"} / 来源：{effectiveKline.source}
               {/* CR9-6：币种在表头标一次即可，15 行×4 列逐格追加只会变噪声 */}
               {cur && cur !== "CNY" ? ` / 币种：${cur}` : ""}）
             </h3>
