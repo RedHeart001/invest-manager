@@ -43,7 +43,7 @@ export function storeFrom(from: FromKey): void {
   }
 }
 
-/** 无可回退历史时（直接敲 URL／新标签）由来路推导的返回目标。 */
+/** 由 `from`（＋搜索词）推导的跳转目标：拿不到 `back()` 许可证时、以及文案承诺那一页时的目的地。 */
 export function hrefForFrom(from: FromKey, q: string | null): string {
   if (from === "search") return q ? `/search?q=${encodeURIComponent(q)}` : "/search";
   return from === "chat" ? "/chat" : "/";
@@ -77,7 +77,9 @@ export function planBack(rawFrom: string | null | undefined, q: string | null): 
 // 模块级状态＝每次整页加载自动归零，而这恰好就是"是不是应用内走进来"的判据：
 // 地址栏粘贴／新标签／重复回车都是一次整页加载 ⇒ 轨迹为空 ⇒ 不许 `back()`。
 // 应用内的 `Link`/`router.push` 不换文档 ⇒ 轨迹里留着上一页，`back()` 才真能回到它，
-// CR8-6 那条"带回落后的搜索现场（type/sort/page/滚动）"也因此没被这刀牺牲掉。
+// CR8-6 那条"回来时还是你来时那一条 URL"（`q`/`type` 在 URL 里、60 秒内结果命中 search-cache）
+// 也因此没被这刀牺牲掉。注意别把这句话读成"sort/page/滚动也保证带回"——查询模式只往 URL 写
+// `q` 与 `type`（`search-client.tsx:188`），其余从来不在 back() 的保证范围内。
 
 let currentPath: string | null = null;
 let previousPath: string | null = null;
