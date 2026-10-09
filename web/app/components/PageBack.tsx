@@ -1,14 +1,12 @@
 "use client";
 
-import { useRouter, useSearchParams } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useRouter, usePathname, useSearchParams } from "next/navigation";
 
 import {
+  canBackToOrigin,
   parseFrom,
   planBack,
-  readStoredFrom,
-  storeFrom,
-  type FromKey,
+  routeKey,
 } from "@/lib/provenance";
 
 /**
@@ -19,35 +17,28 @@ import {
  * `staleTimes` 承载的滚动/分页态）——直接 push 一个重建的 `/search?q=…` 反而会丢掉
  * `type`/`sort`/`page`。
  *
- * #56 甲（10-08）：「只有没有可回退历史」这一条此前用 `window.history.length > 1` 判，
- * 而文案按 `from` 判 ⇒ 两支取的键不同，粘贴裸 URL 时会出现"承诺回首页、实际回上一条
- * 历史"、看上去就是"点了没反应"。现在文案与行为都由 `planBack` 的同一个布尔给出：
- * URL 带白名单内的 `?from=` ＝应用内进入＝那条历史必然存在＝才 `back()`；否则一律
- * push 推导目标（`sessionStorage` 的来路只用来选目标，不上文案）。
+ * #56 甲（10-08）：文案与行为一度取的是两个键（`from` vs `history.length`）⇒ 粘贴裸 URL
+ * 时"承诺回首页、实际回上一条历史"＝看上去点了没反应。
+ * 主人 10-09 第二轮手测又把"只要 URL 带 `from` 就 `back()`"这一条判错了：同一标签里粘贴
+ * `?from=home` 会 back 到上一条历史（往往是搜索页），而裸 URL 的目标还在继承会话残留。
+ * 现在两形一起断：目标只由 URL 自己决定（无 `from` ⇒ 首页），`back()` 只在**本文档路由轨迹**
+ * 证明"确实从另一页推进来"时才用（`Nav` 观察，整页加载即归零），否则一律 push 那个目标。
  */
 export default function PageBack() {
   const router = useRouter();
+  const pathname = usePathname();
   const params = useSearchParams();
   const rawFrom = params.get("from");
   const urlFrom = parseFrom(rawFrom);
-  const [stored, setStored] = useState<FromKey | null>(null);
-
-  useEffect(() => {
-    if (urlFrom) {
-      storeFrom(urlFrom);
-      return;
-    }
-    setStored(readStoredFrom());
-  }, [urlFrom]);
-
-  const plan = planBack(rawFrom, params.get("q"), stored);
+  const plan = planBack(rawFrom, params.get("q"));
 
   function onBack() {
-    if (plan.useHistoryBack) {
+    // 文案承诺了某个来路，且轨迹证实这一页确实是应用内推进来的 ⇒ 才回那条历史。
+    if (urlFrom && canBackToOrigin(routeKey(pathname, params))) {
       router.back();
       return;
     }
-    router.push(plan.fallbackHref);
+    router.push(plan.href);
   }
 
   return (

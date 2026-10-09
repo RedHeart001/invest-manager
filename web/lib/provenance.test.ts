@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vitest";
 
-import { FROM_LABEL, hrefForFrom, parseFrom, planBack } from "./provenance";
+import {
+  FROM_LABEL,
+  canBackToOrigin,
+  hrefForFrom,
+  observePath,
+  parseFrom,
+  planBack,
+  resetPathTrace,
+  routeKey,
+} from "./provenance";
 
 // 来路驱动（2026-10-01）：`?from=` 是外部输入（用户可手改 URL），白名单与返回目标
 // 推导都收在这个模块里 ⇒ 单测判逻辑，SSR 侧的四种来路由 test-p1 判。
@@ -39,45 +48,74 @@ describe("hrefForFrom（无历史时的确定目标）", () => {
   });
 });
 
-// #56 甲（10-08 主人手测「粘贴链接后点返回没反应」）：返回按钮的文案与行为必须同源。
-// 旧实现文案按 `from`、行为按 `window.history.length > 1`，而历史条目数会把 about:blank、
-// 新标签、同一 URL 重复回车都算成"可回退" ⇒ 承诺与目的地可以指向两个不同地方。
-describe("planBack（文案与行为取同一个键）", () => {
-  it("④ URL 带白名单内 from＝应用内进入 ⇒ 承诺来路且用 back()", () => {
-    expect(planBack("search", "贵州茅台", null)).toEqual({
+// #56 甲（10-08 主人手测「粘贴链接后点返回没反应」）＋第二轮（10-09：粘贴 `?from=home`
+// 却回到搜索页／裸 URL 永远掉回上一次搜索过的那一页）：文案与目标必须同源，且 `back()`
+// 只能由"本文档路由轨迹"发放，不能由 URL 上的一个可粘贴参数发放。
+describe("planBack（文案与目标取同一个键）", () => {
+  it("④ URL 带白名单内 from＝承诺那个来路，且给出可独立到达的目标", () => {
+    expect(planBack("search", "贵州茅台")).toEqual({
       label: "← 返回搜索",
-      useHistoryBack: true,
-      fallbackHref: "/search?q=%E8%B4%B5%E5%B7%9E%E8%8C%85%E5%8F%B0",
+      href: "/search?q=%E8%B4%B5%E5%B7%9E%E8%8C%85%E5%8F%B0",
     });
   });
 
-  it("⑤ URL 不带 from、会话里有来路 ⇒ 文案不承诺，行为必须 push（他那一屏的形状）", () => {
-    // sessionStorage 残留 home 时，旧实现写「← 返回首页」却执行 router.back()
-    expect([planBack(null, null, "home").label, planBack(null, null, "home").useHistoryBack]).toEqual([
-      "← 返回",
-      false,
-    ]);
-    expect(planBack(null, "贵州茅台", "search").fallbackHref).toBe("/search?q=%E8%B4%B5%E5%B7%9E%E8%8C%85%E5%8F%B0");
+  it("⑤ 🔁 反向：裸 URL 不继承会话残留，目标一律首页（他 10-09 报的『一旦搜索过，返回永远都是那一页』）", () => {
+    expect(planBack(null, null)).toEqual({ label: "← 返回", href: "/" });
+    // `q` 单独出现也不算来路：搜索词来自 URL ≠ 从搜索页进来
+    expect(planBack(undefined, "贵州茅台").href).toBe("/");
   });
 
-  it("⑥ 🔁 反向：白名单外的 from 不得被当成应用内进入（否则又是 back 到 about:blank）", () => {
+  it("⑥ 🔁 反向：白名单外的 from 不得被当成应用内进入（外部输入不许点亮一级、也不许选目标）", () => {
     for (const raw of [undefined, "", "product", "SEARCH", "home;rm"]) {
-      expect([planBack(raw, null, null).label, planBack(raw, null, null).useHistoryBack]).toEqual([
-        "← 返回",
-        false,
-      ]);
+      expect(planBack(raw, null)).toEqual({ label: "← 返回", href: "/" });
     }
   });
 
-  it("⑦ 🔁 会话残留只许影响推导目标，不许影响文案", () => {
-    const base = planBack("home", null, null);
-    for (const stored of ["home", "search", "chat", null] as const) {
-      const p = planBack("home", null, stored);
-      expect([p.label, p.useHistoryBack]).toEqual([base.label, base.useHistoryBack]);
-    }
-    expect([planBack(null, null, "chat").fallbackHref, planBack(null, null, null).fallbackHref]).toEqual([
-      "/chat",
+  it("⑦ 三种来路各自的目标都落在文案承诺的那一页（chat/home 不夹带 q）", () => {
+    expect(["search", "home", "chat"].map((f) => planBack(f, "茅台").href)).toEqual([
+      "/search?q=%E8%8C%85%E5%8F%B0",
       "/",
+      "/chat",
     ]);
+  });
+});
+
+describe("路由轨迹（back() 的唯一许可证）", () => {
+  it("⑧ 正向：应用内从搜索页推进详情 ⇒ 才敢 back()", () => {
+    resetPathTrace();
+    observePath("/search?q=%E8%8C%85%E5%8F%B0&type=all");
+    observePath("/product/stock/600519?from=search&q=%E8%8C%85%E5%8F%B0");
+    expect(canBackToOrigin("/product/stock/600519?from=search&q=%E8%8C%85%E5%8F%B0")).toBe(true);
+    // 被回退的那一页自己不能拿这张许可证
+    expect(canBackToOrigin("/search?q=%E8%8C%85%E5%8F%B0&type=all")).toBe(false);
+  });
+
+  it("⑨ 🔁 反向：他 D 那一屏的完整顺序——先应用内进过一次，再粘贴带 from 的 URL", () => {
+    resetPathTrace();
+    observePath("/search");
+    observePath("/product/stock/600519?from=search");
+    expect(canBackToOrigin("/product/stock/600519?from=search")).toBe(true);
+
+    // 地址栏粘贴＝一次新的整页加载，模块状态随旧文档消失；resetPathTrace 就是这一次换文档
+    resetPathTrace();
+    const pasted = "/product/us/CEG?from=home";
+    observePath(pasted);
+    // 旧实现只要见到 `from` 就 back() ⇒ 落到上一条历史＝那个搜索页；现在改 push "/"
+    expect(canBackToOrigin(pasted)).toBe(false);
+  });
+
+  it("⑩ 同一 URL 重复回车（他 C 那一屏）⇒ 观察幂等，轨迹不被自己污染", () => {
+    resetPathTrace();
+    observePath("/search?q=a");
+    observePath("/product/us/CEG?from=search&q=a");
+    observePath("/product/us/CEG?from=search&q=a");
+    expect(canBackToOrigin("/product/us/CEG?from=search&q=a")).toBe(true);
+  });
+
+  it("⑪ routeKey＝路径＋查询（不含 hash），空查询不留 `?`", () => {
+    expect(routeKey("/product/us/CEG", new URLSearchParams("from=home&q=茅台"))).toBe(
+      "/product/us/CEG?from=home&q=%E8%8C%85%E5%8F%B0",
+    );
+    expect(routeKey("/product/us/CEG", new URLSearchParams(""))).toBe("/product/us/CEG");
   });
 });

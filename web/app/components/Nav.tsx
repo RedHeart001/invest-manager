@@ -4,7 +4,14 @@ import Link from "next/link";
 import { usePathname, useSearchParams } from "next/navigation";
 import { useEffect, useState } from "react";
 
-import { parseFrom, readStoredFrom, storeFrom, type FromKey } from "@/lib/provenance";
+import {
+  observePath,
+  parseFrom,
+  readStoredFrom,
+  routeKey,
+  storeFrom,
+  type FromKey,
+} from "@/lib/provenance";
 
 // 顶部一级导航。一级路由按前缀点亮；`/product/**` **不再**并入「搜索」——
 // 产品页有四个入口、分属三个一级（见 `lib/provenance.ts` 的说明），前缀派生的"父级"
@@ -22,6 +29,13 @@ export default function Nav() {
   const onProduct = pathname.startsWith("/product");
   const urlFrom = onProduct ? parseFrom(params.get("from")) : null;
   const [storedFrom, setStoredFrom] = useState<FromKey | null>(null);
+
+  // 路由轨迹（#56 第二轮，见 `lib/provenance.ts`）：Nav 是布局级组件、每条路由都经过这里，
+  // 所以由它记"上一页是谁"。详情页点「返回」时据此判断这一页是不是**本文档内**从另一页推进来的；
+  // 整页加载（地址栏粘贴／新标签）时模块状态自动归零＝轨迹为空＝不许 back()。
+  useEffect(() => {
+    observePath(routeKey(pathname, params));
+  }, [pathname, params]);
 
   useEffect(() => {
     if (!onProduct) return;
