@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { klineEmptyReason, klineEmptyText } from "./kline-empty-reason";
+import { klineEmptyCause, klineEmptyReason, klineEmptyText } from "./kline-empty-reason";
 
 // 下面三条 note 都是**盘上实测回执的字面**，不是构想的形态：
 //   - `data-service/runtime/us-kline-probe2-1008.out`（21:58，`interval=1d`＝真出网那一次）
@@ -64,9 +64,77 @@ describe("klineEmptyReason（#55 甲 空态成因归一）", () => {
   });
 
   it("反向验证：本函数不产出它没有证据的断言（「只有一家」「没有日线源」）", () => {
-    for (const note of [usCegAllFailed, negativeCache, emptyUpstream, invalidInterval]) {
+    for (const note of [
+      usCegAllFailed,
+      negativeCache,
+      emptyUpstream,
+      invalidInterval,
+      dcmOutOfWindow,
+      cegOutOfWindowTail,
+    ]) {
       const text = klineEmptyReason(note) ?? "";
       expect(text).not.toMatch(/只有|唯一一家|没有.{0,4}数据源|永久/);
     }
+  });
+});
+
+// #60（主人 10-09 定档＝丁＋乙）。两条 note 都是**今晚盘上实测的 502 detail 原文**，不是构想的形态：
+//   - `data-service/kline60-dcm-1009-2140.out`（21:40 直连 ds，`type=us&code=DCM`，默认 90 天窗）
+//   - 屏上「备注」两长句（21:47 `/product/us/CEG` 的两个补漏窗，ds 访问日志 `runtime/ds-82.log` 两条 502）
+// 这一串里**同时**有链前缀 `all sources failed` 与 `empty after filter` ⇒ 谁排在前面就是答案。
+const dcmOutOfWindow =
+  "all sources failed: yfinance: yfinance kline failed: Too Many Requests. Rate limited. " +
+  "Try after a while.; tencent: tencent does not support code: DCM; " +
+  "sina: sina us kline empty after filter: DCM";
+const cegOutOfWindowTail =
+  "历史区间回源失败：all sources failed: yfinance: yfinance kline failed: Too Many Requests. " +
+  "Rate limited. Try after a while.; tencent: tencent does not support code: CEG; " +
+  "sina: sina us kline empty after filter: CEG";
+
+describe("klineEmptyCause（#60 丁＝成因先做成机器可读位；#60 乙＝窗口外那一档排在链前缀之前）", () => {
+  it("实测形态：新浪给了序列、行全在窗口外 → 不许再说「都没给」", () => {
+    expect(klineEmptyReason(dcmOutOfWindow)).toBe("这个区间里没有日线（更早的日期上有）");
+    expect(klineEmptyCause(dcmOutOfWindow)).toBe("out-of-window");
+    expect(klineEmptyText(dcmOutOfWindow)).toBe(
+      "暂无行情数据 · 这个区间里没有日线（更早的日期上有）",
+    );
+    // 屏上这句必须是一行中文：不许把英文长句带上来（那是 #55 甲 归一的全部意义）
+    expect(klineEmptyText(dcmOutOfWindow)).not.toMatch(/[a-zA-Z]/);
+    expect(klineEmptyReason(dcmOutOfWindow)).not.toContain("都没给");
+  });
+
+  it("自家前缀那一条（屏上「备注」同款字面）同样落在窗口外档，前缀被去掉后才判", () => {
+    expect(klineEmptyReason(cegOutOfWindowTail)).toBe("这个区间里没有日线（更早的日期上有）");
+    expect(klineEmptyCause(cegOutOfWindowTail)).toBe("out-of-window");
+  });
+
+  it("🔁 成对：把尾巴那句 `empty after filter` 去掉 → 必须翻转回「都没给」", () => {
+    const withoutTail = dcmOutOfWindow.replace(
+      "; sina: sina us kline empty after filter: DCM",
+      "",
+    );
+    expect(klineEmptyReason(withoutTail)).toBe("试过的数据源都没给这个品种的日线");
+    expect(klineEmptyCause(withoutTail)).toBe("all-failed");
+    // ⇒ 新档不是"看到链前缀就改口"，它判的确实是那句窗口外原文
+  });
+
+  it("🔁 成对：旧的两档没被这次改动带走（都不含 empty after filter）", () => {
+    for (const note of [usCegAllFailed, invalidInterval]) {
+      expect(klineEmptyReason(note)).toBe("试过的数据源都没给这个品种的日线");
+      expect(klineEmptyCause(note)).toBe("all-failed");
+    }
+  });
+
+  it("cause 与 text 同源：一个都不许多说，也不许少说", () => {
+    for (const note of [dcmOutOfWindow, cegOutOfWindowTail, negativeCache, emptyUpstream]) {
+      expect(klineEmptyCause(note)).not.toBeNull();
+      expect(klineEmptyReason(note)).not.toBeNull();
+    }
+    expect(klineEmptyCause(null)).toBeNull();
+    expect(klineEmptyReason("")).toBeNull();
+    // 表里没有的形态：有文字（原样带出）但没有枚举值 ⇒ 渲染处的 data-kline-empty-cause 会是 unclassified
+    const odd = "库里没有这一段区间的缓存，而回源被人工暂停";
+    expect(klineEmptyCause(odd)).toBeNull();
+    expect(klineEmptyReason(odd)).toBe(odd);
   });
 });

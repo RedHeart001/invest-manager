@@ -10,7 +10,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { EventsResult } from "@/lib/events";
-import { klineEmptyText } from "@/lib/kline-empty-reason";
+import { klineEmptyCause, klineEmptyText } from "@/lib/kline-empty-reason";
 import type { KlineResult } from "@/lib/kline";
 import { detectPhases, phaseAttributionText, phaseColor, type Phase } from "@/lib/phases";
 
@@ -516,7 +516,13 @@ export default function ProductCharts({
             </div>
           )}
           {kline.candles.length === 0 && !pending && (
-            <div className="absolute inset-0 flex items-center justify-center px-6 text-center text-sm text-zinc-400">
+            <div
+              className="absolute inset-0 flex items-center justify-center px-6 text-center text-sm text-zinc-400"
+              // #60 丁：成因同时落一个机器可读位；屏上那句只是它的一个渲染（不上屏给终端用户看数）
+              data-kline-empty-cause={
+                kline.note ? (klineEmptyCause(kline.note) ?? "unclassified") : "none"
+              }
+            >
               {/* #55 甲：这一格此前固定说「暂无行情数据」，而成因一直躺在 kline.note 里没上屏 */}
               {error ?? klineEmptyText(kline.note)}
             </div>
