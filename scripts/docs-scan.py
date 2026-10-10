@@ -746,8 +746,12 @@ def move(root, spec, do_go=False):
     io.open(path, "w", encoding="utf-8", newline="\n").write("\n".join(lines))
     print("已在原地插指针行：%s" % rel)
     # history/README 索引行：插到「时间线索引」那张表的最后一行之后（不是 blockquote 之后）
+    # 幂等：同名归档件已有索引行就不再追加（多批次共用同一归档时必踩，否则每次重复一行）
     idx = os.path.join(root, "docs", "history", "README.md")
     idx_lines = lines_of(read(idx))
+    if any(os.path.basename(archive_rel) in l for l in idx_lines):
+        print("history/README.md 已有该归档的索引行，跳过")
+        return 0
     ins = None
     for i, l in enumerate(idx_lines):
         s = l.strip()
