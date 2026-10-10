@@ -25,6 +25,7 @@
 """
 
 import glob
+import hashlib
 import io
 import json
 import os
@@ -541,8 +542,12 @@ def reorder_check(old_text, new_text):
     if sorted(ol) != sorted(nl):
         return False, "无损失败：行字节多重集不等"
     for i in range(1, len(nl)):
-        if nl[i - 1].strip() == "---" and nl[i].strip() and not nl[i].startswith("#"):
-            return False, "缝失败：L%d `---` 紧贴段落行（setext 下划线形）" % i
+        # setext 缺陷形＝普通段落行紧贴下一行裸 `---`（`---` 把上一行渲染成 H2）。
+        # 排除：上一行是标题／表格行／引用块（`> x` 后的 `---` 是 thematic break，非此缺陷）。
+        prev = nl[i - 1].strip()
+        if (nl[i].strip() == "---" and prev
+                and not prev.startswith(("#", ">", "|")) and prev != "---"):
+            return False, "缝失败：L%d 段落行紧贴 L%d `---`（setext 下划线形）" % (i, i + 1)
     return True, "OK"
 
 
@@ -585,6 +590,266 @@ def run_plan(root, spec):
         print("表格守卫：%s" % tg)
         return 1
     print("越界检查：通过（块内每枚标题的跨度都落在块内）；表格守卫：通过")
+    return 0
+
+
+# --------------------------------------------------------------------------
+# 搬动（--move）：四种切块共用一道越界拒绝；默认 dry-run，--go 才写盘
+# --------------------------------------------------------------------------
+
+def sha256(text):
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def list_closed(root, appendix=False):
+    """--list-closed：打印每项编号＋完整首行字节＋是否含 ✅＋被活跃区「第 N 项」引用次数。"""
+    led = os.path.join(root, "docs", "FIX-LEDGER.md")
+    lines = lines_of(read(led))
+    active = active_docs(root)
+    ref_counts = {}
+    for path in active:
+        for line in line_iter(read(path)):
+            for m in ITEM_REF.finditer(line):
+                ref_counts[m.group(1)] = ref_counts.get(m.group(1), 0) + 1
+    print("== --list-closed docs/FIX-LEDGER.md（判据：首行含 ✅） ==")
+    for i, line in enumerate(lines, 1):
+        m = ITEM_HEAD.match(line)
+        if not m:
+            continue
+        num = m.group(1)
+        closed = "✅" in line
+        print("  %-4s L%-4d closed=%-5s refs=%-3d | %s"
+              % (num, i, closed, ref_counts.get(num, 0), line[:100]))
+    if appendix:
+        appendix_candidates(root)
+    return 0
+
+
+def appendix_candidates(root):
+    """--appendix-candidates：逐枚追加节查活引用＋累计列（取前 K 枚 ⇒ FILE 降到 X）。"""
+    cr = os.path.join(root, "docs", "CODE-REVIEW.md")
+    led = os.path.join(root, "docs", "FIX-LEDGER.md")
+    history = history_docs(root)
+    lines = lines_of(read(cr))
+    secs = build_sections(lines)
+    # 未闭环编号＝FIX-LEDGER 里出现的、未含 ✅ 的编号项集合（近似：该编号任一编号行含 ✅ 即视为已闭环）
+    closed_nums, open_nums = set(), set()
+    for line in lines_of(read(led)):
+        m = ITEM_HEAD.match(line)
+        if not m:
+            continue
+        (closed_nums if "✅" in line else open_nums).add(m.group(1))
+    active_text = "\n".join(read(p) for p in active_docs(root))
+    print("== --appendix-candidates（逐枚追加节：还有没有活引用、是哪几枚） ==")
+    base = len(read(cr))
+    total = 0
+    rows = []
+    for s in secs:
+        if not s["title"].startswith("追加"):
+            continue
+        span = s["span"]
+        refs = set(ITEM_REF.findall(lines[s["line"] - 1:s["end"]][0] if False else "\n".join(lines[s["line"] - 1:s["end"]])))
+        live = sorted(n for n in refs if n in open_nums)
+        total += span
+        rows.append((s["title"][:40], span, live))
+    cum = 0
+    for title, span, live in rows:
+        cum += span
+        print("  %-44s span=%-7d 累计=%-8d 活引用=%s | FILE→%d"
+              % (title, span, cum, live or "无", base - cum))
+    print("  （33 枚全搬＝%d；按最小累计转绿需 K 枚，见 --plan 逐枚）" % total)
+    return 0
+
+
+def move(root, spec, do_go=False):
+    """--move 四种切块：--section／--item／--lines／--reorder。
+
+    history 语义（section/item/lines）：逐字节 append 到归档＋原地插指针行＋history/README 索引行＋打印 sha256。
+    reorder 语义（同文件换序）：不写指针、不写索引；先验无损（行多重集＋总数）再验缝。
+    """
+    rel = spec.get("file")
+    if not rel:
+        print("--move 需要 --file <相对仓库根的路径>")
+        return 1
+    path = os.path.join(root, rel)
+    if not os.path.exists(path):
+        print("文件不存在：%s" % rel)
+        return 1
+    lines = lines_of(read(path))
+    secs = build_sections(lines)
+    if spec.get("reorder") is not None:
+        return _move_reorder(root, path, lines, secs, spec, do_go)
+    # 多切块单批：把每枚子块解析出来
+    blocks, err = _resolve_blocks(lines, secs, spec)
+    if err:
+        print("MOVE 拒绝：%s" % err)
+        return 1
+    # 统一越界拒绝 + 表格守卫（逐块）
+    for start, end in blocks:
+        viol = block_violations(secs, start, end)
+        if viol:
+            print("MOVE 拒绝：块 L%d–L%d 内标题跨度跨出块外" % (start, end))
+            for s in viol:
+                print("  %s L%d–L%d（块尾 L%d） | %s"
+                      % ("#" * s["level"], s["line"], s["end"], end, s["title"][:44]))
+            return 1
+        tg = table_guard(lines, start, end)
+        if tg:
+            print("MOVE 拒绝：块 L%d–L%d 表格守卫：%s" % (start, end, tg))
+            return 1
+    # 抽出待搬内容（按行区间，从后往前以便原地删除）
+    moved_lines = []
+    proofs = []
+    for start, end in blocks:
+        chunk = lines[start - 1:end]
+        moved_lines.extend(chunk)
+        proofs.append((start, end, len(chunk), span_chars(lines, start, end), sha256("\n".join(chunk))))
+    print("== MOVE %s（%s） ==" % (rel, "写盘" if do_go else "dry-run"))
+    for start, end, nl, nc, h in proofs:
+        print("  块 L%d–L%d：%d 行／%d 字符／sha256=%s" % (start, end, nl, nc, h[:16]))
+    moved_text = "\n".join(moved_lines)
+    print("  合计：%d 块／%d 行／%d 字符／sha256=%s"
+          % (len(blocks), len(moved_lines), len(moved_text), sha256(moved_text)[:16]))
+    if not do_go:
+        print("（dry-run：加 --go 才写盘。归档件、指针行、索引行都在写入时才动）")
+        return 0
+    # 写归档
+    date = spec.get("date") or "2026-10-11"
+    slug = spec.get("slug") or "docs-move"
+    archive_rel = os.path.join("docs", "history", "%s-%s.md" % (date, slug))
+    archive_path = os.path.join(root, archive_rel)
+    header = ("# %s 归档（%s）\n\n"
+              "> **这是什么**：[../%s](../%s) 的以下块整体搬迁（%s 触发，机械，必进）。\n"
+              "> **内容逐字保留、未做任何改写**；本文件只作历史对照，不在此维护状态。\n\n---\n\n"
+              % (os.path.basename(rel), date, os.path.basename(rel), os.path.basename(rel),
+                 spec.get("reason", "体量治理")))
+    if os.path.exists(archive_path):
+        old = read(archive_path)
+        new_archive = old + "\n" + moved_text + "\n"
+    else:
+        new_archive = header + moved_text + "\n"
+    io.open(archive_path, "w", encoding="utf-8", newline="\n").write(new_archive)
+    print("已写入归档：%s（%d 字符）" % (archive_rel, len(new_archive)))
+    # 原地插指针行（按块标题／编号给出可落地标签）＋从后往前删块
+    pointer_lines = []
+    for start, end in blocks:
+        title = None
+        for s in secs:
+            if s["line"] == start:
+                title = s["title"]
+                break
+        label = title or ("第 %s 项" % ITEM_HEAD.match(lines[start - 1]).group(1) if ITEM_HEAD.match(lines[start - 1]) else lines[start - 1][:30])
+        pointer_lines.append((start, end, "> **【已搬归档】** %s —— 正文见 [%s](%s)（体量治理：整块搬迁，原地只留指针）。"
+                              % (label, os.path.basename(archive_rel), "history/" + os.path.basename(archive_rel))))
+    for start, end, ptr in sorted(pointer_lines, key=lambda x: -x[0]):
+        lines = lines[:start - 1] + [ptr] + lines[end:]
+    io.open(path, "w", encoding="utf-8", newline="\n").write("\n".join(lines))
+    print("已在原地插指针行：%s" % rel)
+    # history/README 索引行
+    idx = os.path.join(root, "docs", "history", "README.md")
+    idx_lines = lines_of(read(idx))
+    ins = None
+    for i, l in enumerate(idx_lines):
+        if l.strip().startswith("> **「同日续"):
+            ins = i + 1
+            break
+    row = "| [%s](%s) | %s 的块搬迁（%s） | 整体搬迁，内容逐字保留 | 见 [../%s](../%s) |\n" % (
+        os.path.basename(archive_rel), os.path.basename(archive_rel), os.path.basename(rel), date,
+        os.path.basename(rel), os.path.basename(rel))
+    if ins is not None:
+        idx_lines.insert(ins, row.rstrip("\n"))
+    else:
+        idx_lines.append(row.rstrip("\n"))
+    io.open(idx, "w", encoding="utf-8", newline="\n").write("\n".join(idx_lines))
+    print("已加 history/README.md 索引行")
+    return 0
+
+
+def _resolve_blocks(lines, secs, spec):
+    """把 spec 解析成一组 [start,end] 子块（--item 多枚 ＝ 多子块）。"""
+    blocks = []
+    if spec.get("section") is not None:
+        t = spec["section"]
+        match = [s for s in secs if s["title"] == t]
+        if not match:
+            return None, "找不到标题：%s" % t
+        blocks.append((match[0]["line"], match[0]["end"]))
+    if spec.get("item") is not None:
+        head_lines = {s["line"] for s in secs}
+        for tok in spec["item"].split(","):
+            tok = tok.strip()
+            if not tok:
+                continue
+            n = int(tok)
+            m = re.compile(r"^%d\.\s" % n)
+            found = None
+            for idx, line in enumerate(lines, 1):
+                if m.match(line):
+                    found = idx
+                    break
+            if found is None:
+                return None, "找不到第 %d 项" % n
+            end = len(lines)
+            for j in range(found + 1, len(lines) + 1):
+                if NUM_ITEM.match(lines[j - 1]) or (j in head_lines):
+                    end = j - 1
+                    break
+            blocks.append((found, end))
+    if spec.get("lines") is not None:
+        for part in spec["lines"].split(","):
+            part = part.strip()
+            mm = RANGE.match(part)
+            if not mm:
+                return None, "区间格式应为 A..B：%s" % part
+            blocks.append((int(mm.group(1)), int(mm.group(2))))
+    if not blocks:
+        return None, "没有给出切块（--section／--item／--lines）"
+    return sorted(blocks), None
+
+
+def _move_reorder(root, path, lines, secs, spec, do_go):
+    """--reorder：把 --lines 命名的块移到 --before（1-indexed 行号）之前。先验无损，再验缝。"""
+    part = spec["reorder"]
+    mm = RANGE.match(part.strip())
+    before_tok = spec.get("before")
+    if not mm or not before_tok:
+        print("MOVE 拒绝：--reorder 需要 `--reorder A..B --before N`")
+        return 1
+    start, end = int(mm.group(1)), int(mm.group(2))
+    before = int(before_tok)
+    if not (1 <= start <= end <= len(lines)) or not (1 <= before <= len(lines) + 1):
+        print("MOVE 拒绝：行号越界")
+        return 1
+    if start < before <= end + 1:
+        print("MOVE 拒绝：--before %d 落在块 L%d–L%d 内部或紧邻（无位移）" % (before, start, end))
+        return 1
+    viol = block_violations(secs, start, end)
+    if viol:
+        print("MOVE 拒绝：换序块内标题跨度跨出块外")
+        for s in viol:
+            print("  %s L%d–L%d | %s" % ("#" * s["level"], s["line"], s["end"], s["title"][:44]))
+        return 1
+    chunk = lines[start - 1:end]
+    rest = lines[:start - 1] + lines[end:]
+    # --before N ＝ 把块紧邻置于原第 N 行之前（删掉块后，原第 N 行在 rest 里的下标）
+    if before <= start:
+        insert_at = before - 1
+    else:
+        insert_at = before - 1 - len(chunk)
+    insert_at = max(0, min(insert_at, len(rest)))
+    new_lines = rest[:insert_at] + chunk + rest[insert_at:]
+    new_text = "\n".join(new_lines)
+    ok, why = reorder_check(read(path), new_text)
+    print("== MOVE --reorder %s（%s） ==" % (spec["file"], "写盘" if do_go else "dry-run"))
+    print("  块 L%d–L%d（%d 行）→ 紧邻置于 L%d 之前（落点 rest[%d]）" % (start, end, len(chunk), before, insert_at))
+    print("  无损＋缝检查：%s（%s）" % ("通过" if ok else "拒绝", why))
+    if not ok:
+        return 1
+    if not do_go:
+        print("（dry-run：加 --go 才写盘）")
+        return 0
+    io.open(path, "w", encoding="utf-8", newline="\n").write(new_text)
+    print("已写盘：%s" % spec["file"])
     return 0
 
 
@@ -705,6 +970,10 @@ def selftest():
             "速览·同一行落在块外不该红": _test_speed_out(),
             # 新增红必须报出（㉒）
             "基线·NEW 必报且退出码为 1": _test_baseline_new(),
+            # --move 多切块单批与换序（1b）
+            "move·多切块单批一遍抽全": _test_move_multiblock(),
+            "move·换序先验无损在缝检查之前": _test_reorder_order(),
+            "move·换序缝缺陷被抓": _test_reorder_seam(),
         }
     finally:
         shutil.rmtree(root, ignore_errors=True)
@@ -743,8 +1012,8 @@ def _test_guard_table():
 
 
 def _test_reorder_ok():
-    old = "para\n---\n\nnewsec\n"
-    new = "newsec\npara\n---\n\n"   # 纯换序（带空行，缝干净）
+    old = "A\nnewsec\n\n---\n"
+    new = "newsec\nA\n\n---\n"   # 纯换序，多重集相等，缝干净（`---` 前是空行）
     ok, _ = reorder_check(old, new)
     return ok
 
@@ -756,12 +1025,52 @@ def _test_reorder_byte():
     return not ok
 
 
+def _test_reorder_seam():
+    # 构造多重集相等、但换序后 paragraph 紧贴裸 `---`（setext 缺陷形）⇒ 只能靠缝判据抓到
+    old2 = "para1\npara2\n\n---\n"     # ["para1","para2","","---",""]：缝干净
+    new2 = "para1\n\npara2\n---\n"     # ["para1","","para2","---",""]：para2 紧贴 --- ⇒ 缝失败
+    ok, why = reorder_check(old2, new2)
+    return (not ok) and ("缝失败" in why)
+
+
+def _test_move_multiblock():
+    root = tempfile.mkdtemp(prefix="docs-scan-mb-")
+    buf = io.StringIO()
+    old_stdout = sys.stdout
+    try:
+        os.makedirs(os.path.join(root, "docs", "history"))
+        _write(os.path.join(root, "docs", "history", "README.md"), "# idx\n\n## 时间线索引\n\n")
+        _write(os.path.join(root, "docs", "Z.md"),
+               "# z\n\n1. a1\na2\n\n2. b1\nb2\n\n3. c1\nc2\n")
+        sys.stdout = buf
+        rc = move(root, {"file": "docs/Z.md", "item": "1,2",
+                         "date": "2026-01-01", "slug": "z-move", "reason": "test"}, do_go=True)
+        sys.stdout = old_stdout
+        left = read(os.path.join(root, "docs", "Z.md"))
+        arch = read(os.path.join(root, "docs", "history", "2026-01-01-z-move.md"))
+        return (rc == 0 and "3. c1" in left and "1. a1" not in left
+                and "a1" in arch and "b1" in arch)
+    finally:
+        sys.stdout = old_stdout
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def _test_reorder_order():
+    # 漏带一行 ⇒ 总行数变（先验失败）；此时缝也不干净，判据顺序要求先报"无损失败"
+    old = "a\n\nb\n"
+    new = "b\na\n"   # 少一行（带走了空行），总行数变
+    ok, why = reorder_check(old, new)
+    return (not ok) and ("无损失败" in why)
+
+
 def parse_spec(argv):
-    spec = {"file": None, "section": None, "item": None, "lines": None, "reorder": None}
+    spec = {"file": None, "section": None, "item": None, "lines": None, "reorder": None,
+            "before": None, "date": None, "slug": None, "reason": None}
     i = 0
     while i < len(argv):
         a = argv[i]
-        if a in ("--file", "--section", "--item", "--lines", "--reorder") and i + 1 < len(argv):
+        if a in ("--file", "--section", "--item", "--lines", "--reorder", "--before",
+                 "--date", "--slug", "--reason") and i + 1 < len(argv):
             spec[a[2:]] = argv[i + 1]
             i += 2
         else:
@@ -777,6 +1086,10 @@ def main():
         return selftest()
     if "--plan" in argv:
         return run_plan(".", parse_spec(argv))
+    if "--list-closed" in argv:
+        return list_closed(".", appendix="--appendix-candidates" in argv)
+    if "--move" in argv:
+        return move(".", parse_spec(argv), do_go="--go" in argv)
     if "--baseline" in argv:
         return run_baseline(".", do_print="--print" in argv, do_register="--register" in argv)
     _, broken = report(".")
