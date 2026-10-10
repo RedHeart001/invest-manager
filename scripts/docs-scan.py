@@ -745,21 +745,21 @@ def move(root, spec, do_go=False):
         lines = lines[:start - 1] + [ptr] + lines[end:]
     io.open(path, "w", encoding="utf-8", newline="\n").write("\n".join(lines))
     print("已在原地插指针行：%s" % rel)
-    # history/README 索引行
+    # history/README 索引行：插到「时间线索引」那张表的最后一行之后（不是 blockquote 之后）
     idx = os.path.join(root, "docs", "history", "README.md")
     idx_lines = lines_of(read(idx))
     ins = None
     for i, l in enumerate(idx_lines):
-        if l.strip().startswith("> **「同日续"):
-            ins = i + 1
-            break
-    row = "| [%s](%s) | %s 的块搬迁（%s） | 整体搬迁，内容逐字保留 | 见 [../%s](../%s) |\n" % (
+        s = l.strip()
+        if s.startswith("|") and (s.endswith("|") or "](…" in s or "](." in s):
+            ins = i + 1   # 记最后一枚表格行的下一行下标
+    row = "| [%s](%s) | %s 的块搬迁（%s） | 整体搬迁，内容逐字保留 | 见 [../%s](../%s) |" % (
         os.path.basename(archive_rel), os.path.basename(archive_rel), os.path.basename(rel), date,
         os.path.basename(rel), os.path.basename(rel))
     if ins is not None:
-        idx_lines.insert(ins, row.rstrip("\n"))
+        idx_lines.insert(ins, row)
     else:
-        idx_lines.append(row.rstrip("\n"))
+        idx_lines.append(row)
     io.open(idx, "w", encoding="utf-8", newline="\n").write("\n".join(idx_lines))
     print("已加 history/README.md 索引行")
     return 0
