@@ -19,7 +19,7 @@
 
 状态标记：⬜ 未开始 ｜ 🟡 进行中 ｜ ✅ 完成 ｜ ⚠️ 完成但有遗留问题
 
-> **验证基线**：现值只读 [FIX-LEDGER.md](FIX-LEDGER.md)「验证门槛」。
+> **验证基线**：现值只读 [FIX-LEDGER.md](FIX-LEDGER.md)「验证门槛（权威现值）」。
 
 > **当前阶段**：P0–P7 全部完成，CR1–CR9 审查期，当前开放轮次 CR9。逐项待办与计数只看 [FIX-LEDGER.md](FIX-LEDGER.md) 的未闭环看板。
 
