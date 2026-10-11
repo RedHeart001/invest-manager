@@ -2,9 +2,24 @@
 
 const DATA_SERVICE_URL = process.env.DATA_SERVICE_URL ?? "http://localhost:8000";
 
+/**
+ * #63（2026-10-12）：BFF 侧 `/quote` 的预算（ms）＝30s，全站既有口径
+ * （本文件 `dsGet` 默认、`app/api/quote/verify/route.ts`）。此前 `/api/quote`
+ * 与详情页 SSR 各写死 15s，与 ds 侧一条 stock `get_quote` 的最坏路径差一个量级：
+ * `_em_request` 的 `acquire()` 默认 **20s**（`data-service/app/utils/limiter.py:136`）
+ * ＋ 多 host 两轮 × 每发 15s（`data-service/app/providers/akshare_provider.py:303-309`）。
+ * 15s 会在多 host 降级（上游抖动）时把慢响应掐断，再被回成「服务没启动」（违 R16；
+ * 10-11 夜 R13 实测字面 `code=600519 503 in 15792ms`，而同发 ds 侧 12 次全 200）。
+ * ⇒ 预算不许低于 30s；独立成常量是为了让三处调用点（route、详情页 SSR）不再各写一个数。
+ */
+export const QUOTE_TIMEOUT_MS = 30_000;
+
 /** CR6-P3-3：区分"超时"与"连不上"——此前 catch 一律报 unreachable，
- *  `AbortSignal.timeout` 触发的 TimeoutError 语义被吞掉，排查时无法定位。 */
-function unreachableMessage(e: unknown, timeoutMs: number): string {
+ *  `AbortSignal.timeout` 触发的 TimeoutError 语义被吞掉，排查时无法定位。
+ *
+ *  #63（2026-10-12）：导出供 `/api/quote` 的裸 fetch catch 复用——那条是唯一
+ *  没分「超时 vs 连不上」的 ds 调用臂，R16 要求失败原因如实。 */
+export function unreachableMessage(e: unknown, timeoutMs: number): string {
   const name = (e as { name?: string } | null)?.name;
   if (name === "TimeoutError" || name === "AbortError") {
     return `data-service timeout after ${timeoutMs}ms（服务在跑但未及时响应）`;

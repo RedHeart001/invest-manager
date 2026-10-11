@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 
+import { QUOTE_TIMEOUT_MS, unreachableMessage } from "@/lib/data-service";
 import { CODE_SET, QUOTE_TYPES } from "@/lib/validate";
 
 const DATA_SERVICE_URL =
@@ -18,11 +19,19 @@ export async function GET(req: NextRequest) {
   }
 
   try {
-    // CR4（2026-09-15 review）：全站其余 ds 调用都走 dsGet（内置 15s 超时），
-    // 此路由此前裸 fetch 无 signal → data-service 挂起时悬挂到 OS TCP 超时。补 15s。
+    // CR4（2026-09-15 review）：全站其余 ds 调用都走 dsGet（内置超时），
+    // 此路由此前裸 fetch 无 signal → data-service 挂起时悬挂到 OS TCP 超时。
+    //
+    // #63（2026-10-12）：预算从 15s 抬到 30s＝全站既有口径（`QUOTE_TIMEOUT_MS`，
+    // 与 `dsGet` 默认、`app/api/quote/verify/route.ts` 一致）。理由＝ds 侧一条
+    // stock `get_quote` 的最坏路径是「`_em_request` 的 `acquire()` 默认 20s
+    // （`data-service/app/utils/limiter.py:136`）＋多 host 两轮 × 每发 15s
+    // （`data-service/app/providers/akshare_provider.py:303-309`）」，15s 与它差
+    // 一个量级 ⇒ 慢响应被掐断，又被 catch 回成「服务没启动」（违 R16）。
+    // 10-11 夜 R13 实测字面＝`code=600519 503 in 15792ms`，ds 侧同发 12 次全 200。
     const res = await fetch(
       `${DATA_SERVICE_URL}/quote?type=${encodeURIComponent(type)}&code=${encodeURIComponent(code)}`,
-      { cache: "no-store", signal: AbortSignal.timeout(15_000) },
+      { cache: "no-store", signal: AbortSignal.timeout(QUOTE_TIMEOUT_MS) },
     );
     if (!res.ok) {
       const detail = await res.json().catch(() => ({}));
@@ -35,9 +44,11 @@ export async function GET(req: NextRequest) {
       );
     }
     return NextResponse.json(await res.json());
-  } catch {
+  } catch (e) {
+    // #63（2026-10-12）：此前是裸 `catch {}` + 固定文案，把超时也报成「服务没启动」。
+    // 改用 `data-service.ts` 既有的两分法（超时 vs 连不上），R16：失败原因如实。
     return NextResponse.json(
-      { error: "data-service unreachable，请确认已启动（uvicorn app.main:app --port 8000）" },
+      { error: unreachableMessage(e, QUOTE_TIMEOUT_MS) },
       { status: 503 },
     );
   }

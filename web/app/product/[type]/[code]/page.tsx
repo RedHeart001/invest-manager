@@ -7,7 +7,7 @@ import VerifyQuoteButton from "@/app/components/VerifyQuoteButton";
 import WatchButton from "@/app/components/WatchButton";
 import ProductCharts from "./ProductCharts";
 import ResearchPanel from "./ResearchPanel";
-import { dsGet, type Quote } from "@/lib/data-service";
+import { QUOTE_TIMEOUT_MS, dsGet, type Quote } from "@/lib/data-service";
 import { priceWithCurrency } from "@/lib/currency";
 import { fetchEvents, narrowByDates, pickEventDates } from "@/lib/events";
 import { getKlineRange, normalizeRange, type KlineResult } from "@/lib/kline";
@@ -70,6 +70,9 @@ export default async function ProductPage({
   // ② 现状区：实时行情（含 P2 扩展字段，失败优雅降级）
   // 代码审查修复（性能）：五路独立取数此前**串行 await**，各 15~45s 超时会在
   // TTFB 上叠加；改为并行发起、各自保留降级处理（R10 语义不变）。
+  // #63（2026-10-12）：quote 这一路从写死 15s 改成 `QUOTE_TIMEOUT_MS`（30s），
+  // 与 BFF `/api/quote` 及全站 dsGet 口径统一——ds 一条 stock 行情最坏耗时
+  // 是 acquire 20s + 多 host 重试，15s 会误掐成「未及时响应」。
   const otcFund = type === "fund" && !isExchangeTradedFund(code);
   const valueDecimals = type === "fund" ? 4 : 2;
   const valueLabel = otcFund ? "单位净值" : "价格";
@@ -77,7 +80,7 @@ export default async function ProductPage({
   const rangeOk = "start" in range;
 
   const [quoteRes, klineRes, eventsRes, holdingsRes, yieldRes] = await Promise.allSettled([
-    dsGet<Quote>("/quote", { type, code }, 15_000),
+    dsGet<Quote>("/quote", { type, code }, QUOTE_TIMEOUT_MS),
     rangeOk ? getKlineRange(type, code, range.start, range.end) : Promise.reject(new Error("非法区间")),
     fetchEvents(type, code),
     otcFund ? dsGet<HoldingsResp>("/fund/holdings", { code }, 30_000) : Promise.resolve(null),
