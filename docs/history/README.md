@@ -63,6 +63,7 @@ wc -l docs/history/*.md
 | [2026-10-07-cr6-cr1-5-执行记录归档.md](2026-10-07-cr6-cr1-5-执行记录归档.md) | CR6 与 CR1–CR5 留在 FIX-LEDGER 的执行记录区块 | 整体搬迁，内容逐字保留 | 结论表见 [../CODE-REVIEW.md](../CODE-REVIEW.md) 轮次对照表；约束见 [../CONSTRAINTS.md](../CONSTRAINTS.md) §A |
 | [2026-10-11-fix-ledger-待拍板已闭环归档.md](2026-10-11-fix-ledger-待拍板已闭环归档.md) | FIX-LEDGER.md「待你拍板」区里已闭环拍板的项（轮 4，批 C/B/D/A） | 整体搬迁，内容逐字保留 | 见 [../FIX-LEDGER.md](../FIX-LEDGER.md) |
 | [2026-10-11-fix-ledger-状态卡明细归档.md](2026-10-11-fix-ledger-状态卡明细归档.md) | FIX-LEDGER.md 原状态卡 14 格过程明细（出网账／PID／轮次计数等，10-09 至 10-10） | 整体搬迁，内容逐字保留；主文件状态卡改写为 5 格索引 | 状态卡现值见 [../FIX-LEDGER.md](../FIX-LEDGER.md) 头部 |
+| [2026-10-11-code-review-追加节归档.md](2026-10-11-code-review-追加节归档.md) | CODE-REVIEW.md 的块搬迁（2026-10-11） | 整体搬迁，内容逐字保留 | 见 [../CODE-REVIEW.md](../CODE-REVIEW.md) |
 
 > **「同日续 N」的去处（10-08 重组留下的 19 处旧指针）**：上层文件里凡写「PROGRESS 同日续 N」的句子，其原文现在都在
 > [2026-10-08-progress-进度日志归档.md](2026-10-08-progress-进度日志归档.md)（该文件按「同日续 1…75」分节，编号与旧指针一一对得上，已逐号核对齐 75 段）。

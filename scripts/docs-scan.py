@@ -562,34 +562,35 @@ def run_plan(root, spec):
         return 1
     lines = lines_of(read(path))
     secs = build_sections(lines)
-    block, err = resolve_block(lines, secs, spec)
+    blocks, err = _resolve_blocks(lines, secs, spec)
     if err:
         print("PLAN 拒绝：%s" % err)
         return 1
-    start, end = block
     print("== PLAN %s ==" % rel)
-    print("块跨度：L%d–L%d（%d 行，%d 字符）"
-          % (start, end, end - start + 1, span_chars(lines, start, end)))
-    inner = block_headings(secs, start, end)
-    if inner:
-        print("块内标题（%d 枚）：" % len(inner))
-        for s in inner:
-            print("  %s L%d–L%d span=%d | %s"
-                  % ("#" * s["level"], s["line"], s["end"], s["span"], s["title"][:44]))
-    else:
-        print("块内标题：0 枚")
-    viol = block_violations(secs, start, end)
-    if viol:
-        print("越界：块内 %d 枚标题的完整跨度跨出块外 ⇒ 拒绝" % len(viol))
-        for s in viol:
-            print("  %s L%d–L%d（块尾 L%d） | %s"
-                  % ("#" * s["level"], s["line"], s["end"], end, s["title"][:44]))
-        return 1
-    tg = table_guard(lines, start, end)
-    if tg:
-        print("表格守卫：%s" % tg)
-        return 1
-    print("越界检查：通过（块内每枚标题的跨度都落在块内）；表格守卫：通过")
+    print("块数：%d" % len(blocks))
+    for start, end in blocks:
+        print("  块 L%d–L%d（%d 行，%d 字符）"
+              % (start, end, end - start + 1, span_chars(lines, start, end)))
+        inner = block_headings(secs, start, end)
+        if inner:
+            print("  块内标题（%d 枚）：" % len(inner))
+            for s in inner:
+                print("    %s L%d–L%d span=%d | %s"
+                      % ("#" * s["level"], s["line"], s["end"], s["span"], s["title"][:44]))
+        else:
+            print("  块内标题：0 枚")
+        viol = block_violations(secs, start, end)
+        if viol:
+            print("  越界：块内 %d 枚标题的完整跨度跨出块外 ⇒ 拒绝" % len(viol))
+            for s in viol:
+                print("    %s L%d–L%d（块尾 L%d） | %s"
+                      % ("#" * s["level"], s["line"], s["end"], end, s["title"][:44]))
+            return 1
+        tg = table_guard(lines, start, end)
+        if tg:
+            print("  表格守卫：%s" % tg)
+            return 1
+    print("越界检查：通过（每块内每枚标题的跨度都落在块内）；表格守卫：通过")
     return 0
 
 
