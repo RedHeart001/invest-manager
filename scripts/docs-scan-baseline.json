@@ -1,31 +1,6 @@
 {
  "keys": [
   [
-   "docs/CODE-REVIEW.md",
-   "TABLE",
-   "| 怀疑点 | 结论 | ∪ | 「`test-p2.mjs:335` 断言了 HTML 字面 `>当日<`，撤「当日」档位需锁步改它」 | **证伪"
-  ],
-  [
-   "docs/CODE-REVIEW.md",
-   "TABLE",
-   "| 档 | 数量 | 是不是文档缺陷 | 处置 | ∪ | **真悬空** | **1** | **是**：`QuoteCard.tsx:92`（CODE-REVIEW.md:"
-  ],
-  [
-   "docs/CODE-REVIEW.md",
-   "TABLE",
-   "| 编号 | 现象与证据 | 复现/判定 | ∪ | CR9-15 | `tests/test_backup_db.py:64` 断言尾部 `\\| … if f != b"
-  ],
-  [
-   "docs/CONSTRAINTS.md",
-   "TABLE",
-   "| **列表类降级也必须声明来源（09-27 CR9-31）** | `/products` 的响应契约是 `{type ∪ | **改动对运行中的进程不可见（09-26 实证；09-27 加码）** | dev 侧 data-service 以"
-  ],
-  [
-   "docs/CONSTRAINTS.md",
-   "TABLE",
-   "| 路径 | 排除原因 | ∪ | 网易 `chddata` | 沙箱内 502 —— **本机环境待验证，非彻底排除**（**09-27 复核**：本"
-  ],
-  [
    "docs/FIX-LEDGER.md",
    "FILE",
    "docs/FIX-LEDGER.md"
@@ -204,16 +179,6 @@
    "docs/FIX-LEDGER.md",
    "SECTION",
    "验证门槛（权威现值）"
-  ],
-  [
-   "docs/PLAN.md",
-   "TABLE",
-   "| 约定 | 要求 | 已落地实现 | ∪ | **导航高亮** | 顶部一级导航按当前路径前缀高亮。**2026-10-01 主人改判（推翻 09-24 CR8-"
-  ],
-  [
-   "docs/PLAN.md",
-   "TABLE",
-   "| 编号 | 决策 | 理由（一句话） | ∪ | **CR8-9**（2026-10-01 改判） | **推翻 CR8-5 的第二句**：产品详情页不再固定点亮\"搜"
   ],
   [
    "docs/PROGRESS.md",

@@ -8,6 +8,7 @@
      单节按两把读数取并集：**叶节跨度 ∪ 容器自身体**（恒等式＝自身体＋Σ直接子节＝跨度，不重复计数）。
   2. 断链扫描：活跃工作区里每个「追加N」「第 N 项」「相对链接」「文末/见『节名』」都要能落地。
   3. 表格扫描（由 `data-service/runtime/` 三枚临时件并回本件，任何机器上都能跑）。
+     列数＝去掉首尾定界符后按**未转义**竖线切分（`\\|` 算正文、不算列），与 GFM 渲染同口径。
   4. 速览尺 + TITLE 档：速览类区块非标题行 >500 ⇒ 报警；任意级标题行 >500 ⇒ 报警。
 
 用法：
@@ -55,6 +56,8 @@ RANGE = re.compile(r"^(\d+)\.\.(\d+)$")
 CUE_NAME = re.compile(r"(?:文末|参见|详见|见)\s*[『「《]([^』」》]{2,})[』」》]")
 CUE_FILE = re.compile(r"(?:文末|参见|详见|见)\s*([A-Za-z0-9_.\-/]+\.md)")
 SEP_ROW = re.compile(r"^\s*\|?[\s:|-]+\|?\s*$")
+# GFM 口径：`\|` 是单元正文里的竖线，不是列分隔符（表格里的 grep 模式 `A\|B` 全靠它）
+CELL_SPLIT = re.compile(r"(?<!\\)\|")
 
 QUANT_AFTER = set("个条枚行项次句要上入两段–—~-～至到")
 POINTER_HINT = ("搬", "归档", "指针", "history")
@@ -179,7 +182,7 @@ def table_scan(paths):
             s = line.lstrip("> ").rstrip()
             is_row = s.startswith("|") and s.endswith("|") and len(s) > 1
             if is_row:
-                cols = s.count("|") - 1
+                cols = len(CELL_SPLIT.split(s[1:-1]))
                 if cur is None:
                     tables += 1
                     cur = {"cols": cols, "start": n}
@@ -935,6 +938,29 @@ def _test_baseline_new():
         shutil.rmtree(root, ignore_errors=True)
 
 
+def _test_table_rows(lines):
+    root = tempfile.mkdtemp(prefix="docs-scan-tbt-")
+    try:
+        p = os.path.join(root, "t.md")
+        _write(p, "\n".join(lines) + "\n")
+        return table_scan([p])
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def _test_table_escaped_green():
+    # 表格里写 grep 模式靠 `\|`；它算正文，不能被读成多一列（＝本轮 7 处错位的成因）
+    ts = _test_table_rows(["| 编号 | 证据 |", "|---|---|",
+                           '| A | `grep -rn "x\\|y" web/` 命中 0 |'])
+    return ts["mismatch"] == 0 and ts["tables"] == 1 and ts["rows"] == 3
+
+
+def _test_table_extra_col_red():
+    # 换成转义口径后，尺还得证明它拦得住真错位：多一列必须红
+    ts = _test_table_rows(["| a | b |", "|---|---|", "| 1 | 2 |", "| 3 | 4 | 5 |"])
+    return ts["mismatch"] == 1 and ts["rows"] == 4
+
+
 def selftest():
     root = tempfile.mkdtemp(prefix="docs-scan-selftest-")
     try:
@@ -981,6 +1007,9 @@ def selftest():
             "速览·同一行落在块外不该红": _test_speed_out(),
             # 新增红必须报出（㉒）
             "基线·NEW 必报且退出码为 1": _test_baseline_new(),
+            # 表格尺·转义口径（10-11 那 7 处错位的归因）
+            "表格·转义竖线不算列（绿）": _test_table_escaped_green(),
+            "表格·真多一列必须红": _test_table_extra_col_red(),
             # --move 多切块单批与换序（1b）
             "move·多切块单批一遍抽全": _test_move_multiblock(),
             "move·换序先验无损在缝检查之前": _test_reorder_order(),
