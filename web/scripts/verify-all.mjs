@@ -92,11 +92,15 @@ for (const s of suites) {
   const out = `${r.stdout ?? ""}\n${r.stderr ?? ""}`;
   // tail 必须保住"跳过"解释行，否则缺口只剩一个数字（CR9-36）；
   // CR9-39：还要保住"根本没跑起来"那类错误行（Cannot find module / SyntaxError …）。
-  const tail = out
-    .split("\n")
-    .filter((l) => /=====|通过|失败|跳过|OK|NG|PASS|FAIL|Error|Cannot find|code E[0-9]/i.test(l))
-    .slice(-14)
-    .join("\n");
+  // CR9-87：`slice(-14)` 会把**早期**那枚 NG 连同收尾的失败清单一起切掉——10-11 夜 test-p2 的
+  // R13 就是这样被吞掉名字（`59 通过 / 1 失败` 有、回执里没有）。失败清单是各套件统一的形
+  // （`  NG <名字>` 与收尾 `  - <名字>`），从**原文**里全保（那两行本身不含关键词，过不了 keep），
+  // 不参与截断；其余仍取尾部 14 行。`  - ` 这个形在各套件里只用于失败清单（已 grep 全部 7 枚）。
+  const raw = out.split("\n");
+  const kept = raw.filter((l) => /=====|通过|失败|跳过|OK|NG|PASS|FAIL|Error|Cannot find|code E[0-9]/i.test(l));
+  const tail = [...new Set([...raw.filter((l) => /^\s*NG\s|^\s{0,4}- \S/.test(l)), ...kept.slice(-14)])].join(
+    "\n",
+  );
   const ran = executedCount(out, s);
   const plan = PLANNED[s] ?? 0;
   const shapes = Array.isArray(plan) ? plan : [plan];

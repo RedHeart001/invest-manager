@@ -123,7 +123,13 @@ async function main() {
         ok("R13：kline 收盘与 quote 同日收盘偏差 <0.5%", false, "quote 缺少 price/prevClose");
       }
     } else {
-      ok("R13：kline 收盘与 quote 同日收盘偏差 <0.5%", false, "quote 或 kline 数据不足");
+      // CR9-87：这一句同时装得下"BFF 没给 200"和"kline 真少"两种完全不同的成因，
+      // 不写 status/candles 就读不出是哪一种（10-11 夜 R13 红了一轮，字面只有"数据不足"）。
+      ok(
+        "R13：kline 收盘与 quote 同日收盘偏差 <0.5%",
+        false,
+        `quote 或 kline 数据不足（BFF status=${q.status} candles=${candles.length}）`,
+      );
     }
 
     // 缓存二次命中（不再触发外部请求）
