@@ -731,7 +731,7 @@ def move(root, spec, do_go=False):
         new_archive = header + moved_text + "\n"
     io.open(archive_path, "w", encoding="utf-8", newline="\n").write(new_archive)
     print("已写入归档：%s（%d 字符）" % (archive_rel, len(new_archive)))
-    # 原地插指针行（按块标题／编号给出可落地标签）＋从后往前删块
+    # 原地插指针行（在删除前基于原行列表生成 label，避免行号错位吃掉后续块的指针）＋从后往前删块
     pointer_lines = []
     for start, end in blocks:
         title = None
@@ -739,13 +739,19 @@ def move(root, spec, do_go=False):
             if s["line"] == start:
                 title = s["title"]
                 break
-        label = title or ("第 %s 项" % ITEM_HEAD.match(lines[start - 1]).group(1) if ITEM_HEAD.match(lines[start - 1]) else lines[start - 1][:30])
+        m_first = ITEM_HEAD.match(lines[start - 1])
+        if title:
+            label = title
+        elif m_first:
+            label = "第 %s 项" % m_first.group(1)
+        else:
+            label = lines[start - 1][:30]
         pointer_lines.append((start, end, "> **【已搬归档】** %s —— 正文见 [%s](%s)（体量治理：整块搬迁，原地只留指针）。"
                               % (label, os.path.basename(archive_rel), "history/" + os.path.basename(archive_rel))))
     for start, end, ptr in sorted(pointer_lines, key=lambda x: -x[0]):
         lines = lines[:start - 1] + [ptr] + lines[end:]
     io.open(path, "w", encoding="utf-8", newline="\n").write("\n".join(lines))
-    print("已在原地插指针行：%s" % rel)
+    print("已插指针行 %d 枚：%s" % (len(pointer_lines), rel))
     # history/README 索引行：插到「时间线索引」那张表的最后一行之后（不是 blockquote 之后）
     # 幂等：同名归档件已有索引行就不再追加（多批次共用同一归档时必踩，否则每次重复一行）
     idx = os.path.join(root, "docs", "history", "README.md")
@@ -1054,7 +1060,9 @@ def _test_move_multiblock():
         left = read(os.path.join(root, "docs", "Z.md"))
         arch = read(os.path.join(root, "docs", "history", "2026-01-01-z-move.md"))
         return (rc == 0 and "3. c1" in left and "1. a1" not in left
-                and "a1" in arch and "b1" in arch)
+                and "a1" in arch and "b1" in arch
+                # 每块各一枚指针（label 在删除前生成）——bug 形：只插了第一块的指针
+                and "第 1 项" in left and "第 2 项" in left)
     finally:
         sys.stdout = old_stdout
         shutil.rmtree(root, ignore_errors=True)
