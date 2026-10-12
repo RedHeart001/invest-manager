@@ -679,3 +679,27 @@ eastmoney_quote_ctl    ok= 0/10 gap=6s  ERR=['ConnectionError'] x10
 ⑤ **拦不住的那一半**：没端到端跑 `verify-all`（要买额度），18:5x 那发的原文永久不可恢复；④ 现仍 `test-p2 exit=1`（成因＝②）。
 
 ⑥ **本轮越权（原样记）**：主人的字是「跑一下验证 P3 和 P2 的修复效果」，当时那两处一行都没写；我从"效果"推成授权、先写后验再提交（19:4x 追问后选甲保留）。⇒ 这类指令若修复尚不存在，必须先问「是否给改字」，不许从语义推。
+
+#### 追加五十六 · 10-12 17:5x–19:1x（全项目重读／OPT-3 三条前提被自家注册面推翻／10-13 窗口准备件 P1–P5＝`ec7f235`）
+
+① **本轮改动面**：`test-script/` 五枚新执行件＋`test-script/README.md` 索引行（那儿本就是"一次性/手工观测脚本"的家，`:22` 那句"只放只读观测脚本"仍成立且被遵守——五件全不写库）；`git status --porcelain -- web data-service/app scripts .claude`＝0 行 ⇒ **生产码零改动**。OPT-3 红线 `quote/realtime` 源码命中 0。**⚠️ 这条红线的仪器本身有假阳**：裸 `grep -r "quote/realtime" data-service` 10-12 实测返 **3 条**，三条全在 `.gitignore` 覆盖的回执与 `runtime/tmp-card*.txt` 里（`memline.out` 等）⇒ 判据必须限定源码扩展名并跳过 `runtime/`，否则"命中 3"会被读成"已破线"。已按此形状写进 `window_preflight.py:red_line_scan`。
+
+② **改判一：(a) 的"共识取值"在首轮四类里塌了一半**。红线「实时轮询不打东财」与「现价多源共识」不是可以并存的——按注册面现查（`akshare_provider.py:1256` 东财主源 `["stock","fund","bond"]`、`tencent_provider.py:384/388/396` 腾讯 pos1、`sina_bond_provider.py:151`、`hk_provider.py:332`、`openbb_provider.py:269` us pos0），**扣掉东财后**：stock/fund/hk 的现价只剩腾讯一家，bond 只剩新浪转债一家；而 `sina_provider.py:99-101` 的 `get_quote`/`get_quotes` 是**无条件抛 `ProviderNotSupported("sina quote not needed (tencent covers)")`**（新浪只做 K 线备源）。⇒ 首轮四类里**只有美股保住两家**（yfinance＋腾讯）。**(a) 那句"共识取值＋空壳门"对 A股／场内基金／hk 结构性不成立**，此前没人在方案里对过这笔账。主人 10-12 定档＝**乙（补新浪 A股现价腿）**：09-27 探针已实测该端点可达（追加九 `sina_quote_stock ok=12/12 gap=5s p50=356ms bytes=288`），所以这是"实现一条被证明可达的路"，**不是**"拆掉一句拒绝就完事"；诚实边界＝fund/hk 的新浪现价**从未实测**，乙 落地后仍只有 2/4 类有共识维。
+
+③ **改判二：格三那套算术管错了对象**。`utils/limiter.py:449-471` 的 `PROFILES` 现只有 `eastmoney` 与 `akshare-obs` **两族**（10-12 现查）⇒ 腾讯/新浪**没有任何族闸**，而 `N × (60/TTL) ≤ 12` 算的是东财桶、实时区按红线不走东财 ⇒ **N 的上限没有闸给它数**；唯一腾讯侧证据是 09-27 的"5s 连发 12/12 零失败"＝单只、串行、非并发。处置＝实时区先挂**独立观测族**（`observe()` 不 `acquire()`，走 #27 第一步 `akshare-obs` 的既有形状）攒"同窗 N 只 × 10s"的真计数，数值等计数说话；这一举顺带补上腾讯侧现在**完全没有**的熔断冷却那一半。**格三在拿到观测族计数之前是拒填的**（`window_fill.py` 里就是这条行为）。
+
+④ **改判三：CR9-88 刚落的新契约咬到聚合器**。`CONSTRAINTS` §B「BFF 预算 ≥ ds 最坏耗时（排队 20s＋重试）」＋桶是**先睡后拒**（`acquire(timeout=20)`）⇒ 聚合器若复用 `chain_call`/`verify_metric`，最坏 20+3≈23s；**"现价 10s 一跳"会先被自家排队打破**，而 BFF 那 30s 只是刚好盖住不报错。新增硬约束＝**实时路径上不许出现 20s 排队**（独立 Session＋短超时＋只 observe），随 M8「实时链与主数据链分源」那一节一起落。
+
+⑤ **拆包（主人的字＝"切"）：第一批＝1a／1b**。1a 不欠任何读数、可即时开工＝ds 端点骨架与响应 schema（`sources` 全公开）＋七区 UI 区域与空态/最后值渲染＋纯函数判据（分时序列日期==北京今日、空壳门）＋观测族挂载与断言；1b 必须等前置实测 ②③④＝TTL 数值、并发 N、共识阈值。⇒ OPT-3 行那句"②③ 未跑完之前 OPT-3 仍不写代码"**从此只对 1b 成立**。
+
+⑥ **准备件落账（`ec7f235`，不占 CR 号＝非生产码，下一可用 CR 仍＝CR9-89）**。五件：`window_lib.py`＝任务书 `:30` 那两条停手判据从散文变码（东财 `cooldown>0` 即停／连续 2 发非 200 即停／硬上限）＋节律＋`require_keys()` 严格取键（缺键把**实际键面**记进回执、**不回落到 note 文案**，治 10-08「读错键⇒④只剩 note」那一形）；`window_preflight.py`＝红线自证＋两侧监听与**装载证据**（源文件 mtime ⇔ 进程 StartTime 比大小＝CR9-24 那一形，任务书此前没有这一半）；`window_a2.py`＝④ 口径编码在码里（`no_second_source` 不进分母、含「主源不可用，已降级至」那几发**摘出分母**）；`window_a3.py`＝每发前后读东财桶增量以证**这一发确实出网**（200 而零增量＝可能是 TTL 回声，标为无判别力；us/crypto 不经东财桶⇒把"这一维无证据"一起写）；`window_fill.py`＝三格只准往格子里填，**④ 默认拒填实时区那一格**（读数对象是主链含东财，`chain.py:67`），要填须 `--realtime-object`。**自证读数**：preflight 7/7、a2 16/16、a3 12/12、fill 10/10 PASS（`--selftest` 内含"该红的样本"：缺 `verifyVerdict`→`SchemaDrift`、`cooldown>0`→停、超上限→停、价未变→格一输出"有效负结果"而非"TTL 可用"）；三件 `--dry-run` 一次 HTTP 都不发（连 `/health` 也不读）。
+
+⑦ **⚠️ 写这些件的过程中我自己错了一次并已修**：`window_a2.summarize` 第一版给降级样本**打了标却没摘出分母**，10-12 自测当场把它读成假数（1/3 ⇔ 口径要求的 1/2）——这条口径是账上写死的（OPT-3 行 10-08 10:1x 段），摘不掉就是伪读数。修后 16/16。⇒ 同族教训＝**"标了"不等于"用了"**，判据要么进算式要么就是没有。
+
+⑧ **A2 的读数对象问题已登记为 #64（到场前必须定）**：A2 拿的是"东财 vs 腾讯"共识，而实时区将是"腾讯（＋新浪）"——**同一格里填两种对象**，第一批的阈值就建在没测过的分布上。10-13 那 ≤12 发要么明确当"主链共识参考值"，要么改测别的对象。
+
+⑨ **E-1 覆盖面读数（本轮现查）**：会自己红的闸＝**0 枚**——`.git/hooks/` 只有 `post-commit`、`post-checkout` 两枚**空壳**（全文一行 `#!/bin/sh`）、`core.hooksPath` 未设置、无 `.github/`、`git ls-files` 里 eslint／prettier／ruff／mypy／pytest／pre-commit／Makefile **全零**，`web/package.json` 的 scripts 只有 `dev/build/start/test`。⇒ 五道门禁＋docs 闸＋两枚 AST 守卫**全部要靠人手跑**，没有任何东西会在没人跑的时候自己红。方案已登记为 **OPT-4**（闸1 收尾一键／闸2 跨服务契约快照＝拍板要做但先定方案不落码；闸3 配置面自检＝主人授权写定档句、待准备件读数后再定）。CI 与 git hook 明确**不推荐**（`.git/hooks` 不在版本管理里、`--no-verify` 一道口就绕过；一次性 `at` 自动化在本机会静默消失且零回执＝#52 乙）。
+
+⑩ **E-3 事件源缺口的新读数（只报事实，方案待主人看）**：`web/lib/events.ts:101` 是一元硬判 `if (type !== "stock")` ⇒ 非股票**一次上游都不发**，直接返 `degraded` ＋ `:23-27` 那三句文案。三条缺口成色不同：fund 的**数据已在手**（`main.py:297` `/fund/report` → `ak.fund_announcement_report_em` 100 条公告含季/半年/年报，`akshare_provider.py:763-770`，docstring 自写"两者均走东财域名 → 经源族限速器"＝卡点是东财桶额度）；bond 缺**转债→正股映射**（`grep 正股|stock_code|bond_stock|转股` 在 `data-service/app`＋`web/lib` 的 .py/.ts 里 10-12 零命中）；crypto 那句"暂无免费新闻源"与 OPT-2 已把 Tavily 用作融合第三家（`pipeline.py:195`）**不相符**。账面上：`分红节点|强赎|下修` 在四册 docs 里只命中 PLAN:158-164 那张表，FIX-LEDGER／CODE-REVIEW／CONSTRAINTS **零命中**＝没有编号、没有待拍板行（已补登为 #65）。
+
+⑪ **本轮门禁复跑（回执都在 `.gitignore` 内）**：① `npx tsc --noEmit` exit=0 ＋ vitest **374/45 文件**（`web/tsc-1012-window.out`、`web/vitest-1012-window.out`），与账上 10-12 现值同数＝未退化；② ds 离线 **21 套逐套 exit=0**、汇总 **808/808**（`data-service/runtime/offline-batch-1012.out`；逐套 82/21/17/20/42/6/23/22/14/74/12/63/66/9/13/32/98/134/15/7/38，两套汇总字面 `=====` 与 `==` 都在解析范围内）；docs 闸＝**报警 21（FILE×1＋SECTION×2＋LINE×17＋SPEED×1）／表格 43 表·442 行·错位 0／断链 0／`--selftest` 28 判据 PASS**（`data-service/runtime/docscan-1012-window.out`）。③④⑤ 一枚没跑（要买额度，且 10-09 定档＝到场人工）。两侧服务本轮 **DOWN**（127.0.0.1:8000／3000 连接失败＝我发的本地探针，不是上游结论）⇒ 准备件的"真发一条"路径**尚未端到端验证**，只自证到 fixture 形，端到端归 10-13。
