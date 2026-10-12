@@ -11,6 +11,8 @@
 | `window_a2.py` | P3 A2 采集器：`/quote/verified` 的机器可读三态 `verifyVerdict` 逐发落盘；④ 口径编码在码里（`no_second_source` 不进分母、含「主源不可用，已降级至」那几发摘出分母）；自带声明——读数是「主链共识参考值（含东财主源）」，**不等于 OPT-3 实时区源集** | 同上 |
 | `window_a3.py` | P4 A3 采样器：逐类各 1 发取「此刻谁在供货」，档位按注册面字面判；每发前后读东财桶增量以证**这一发确实出网**（200 但零增量＝可能是 TTL 回声，标为无判别力）；us/crypto 不经东财桶，把"这一维无证据"一起写出来 | 同上 |
 | `window_fill.py` | P5 第 50 项三格决策表回填件：读数只准往既定的格里填，填不进来的必须自己说为什么（格三 N **拒填**——`PROFILES` 无腾讯族 ⇒ 桶算术对象错了；④ 默认**拒填实时区那一格**，除非 `--realtime-object`） | 同上 |
+| `window_bond_map.py` | 刀 C 探针：`ak.bond_zh_cov()` 那张转债表里**到底有没有"正股代码"列**——E-3 里 bond 那一刀做不做，就等这一个读数。默认只读盘上锁定版源码（零 HTTP）；`--live` 才真调，并**自带请求数硬闸**（`pageSize=500` 逐页循环 ⇒ 账上原记"1 发"是错的，实测口径 ≥3 发）。直连上游、不经 data-service ⇒ 它的东财计数器不会为它动 | 2026-10-12 E-3 刀 C（主人「按推荐方案做」） |
+| `window_contract.py` | 闸2 的**现场腿**：对着真响应核 `web/lib/ds-contract.ts` 登记的键面，快照里有而真响应没有＝改名/摘键；`--write` 只回写**键面**（不存数值）到 `ds-contract.snapshot.json`。走 127.0.0.1 的 data-service ⇒ 这些发会花上游额度、会动东财桶，`--dry-run` 默认一条都不发 | 同上 |
 
 用法示例：
 
@@ -31,3 +33,4 @@ python test-script/window_fill.py                 # 读数往三格里填，拒�
 ```
 
 纪律：本目录只放**只读观测**脚本；任何会写库/破坏性操作的脚本不得入内。
+本目录唯一的写动作是 `window_contract.py --write`：它回写的是仓库内的**键面快照**（`web/lib/ds-contract.snapshot.json`，只有键名、不存行情数值、不碰 SQLite／Prisma），且必须显式带 `--write`。

@@ -120,6 +120,10 @@ node scripts/test-p6.mjs        # P6 Skills + MCP 验收（需 web + data-servic
 cd ../data-service
 .venv/Scripts/python tests/test_p6_mcp.py        # MCP server 工具暴露与降级（离线）
 .venv/Scripts/python tests/test_p2_m8.py         # 多源降级与限速（离线）
+
+# 闸1（OPT-4）：一条命令跑完四道零出网门禁（tsc／vitest／ds 离线逐套／docs 闸）
+# 抬头会写它对着哪一棵树；③④ 要买上游额度，不在这一条里（定档＝人工到场）
+cd .. && node scripts/gate.mjs
 ```
 
 注意：东财对短时高频请求限流（连接被重置），验收失败若为 502/空 K 线，先冷却几分钟再重试；测试脚本已内置节流与退避。
