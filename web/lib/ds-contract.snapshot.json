@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "capturedBy": "test-script/window_contract.py --write（现场腿）；下面两条 10-07／10-08 是从本机回执抄录的",
+  "note": "只记键面（结构契约），不记数值 ⇒ 本文件永不含标的价格之外的业务数据，也不含任何凭据。回执文件本身在 .gitignore 内，所以键面必须抄到这里才跨机可读。",
+  "endpoints": {
+    "/quote": {
+      "capturedAt": "2026-10-07",
+      "provenance": "data-service/probe-cap1-20codes-1007.out（42 发同形，stock/fund 单点，本机磁盘）",
+      "topLevel": [
+        "change",
+        "changePct",
+        "code",
+        "currency",
+        "high",
+        "low",
+        "name",
+        "open",
+        "prevClose",
+        "price",
+        "source",
+        "timestamp",
+        "type",
+        "volume"
+      ],
+      "rows": null
+    },
+    "/kline": {
+      "capturedAt": "2026-10-08",
+      "provenance": "data-service/dao5-window-1008-morning.out（刀 5 ③ 那两发的 candles 行，本机磁盘）",
+      "topLevel": null,
+      "rows": {
+        "candles": ["amount", "close", "date", "high", "low", "open", "volume"]
+      }
+    }
+  }
+}
