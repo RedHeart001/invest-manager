@@ -20,10 +20,17 @@ export type EventsResult = {
   byDate: Record<string, EventItem[]>;
 };
 
-const DEGRADE_NOTES: Record<string, string> = {
-  fund: "基金事件源（季报/分红节点）暂未接入，仅展示阶段划分",
-  bond: "可转债公告源（强赎/下修）暂未接入，仅展示阶段划分",
-  crypto: "加密货币暂无免费新闻源，仅展示阶段划分并标注数据缺口",
+// E-3 刀 A（10-12 主人「按推荐方案做」的字）：三句里两处事实不准（crypto／fund），bond 那句只统一了
+// 尾巴；改准后由 `events.test.ts` 的字面断言钉住（改回旧字面 ⇒ 断言恰红）。
+//  · crypto 原写「暂无免费新闻源」与自家事实不符：Tavily 已是 OPT-2 新闻融合的第三家
+//    （`data-service/app/hotspot/pipeline.py:195`），缺的是「按标的检索」这条通道，不是「源」。
+//  · fund 原写「季报/分红节点」：`/fund/report` 只回定期报告清单
+//    （`akshare_provider.py:761` 的 `PERIODIC_KEYWORDS` 四串），兑现不了「分红节点」，
+//    文案不许承诺库里没有的那一档。
+export const DEGRADE_NOTES: Record<string, string> = {
+  fund: "基金事件源（定期报告公告）暂未接入事件区，仅展示阶段划分",
+  bond: "可转债公告源（强赎/下修）暂未接入事件区，仅展示阶段划分",
+  crypto: "加密货币事件源暂未接入事件区，仅展示阶段划分",
 };
 
 type NewsResp = {
