@@ -13,11 +13,13 @@ import ts from "typescript";
 import {
   DS_CONTRACT,
   DS_RESPONSE_FILES,
+  NO_LIVE_PROBE,
   coverage,
   declaredButUnused,
   keysAbsentInDsSource,
   loadSnapshot,
   missingContractKeys,
+  snapshotDenominator,
   staleEndpoints,
   unregisteredEndpoints,
   REPO_ROOT,
@@ -157,7 +159,29 @@ describe("闸2 L2 键名：清单要的键，快照与 ds 源码都得承认", (
   });
 
   it("覆盖面读数（不许把「没采到」读成「没问题」）", () => {
-    expect(coverage(snap)).toMatchObject({ declared: DS_CONTRACT.length });
+    expect(coverage(snap)).toMatchObject({ declared: DS_CONTRACT.length, 分母: 10 });
+  });
+
+  it("分母口径（10-12 主人的字＝改成 10）：排除表自证，且跑满＝100%", () => {
+    const paths = DS_CONTRACT.map((c) => c.path);
+    // 排除表里写错一个路径名＝那条排除静默失效、分母悄悄变化 ⇒ 必须逐条点名
+    const ghost = Object.keys(NO_LIVE_PROBE).filter((p) => !paths.includes(p));
+    expect(ghost).toEqual([]);
+    // 排除没有理由＝散文承诺，拦不住"跑满了也补不到 100%"那一形
+    expect(Object.entries(NO_LIVE_PROBE).filter(([, why]) => why.trim().length < 10)).toEqual([]);
+    expect(snapshotDenominator(paths).length).toBe(paths.length - Object.keys(NO_LIVE_PROBE).length);
+    // `/hotspots/status` 有 requiredTop ⇒ 它必须在分母里（10-12 那版把它当透传排除，永远补不上）
+    const status = DS_CONTRACT.find((c) => c.path === "/hotspots/status")!;
+    expect(status.requiredTop.length).toBeGreaterThan(0);
+    expect(snapshotDenominator(paths)).toContain("/hotspots/status");
+    // 合成红样：一份只含排除项的快照，`未进快照文件` 不得把分母外的端点算成"缺"
+    const odd: SnapshotFile = {
+      schemaVersion: 1,
+      capturedBy: "fixture",
+      endpoints: { "/hotspots/run": { capturedAt: "2026-10-12", provenance: "f", topLevel: ["a"], rows: null } },
+    };
+    expect(coverage(odd).未进快照文件).toEqual(snapshotDenominator(paths));
+    expect(coverage(odd).topLevelCaptured).toBe(0);
   });
 
   it("合成样本能点亮 L2：改一个键名／快照少一个键都要红", () => {

@@ -7,7 +7,7 @@
  * 三条腿（`ds-contract.test.ts` 跑库内扫描，每条另带一枚会点亮的合成样本）：
  *  - L1 完整性：web 源码里每一处 ds 调用点都得在这里登记（新端点没登记 ⇒ 红）。
  *  - L2 键名：这里声明要读的键 ⊆ 快照键面（只查有快照的那些），并且每个键都得在 ds
- *    源码里以同名字面量存在（任何一侧改名 ⇒ 红）。
+ *    源码里以同名字面量存在（任何一侧改名 ⇒ 红）。快照那一半的分母＝登记项减 `NO_LIVE_PROBE`。
  *  - L3 陈旧：快照采集时刻不得早于 ds 响应构造面（`DS_RESPONSE_FILES`）的最后一次提交。
  *
  * 拦不住的那一半（明说，不是留白）：
@@ -139,6 +139,16 @@ export const DS_CONTRACT: readonly EndpointContract[] = [
   },
 ];
 
+/** 快照分母的排除表（10-12 主人「分母口径改成 10」的字）——**这一份是唯一来源**，
+ *  现场腿 `test-script/window_contract.py` 用正则现查它，不抄第二份。
+ *  治的那一形＝"跑满了也补不到 100%"：10-12 那版现场腿的探针是 9 条、`PASSTHROUGH` 排掉 3 条，
+ *  而账上分母写的 11＝12 登记 −`/hotspots/run`（L2 空集），于是 `/hotspots/status`（有 2 枚 requiredTop）
+ *  与 `/research/start`（1 枚）永远采不到 ⇒ 排除必须有**写下来的理由**，不能靠"它是透传"这句话。 */
+export const NO_LIVE_PROBE: Record<string, string> = {
+  "/hotspots/run": "L2 是空集（`requiredTop: []`，整份透传）⇒ 键面快照对它没有判据",
+  "/research/start": "POST 有副作用（真起一次研报任务）⇒ 永不自动采，要它的人自己点名",
+};
+
 /** ds 侧「谁把响应拼出来」的那几枚文件——L3 拿它们的最后提交时间和快照比 */
 export const DS_RESPONSE_FILES = [
   "data-service/app/main.py",
@@ -188,14 +198,22 @@ export function staleEndpoints(snap: SnapshotFile, builderLatestMs: number): str
     .sort();
 }
 
-/** 覆盖面读数：这闸今天到底覆盖了几枚端点的哪几半（不许把"没数据"读成"没问题"） */
+/** 覆盖面读数：这闸今天到底覆盖了几枚端点的哪几半（不许把"没数据"读成"没问题"）
+ *  分母＝登记项减 `NO_LIVE_PROBE` ⇒ 「跑满现场腿＝分母 100%」这条是码算出来的，不是散文承诺的。 */
+export function snapshotDenominator(declared: readonly string[] = DS_CONTRACT.map((c) => c.path)): string[] {
+  return declared.filter((p) => !(p in NO_LIVE_PROBE));
+}
+
 export function coverage(snap: SnapshotFile): Record<string, unknown> {
   const declared = DS_CONTRACT.map((c) => c.path);
-  const withTop = declared.filter((p) => snap.endpoints[p]?.topLevel);
-  const withRows = declared.filter((p) => Object.keys(snap.endpoints[p]?.rows ?? {}).length > 0);
-  const uncaptured = declared.filter((p) => !snap.endpoints[p]);
+  const denom = snapshotDenominator(declared);
+  const withTop = denom.filter((p) => snap.endpoints[p]?.topLevel);
+  const withRows = denom.filter((p) => Object.keys(snap.endpoints[p]?.rows ?? {}).length > 0);
+  const uncaptured = denom.filter((p) => !snap.endpoints[p]);
   return {
     declared: declared.length,
+    分母: denom.length,
+    排除: NO_LIVE_PROBE,
     topLevelCaptured: withTop.length,
     rowsCaptured: withRows.length,
     未进快照文件: uncaptured,

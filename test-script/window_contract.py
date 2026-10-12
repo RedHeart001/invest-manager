@@ -4,11 +4,18 @@
 它拦不住"ds 少回了一个键"这种运行时形态——那一半只有真响应能答，而真响应要花钱。
 所以本件默认 `--dry-run`：只打印会打哪几条、每条几发，一次 HTTP 都不发。
 
-纪律（与 `window_a2/a3` 同一套）：
- - 走 127.0.0.1 的 data-service，**不直连上游** ⇒ 这些发会花上游额度、会动东财桶，
-   所以排在 10-13 窗口里跑，跑前先看 `/health` 的桶态；`/products` 一条就是整张列表，最贵。
- - 快照只存**键面**，不存数值 ⇒ 回写文件不会把行情抄进仓库。
+纪律（与 `window_a2/a3` 同一套；10-12 主人的字＝「window_contract.py 挂 Fuse＋CAP＋/products 显式点名」，
+在此之前它是七件里**唯一没有停手判据**的一件）：
+ - 每发之前过 `Fuse`：本机 `/health` 读东财桶，`cooldown>0` ⇒ 立刻停不重试；连续 2 发非 200 ⇒ 当场停；
+   硬上限 `CAP_REQUESTS`。⚠️ **`CAP_REQUESTS` 数的是 ds 请求数，不是上游发数**（`/products` 一条就能分页
+   多发，桶是按上游算的）⇒ 这条闸管"别把清单跑第二遍"，管不了"这一条几发"，逐条估数打在计划里给人看。
+ - `/products`（整张列表＝分页多发，本窗最贵）**不进默认计划**，要它得 `--only /products` 显式点名。
+ - 走 127.0.0.1 的 data-service，**不直连上游** ⇒ 这些发会花上游额度、会动东财桶，所以排在 10-13 窗口里跑。
+ - 快照只存**键面**，不存数值 ⇒ 回写文件不会把行情抄进仓库。但它是**版本管理里的文件**，
+   `--write` 之后 `web/lib/ds-contract.snapshot.json` 会变 dirty，窗口收尾要单独一笔提交。
  - 判据是"快照里的键在真响应里一个都不能少"（改名/摘键＝红）；多出来的键不算红（CR9-31 加键不破坏调用方）。
+ - 覆盖面分母**从 `ds-contract.ts` 的 `NO_LIVE_PROBE` 现查**（10-12 定档＝10 枚：12 登记 − 2 枚有理由的排除），
+   本件不抄第二份；`--selftest` 里"探针集合 == 分母"是一枚真牙齿 ⇒ 清单加了端点而现场腿没加探针＝自测红。
 
 用法：
     python test-script/window_contract.py --selftest
@@ -29,10 +36,21 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "test-script"))
 
-from window_lib import NoProxyOpener, Receipt, beijing_today, http_json  # noqa: E402
+from window_lib import (  # noqa: E402
+    Fuse,
+    FuseStop,
+    NoProxyOpener,
+    Receipt,
+    beijing_today,
+    http_json,
+    limiter_digest,
+)
 
 CONTRACT_TS = REPO_ROOT / "web" / "lib" / "ds-contract.ts"
 SNAPSHOT_JSON = REPO_ROOT / "web" / "lib" / "ds-contract.snapshot.json"
+
+CAP_REQUESTS = 12  # 硬闸（数的是 ds 请求数）
+EXPENSIVE = {"/products"}  # 整张列表分页多发 ⇒ 不进默认计划
 
 # 每条真发会打几发上游（10-12 按读码估的，`--live` 之后以 `/health` 桶增量为准）
 PROBES: list[dict[str, Any]] = [
@@ -42,18 +60,42 @@ PROBES: list[dict[str, Any]] = [
     {"path": "/news", "params": {"code": "600519"}, "egress": "1 发（东财新闻）"},
     {"path": "/quotes", "params": {"type": "stock", "codes": "600519"}, "egress": "1 发"},
     {"path": "/fund/holdings", "params": {"code": "510300"}, "egress": "1 发"},
-    {"path": "/fund/report", "params": {"code": "510300"}, "egress": "1 发"},
+    {"path": "/fund/report", "params": {"code": "510300"},
+     "egress": "2–3 发（`akshare_provider.py:782` 公告 1 发＋`:809-817` 行业配置按年份循环 1–2 发；6h TTL）"},
     {"path": "/bond/yieldcurve", "params": {"days": "90"}, "egress": "1 发（内存缓存 30 分钟）"},
-    {"path": "/products", "params": {"type": "stock"}, "egress": "整张列表＝分页多发，本窗最贵的一条"},
+    {"path": "/hotspots/status", "params": {}, "egress": "0 发（读调度器状态，本地内存、零上游、零副作用）"},
+    {"path": "/products", "params": {"type": "stock"}, "egress": "整张列表＝分页多发，本窗最贵的一条（要点名才跑）"},
 ]
-# 这两条 web 侧是透传，键面归浏览器那侧；现场腿只核对"还回不回得来"，不回写快照
-PASSTHROUGH = {"/hotspots/status", "/hotspots/run", "/research/start"}
 
 
 def declared_paths() -> list[str]:
     """从 `ds-contract.ts` 现查登记了哪些端点（清单的单一来源在那儿，这里不抄第二份）"""
     text = CONTRACT_TS.read_text(encoding="utf-8")
     return re.findall(r'path:\s*"(/[a-z/]+)"', text)
+
+
+def no_live_probe() -> dict[str, str]:
+    """分母的排除表现查 ts（`NO_LIVE_PROBE`）——排除住在哪、为什么排除，都只有那一份。
+    锚点必须带 `const`：文件头注释里也提到这个标识符，不带就匹配到注释后面第一个 `{}` 块上，
+    读回来是空 dict ⇒ 分母静默变成 12，排除失效且不报错（10-12 首跑 selftest 就是这么抓到的）。"""
+    text = CONTRACT_TS.read_text(encoding="utf-8")
+    m = re.search(r"const\s+NO_LIVE_PROBE[^{]*\{(.*?)\n\}", text, re.S)
+    if not m:
+        raise SystemExit("读不到 `NO_LIVE_PROBE` ⇒ 分母无从计算（去 ds-contract.ts 确认那块还在）")
+    return dict(re.findall(r'"(/[a-z/]+)"\s*:\s*"([^"]+)"', m.group(1)))
+
+
+def denominator() -> list[str]:
+    return [p for p in declared_paths() if p not in no_live_probe()]
+
+
+def plan(only: set[str]) -> tuple[list[dict[str, Any]], list[str]]:
+    """→ (会跑的探针, 被「显式点名」规则挡住的昂贵探针)"""
+    picks = [p for p in PROBES if (not only or p["path"] in only)]
+    if not only:
+        picks = [p for p in picks if p["path"] not in EXPENSIVE]
+    held = [p["path"] for p in PROBES if p["path"] in EXPENSIVE and p not in picks]
+    return picks, held
 
 
 def key_surface(obj: Any) -> dict[str, Any]:
@@ -93,7 +135,6 @@ def collect(opener: NoProxyOpener, probe: dict[str, Any], snapshot: dict[str, An
         "error": err,
         "surface": surface,
         "vanished": vanished,
-        "passthrough": probe["path"] in PASSTHROUGH,
         "priorCapturedAt": entry.get("capturedAt") if entry else None,
     }
     receipt.add(rec)
@@ -103,7 +144,7 @@ def collect(opener: NoProxyOpener, probe: dict[str, Any], snapshot: dict[str, An
 def write_snapshot(snapshot: dict[str, Any], records: list[dict[str, Any]]) -> int:
     written = 0
     for r in records:
-        if r["passthrough"] or r.get("status") != 200 or not isinstance(r["surface"].get("topLevel"), list):
+        if r.get("status") != 200 or not isinstance(r["surface"].get("topLevel"), list):
             continue
         snapshot["endpoints"][r["path"]] = {
             "capturedAt": beijing_today(),
@@ -120,32 +161,57 @@ def write_snapshot(snapshot: dict[str, Any], records: list[dict[str, Any]]) -> i
 
 
 def run(a: argparse.Namespace) -> int:
-    declared = declared_paths()
-    picks = [p for p in PROBES if (not a.only or p["path"] in a.only)]
-    planned = [p["path"] for p in picks]
+    denom = denominator()
+    picks, held = plan(a.only)
     print("== 登记的端点（现查 ds-contract.ts）")
-    print(json.dumps({"declared": declared, "本件会点": planned, "未覆盖(透传类)": sorted(PASSTHROUGH)}, ensure_ascii=False, indent=1))
+    print(json.dumps({
+        "declared": declared_paths(),
+        "排除（各有理由，住在 NO_LIVE_PROBE）": no_live_probe(),
+        "分母": len(denom),
+        "本件会点": [p["path"] for p in picks],
+        "被最贵规则挡住": held,
+        "探针集合==分母": sorted(p["path"] for p in PROBES) == sorted(denom),
+    }, ensure_ascii=False, indent=1))
     receipt = Receipt("windowContract", dry=not a.live)
     if not a.live:
         for p in picks:
             print(f"  [dry] {p['path']} 参数={p['params']} ⇒ 出网估：{p['egress']}")
         print(f"\n[dry-run] 演练 {len(picks)} 条：一条 HTTP 都不发（连 /health 也不读）。")
+        if held:
+            print(f"        {held} 未进默认计划（整张列表分页多发）⇒ 要它：--live --only {held[0]}")
         return 0
     opener = NoProxyOpener()
     snapshot = json.loads(SNAPSHOT_JSON.read_text(encoding="utf-8"))
-    records = [collect(opener, p, snapshot, receipt) for p in picks]
+    fuse = Fuse(opener, max_requests=min(CAP_REQUESTS, len(picks)), watch_eastmoney=True)
+    records: list[dict[str, Any]] = []
+    stopped: str | None = None
+    for p in picks:
+        try:
+            fuse.check()
+        except FuseStop as e:
+            stopped = f"{e}（已跑 {fuse.sent} 发，后面 {len(picks) - len(records)} 条未发）"
+            print(f"\n⛔ 保险丝停手：{stopped}")
+            break
+        rec = collect(opener, p, snapshot, receipt)
+        fuse.record(rec["status"])
+        records.append(rec)
     bad = [r["path"] for r in records if r["vanished"]]
     s = {
         "端点": [r["path"] for r in records],
         "非200": [f'{r["path"]}={r["status"]}' for r in records if r["status"] != 200],
         "快照里有而真响应没有的键": {r["path"]: r["vanished"] for r in records if r["vanished"]},
+        "保险丝": {"已发ds请求": fuse.sent, "连续非200": fuse.consecutive_non200,
+                   "东财族未注册": fuse.eastmoney_family_absent, "停手": stopped},
+        "东财桶末读": fuse.last_digest,
         "回写": None,
     }
-    if a.write:
+    if a.write and stopped is None:
         s["回写"] = f'{write_snapshot(snapshot, records)} 枚端点 → {SNAPSHOT_JSON.name}'
+    elif a.write:
+        s["回写"] = "拒写（保险丝停过手＝这一轮的键面不完整，别把半截清单抄成快照）"
     print("\n== 现场腿汇总\n" + json.dumps(s, ensure_ascii=False, indent=1))
     receipt.finish(s)
-    return 0 if not bad and not s["非200"] else 1
+    return 0 if not bad and not s["非200"] and stopped is None else 1
 
 
 def selftest() -> int:
@@ -171,9 +237,53 @@ def selftest() -> int:
     declared = declared_paths()
     ck("清单的单一来源在 ts 里，件内不抄第二份（现查 ≥10 条）", len(declared) >= 10)
     ck("/quote/verified 在登记之列（10-08 那一枚读错键的端点）", "/quote/verified" in declared)
-    ck("现场腿的探针都对着已登记的端点",
-       all(p["path"] in declared for p in PROBES))
-    ck("透传类不回写快照", all(p in PASSTHROUGH for p in ["/hotspots/status", "/hotspots/run"]))
+    # 这一枚是真牙齿：清单加了端点而现场腿没加探针／或探针偷偷多采一枚被排除的 ⇒ 自测红
+    ck("探针集合 == 分母（分母现查 NO_LIVE_PROBE，不抄第二份）",
+       sorted(p["path"] for p in PROBES) == sorted(denominator()))
+    ck("分母＝10（12 登记 − 2 枚各有理由的排除）", len(denominator()) == len(declared) - 2 == 10)
+    ck("/hotspots/status 已挪进探针清单且零上游（0 发＝不动桶）",
+       any(p["path"] == "/hotspots/status" and p["egress"].startswith("0") for p in PROBES))
+    ck("有副作用的 POST 永不自动采（run 触发抓取／start 起研报）",
+       not any(p["path"] in {"/hotspots/run", "/research/start"} for p in PROBES))
+
+    picks, held = plan(set())
+    ck("/products 不进默认计划", all(p["path"] != "/products" for p in picks) and held == ["/products"])
+    ck("点名才跑：--only /products 会把它取回来",
+       [p["path"] for p in plan({"/products"})[0]] == ["/products"])
+    ck("硬上限存在且不超（CAP 数的是 ds 请求数）",
+       CAP_REQUESTS >= len(picks) and len(picks) == len(denominator()) - 1)
+
+    h_cool = {"limiters": [{"name": "eastmoney", "cooldown": 12.5, "granted": 3, "denied": 0,
+                            "consecutiveFailures": 0, "seen": {}, "seenTotal": 0}]}
+    f = Fuse(NoProxyOpener(), max_requests=12, health_provider=lambda: h_cool)
+    try:
+        f.check()
+        ck("cooldown>0 第一发之前就停", False)
+    except FuseStop as e:
+        ck("cooldown>0 第一发之前就停", "cooldown" in str(e))
+    f2 = Fuse(NoProxyOpener(), max_requests=1, health_provider=lambda: {"limiters": []})
+    f2.check()
+    f2.record(200)
+    try:
+        f2.check()
+        ck("达硬上限 ⇒ 不再多发一发", False)
+    except FuseStop as e:
+        ck("达硬上限 ⇒ 不再多发一发", "max_requests" in str(e))
+    f3 = Fuse(NoProxyOpener(), max_requests=12, health_provider=lambda: {"limiters": []})
+    f3.record(502)
+    f3.record(500)
+    try:
+        f3.check()
+        ck("连续 2 发非 200 ⇒ 停", False)
+    except FuseStop as e:
+        ck("连续 2 发非 200 ⇒ 停", "非 200" in str(e))
+    f4 = Fuse(NoProxyOpener(), max_requests=12, health_provider=lambda: {"version": "旧码"})
+    try:
+        f4.check()
+        ck("/health 没有 limiters 位 ⇒ 判为旧码、停", False)
+    except FuseStop as e:
+        ck("/health 没有 limiters 位 ⇒ 判为旧码、停", "旧码" in str(e))
+
     print(f"\nselftest {sum(checks)}/{len(checks)} PASS")
     return 0 if all(checks) else 1
 
@@ -183,8 +293,8 @@ def main() -> int:
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--selftest", action="store_true")
     ap.add_argument("--live", action="store_true", help="真打 127.0.0.1 的 data-service（会花上游额度）")
-    ap.add_argument("--write", action="store_true", help="采完把键面回写快照 JSON")
-    ap.add_argument("--only", type=str, default="", help="逗号分隔的端点子集")
+    ap.add_argument("--write", action="store_true", help="采完把键面回写快照 JSON（版本管理文件，会产生 dirty）")
+    ap.add_argument("--only", type=str, default="", help="逗号分隔的端点子集（也是点名 /products 的唯一途径）")
     a = ap.parse_args()
     if a.selftest:
         return selftest()
