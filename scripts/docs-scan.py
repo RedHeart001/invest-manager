@@ -18,6 +18,7 @@
     python scripts/docs-scan.py --baseline --print       # 全列（LINE 不再是 top-10）
     python scripts/docs-scan.py --baseline --register    # 把当轮清单登记为基线（写盘）
     python scripts/docs-scan.py --plan --file docs/CODE-REVIEW.md --section "追加十二"   # 打印将搬跨度，不写盘
+    python scripts/docs-scan.py --list-closed            # 逐项报闭包证据（首行✅／块内✅／项尾40字）＋已搬指针行在册
 
 口径（都按 `len(text)` 含换行，逐行和与它差「行数−1」，混用会让每轮对账多一个谜）：
     行区间的字符数 ＝ len("\\n".join(该区间各行))。
@@ -49,6 +50,10 @@ NUM_ITEM = re.compile(r"^[0-9]{1,3}\.\s")
 APPEND_REF = re.compile(r"追加[〇零一二三四五六七八九十百]+")
 ITEM_REF = re.compile(r"第\s*([0-9]{1,3})\s*项")
 ITEM_HEAD = re.compile(r"^([0-9]{1,3})\.\s")
+# 10-12 补：搬动执行件自己写的「原地指针行」。编号项之间会夹着**别人**的指针行
+# （如 FIX-LEDGER 里 #22 之后紧跟着 23/24/25 的指针），项尾判定必须在此即止——
+# 否则 `--item 22` 会把 23/24/25 的指针一起卷进归档（10-12 差点踩到的那一形）。
+POINTER_LINE = re.compile(r"^\s*>\s*\*\*【已搬归档】\*\*")
 MD_LINK = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
 FENCE = re.compile(r"^\s*```")
 RANGE = re.compile(r"^(\d+)\.\.(\d+)$")
@@ -476,6 +481,30 @@ def block_violations(secs, start, end):
     return [s for s in block_headings(secs, start, end) if s["end"] > end]
 
 
+def item_span(lines, head_lines, n):
+    """一枚编号项的跨度 (start, end)（1-based，含两端）；找不到返回 None。
+
+    块尾 ＝「下一枚编号行／任一枚标题行／**已搬归档指针行**」之前。
+    指针行那一条是 10-12 补的：编号项之间夹着 `> **【已搬归档】** 第 N 项 …`
+    （FIX-LEDGER 里 #22 之后是 23/24/25 的指针），原判据既非编号行也非标题行
+    ⇒ 搬 #22 会把别人的指针一起卷走。`--section`（按标题跨度）与 `--lines`（显式逃生口）不走这里。
+    """
+    m = re.compile(r"^%d\.\s" % n)
+    found = None
+    for idx, line in enumerate(lines, 1):
+        if m.match(line):
+            found = idx
+            break
+    if found is None:
+        return None
+    end = len(lines)
+    for j in range(found + 1, len(lines) + 1):
+        if NUM_ITEM.match(lines[j - 1]) or (j in head_lines) or POINTER_LINE.match(lines[j - 1]):
+            end = j - 1
+            break
+    return (found, end)
+
+
 def resolve_block(lines, secs, spec):
     """把 --section/--item/--lines 解析成一个 [start,end] 块；返回 (block, err)。"""
     starts, ends = [], []
@@ -492,22 +521,11 @@ def resolve_block(lines, secs, spec):
             tok = tok.strip()
             if not tok:
                 continue
-            n = int(tok)
-            m = re.compile(r"^%d\.\s" % n)
-            found = None
-            for idx, line in enumerate(lines, 1):
-                if m.match(line):
-                    found = idx
-                    break
-            if found is None:
-                return None, "找不到第 %d 项" % n
-            end = len(lines)
-            for j in range(found + 1, len(lines) + 1):
-                if NUM_ITEM.match(lines[j - 1]) or (j in head_lines):
-                    end = j - 1
-                    break
-            starts.append(found)
-            ends.append(end)
+            span = item_span(lines, head_lines, int(tok))
+            if span is None:
+                return None, "找不到第 %d 项" % int(tok)
+            starts.append(span[0])
+            ends.append(span[1])
     if spec.get("lines") is not None:
         for part in spec["lines"].split(","):
             part = part.strip()
@@ -606,24 +624,50 @@ def sha256(text):
 
 
 def list_closed(root, appendix=False):
-    """--list-closed：打印每项编号＋完整首行字节＋是否含 ✅＋被活跃区「第 N 项」引用次数。"""
+    """--list-closed：**报证据，不判终局**（10-12 改）。
+
+    三列证据＋一行在册：① 首行是否含 ✅（原判据，保留成第一列）；② 整项跨度内 ✅ 计数；
+    ③ 项尾 40 字——本仓编号项都是**追加式**（首行是原始登记，闭环节写在段尾），
+    原判据（首行含 ✅）实测对本仓命中 0 枚，闭包只能靠人读末句 ⇒ 把末句摆出来。
+    另扫 `> **【已搬归档】** 第 N 项` 行，列出**已搬在册**的编号与指针行号
+    （已搬项的编号行本身已不在盘上，故不能按行打印，只能单独成行）。
+    """
     led = os.path.join(root, "docs", "FIX-LEDGER.md")
     lines = lines_of(read(led))
+    secs = build_sections(lines)
+    head_lines = {s["line"] for s in secs}
     active = active_docs(root)
     ref_counts = {}
     for path in active:
         for line in line_iter(read(path)):
             for m in ITEM_REF.finditer(line):
                 ref_counts[m.group(1)] = ref_counts.get(m.group(1), 0) + 1
-    print("== --list-closed docs/FIX-LEDGER.md（判据：首行含 ✅） ==")
+    moved = {}
+    for i, line in enumerate(lines, 1):
+        m = re.match(r"^\s*>\s*\*\*【已搬归档】\*\*\s*第\s*([0-9]{1,3})\s*项", line)
+        if m:
+            moved.setdefault(m.group(1), i)
+    print("== --list-closed docs/FIX-LEDGER.md（报证据，不判终局） ==")
     for i, line in enumerate(lines, 1):
         m = ITEM_HEAD.match(line)
         if not m:
             continue
         num = m.group(1)
-        closed = "✅" in line
-        print("  %-4s L%-4d closed=%-5s refs=%-3d | %s"
-              % (num, i, closed, ref_counts.get(num, 0), line[:100]))
+        span = item_span(lines, head_lines, int(num))
+        end = span[1] if span else i
+        body = "\n".join(lines[i - 1:end])
+        tail_src = ""
+        for j in range(end, i - 1, -1):
+            if lines[j - 1].strip():
+                tail_src = lines[j - 1].strip()
+                break
+        print("  %-4s L%-4d 首行✅=%-5s 块内✅=%-3d refs=%-3d | 尾: …%s"
+              % (num, i, "✅" in line, body.count("✅"), ref_counts.get(num, 0), tail_src[-40:]))
+    if moved:
+        print("  已搬在册（有指针行，%d 枚）：%s"
+              % (len(moved), "、".join("%s@L%d" % (k, moved[k]) for k in sorted(moved, key=int))))
+    else:
+        print("  已搬在册（有指针行）：无")
     if appendix:
         appendix_candidates(root)
     return 0
@@ -794,21 +838,10 @@ def _resolve_blocks(lines, secs, spec):
             tok = tok.strip()
             if not tok:
                 continue
-            n = int(tok)
-            m = re.compile(r"^%d\.\s" % n)
-            found = None
-            for idx, line in enumerate(lines, 1):
-                if m.match(line):
-                    found = idx
-                    break
-            if found is None:
-                return None, "找不到第 %d 项" % n
-            end = len(lines)
-            for j in range(found + 1, len(lines) + 1):
-                if NUM_ITEM.match(lines[j - 1]) or (j in head_lines):
-                    end = j - 1
-                    break
-            blocks.append((found, end))
+            span = item_span(lines, head_lines, int(tok))
+            if span is None:
+                return None, "找不到第 %d 项" % int(tok)
+            blocks.append(span)
     if spec.get("lines") is not None:
         for part in spec["lines"].split(","):
             part = part.strip()
@@ -982,6 +1015,7 @@ def selftest():
                "# archived\n\n#### 追加十二 · 归档里的正文\n\n#### 追加十三 · 归档里的另一节\n")
         broken, counts, labels = link_scan(root)
         joined = "\n".join(broken)
+        lc_append, lc_partial, lc_moved = _test_list_closed_evidence()
         checks = {
             "悬空第N项被抓": "第 999 项" in joined,
             "悬空追加分身被抓": "追加九百九十九" in joined,
@@ -1014,6 +1048,11 @@ def selftest():
             "move·多切块单批一遍抽全": _test_move_multiblock(),
             "move·换序先验无损在缝检查之前": _test_reorder_order(),
             "move·换序缝缺陷被抓": _test_reorder_seam(),
+            # 项尾守卫 + --list-closed 证据面（10-12 补）
+            "move·项后指针行不被卷走": _test_item_stops_at_pointer(),
+            "list-closed·追加式项的闭环节可见": lc_append,
+            "list-closed·部分闭环末句可见": lc_partial,
+            "list-closed·已搬指针行在册": lc_moved,
         }
     finally:
         shutil.rmtree(root, ignore_errors=True)
@@ -1092,6 +1131,69 @@ def _test_move_multiblock():
                 and "a1" in arch and "b1" in arch
                 # 每块各一枚指针（label 在删除前生成）——bug 形：只插了第一块的指针
                 and "第 1 项" in left and "第 2 项" in left)
+    finally:
+        sys.stdout = old_stdout
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def _test_item_stops_at_pointer():
+    """`--item` 遇「已搬归档」指针行即止：搬 #22 不许把 23/24/25 的指针一起卷走。
+
+    10-12 补的判据——编号项之间夹着**别人**的指针行，原项尾判定既非编号行也非标题行。
+    """
+    root = tempfile.mkdtemp(prefix="docs-scan-ptr-")
+    buf = io.StringIO()
+    old_stdout = sys.stdout
+    try:
+        os.makedirs(os.path.join(root, "docs", "history"))
+        _write(os.path.join(root, "docs", "history", "README.md"), "# idx\n\n## 时间线索引\n\n")
+        _write(os.path.join(root, "docs", "Z.md"),
+               "# z\n\n22. a1\na2\n\n"
+               "> **【已搬归档】** 第 23 项 —— 正文见 [x.md](history/x.md)（体量治理：整块搬迁，原地只留指针）。\n"
+               "> **【已搬归档】** 第 24 项 —— 正文见 [x.md](history/x.md)（体量治理：整块搬迁，原地只留指针）。\n\n"
+               "26. b1\nb2\n")
+        sys.stdout = buf
+        rc = move(root, {"file": "docs/Z.md", "item": "22",
+                         "date": "2026-01-01", "slug": "z-ptr", "reason": "test"}, do_go=True)
+        sys.stdout = old_stdout
+        left = read(os.path.join(root, "docs", "Z.md"))
+        arch = read(os.path.join(root, "docs", "history", "2026-01-01-z-ptr.md"))
+        return (rc == 0
+                and "a1" in arch and "b1" not in arch
+                # 指针行原地存活、没被卷进归档
+                and "第 23 项" in left and "第 24 项" in left
+                and "第 23 项" not in arch)
+    finally:
+        sys.stdout = old_stdout
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def _test_list_closed_evidence():
+    """`--list-closed` 的三列证据＋在册行：追加式项的闭环节、部分闭环的末句、已搬指针都要看得见。
+
+    返回 (追加式可见, 末句可见, 已搬在册)——三条各自成判据，不许一锅绿。
+    """
+    root = tempfile.mkdtemp(prefix="docs-scan-lc-")
+    buf = io.StringIO()
+    old_stdout = sys.stdout
+    try:
+        os.makedirs(os.path.join(root, "docs", "history"))
+        _write(os.path.join(root, "docs", "FIX-LEDGER.md"),
+               "# ledger\n\n"
+               "7. **首行没有勾**：这件事的结论写在段尾。\n"
+               "   收尾句：已落地，闭合。✅\n\n"
+               "8. **部分闭环**：还剩一条没做。\n"
+               "   🟡 剩 2 条待办。\n\n"
+               "> **【已搬归档】** 第 9 项 —— 正文见 [x.md](history/x.md)（体量治理：整块搬迁，原地只留指针）。\n")
+        _write(os.path.join(root, "docs", "CODE-REVIEW.md"), "# review\n")
+        sys.stdout = buf
+        list_closed(root)
+        sys.stdout = old_stdout
+        out = buf.getvalue()
+        append_visible = re.search(r"7\s+L\d+\s+首行✅=False\s+块内✅=1\b", out) is not None
+        partial_visible = "剩 2 条待办" in out
+        moved_visible = re.search(r"已搬在册（有指针行，1 枚）：9@L\d+", out) is not None
+        return (append_visible, partial_visible, moved_visible)
     finally:
         sys.stdout = old_stdout
         shutil.rmtree(root, ignore_errors=True)
