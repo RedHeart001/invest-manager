@@ -4,32 +4,209 @@
   "note": "只记键面（结构契约），不记数值 ⇒ 本文件永不含标的价格之外的业务数据，也不含任何凭据。回执文件本身在 .gitignore 内，所以键面必须抄到这里才跨机可读。",
   "endpoints": {
     "/quote": {
-      "capturedAt": "2026-10-07",
-      "provenance": "data-service/probe-cap1-20codes-1007.out（42 发同形，stock/fund 单点，本机磁盘）",
+      "capturedAt": "2026-10-13",
+      "provenance": "test-script/window_contract.py --live --write（现场腿，真响应键面）",
       "topLevel": [
+        "amount",
         "change",
         "changePct",
         "code",
-        "currency",
+        "floatCap",
         "high",
         "low",
+        "marketCap",
         "name",
         "open",
+        "pb",
+        "peDyn",
+        "peTtm",
         "prevClose",
         "price",
         "source",
         "timestamp",
+        "turnover",
         "type",
         "volume"
       ],
       "rows": null
     },
     "/kline": {
-      "capturedAt": "2026-10-08",
-      "provenance": "data-service/dao5-window-1008-morning.out（刀 5 ③ 那两发的 candles 行，本机磁盘）",
-      "topLevel": null,
+      "capturedAt": "2026-10-13",
+      "provenance": "test-script/window_contract.py --live --write（现场腿，真响应键面）",
+      "topLevel": [
+        "candles",
+        "code",
+        "interval",
+        "source",
+        "type"
+      ],
       "rows": {
-        "candles": ["amount", "close", "date", "high", "low", "open", "volume"]
+        "candles": [
+          "amount",
+          "close",
+          "date",
+          "high",
+          "low",
+          "open",
+          "volume"
+        ]
+      }
+    },
+    "/quote/verified": {
+      "capturedAt": "2026-10-13",
+      "provenance": "test-script/window_contract.py --live --write（现场腿，真响应键面）",
+      "topLevel": [
+        "amount",
+        "change",
+        "changePct",
+        "code",
+        "crossChecked",
+        "floatCap",
+        "high",
+        "low",
+        "marketCap",
+        "name",
+        "note",
+        "open",
+        "pb",
+        "peDyn",
+        "peTtm",
+        "prevClose",
+        "price",
+        "source",
+        "timestamp",
+        "turnover",
+        "type",
+        "verifyVerdict",
+        "volume"
+      ],
+      "rows": null
+    },
+    "/quote/realtime": {
+      "capturedAt": "2026-10-13",
+      "provenance": "test-script/window_contract.py --live --write（现场腿，真响应键面）",
+      "topLevel": [
+        "code",
+        "consensus",
+        "crossChecked",
+        "degraded",
+        "hasTodayData",
+        "intraday",
+        "intradayDateIsToday",
+        "note",
+        "observedAt",
+        "parts",
+        "price",
+        "sources",
+        "type",
+        "verifyVerdict",
+        "wired"
+      ],
+      "rows": {
+        "sources": [
+          "detail",
+          "kind",
+          "latencyMs",
+          "ok",
+          "source"
+        ]
+      }
+    },
+    "/news": {
+      "capturedAt": "2026-10-13",
+      "provenance": "test-script/window_contract.py --live --write（现场腿，真响应键面）",
+      "topLevel": [
+        "code",
+        "degraded",
+        "items",
+        "note"
+      ],
+      "rows": {
+        "items": [
+          "date",
+          "source",
+          "time",
+          "title",
+          "url"
+        ]
+      }
+    },
+    "/quotes": {
+      "capturedAt": "2026-10-13",
+      "provenance": "test-script/window_contract.py --live --write（现场腿，真响应键面）",
+      "topLevel": [
+        "note",
+        "quotes",
+        "type",
+        "usesEastmoney"
+      ],
+      "rows": null
+    },
+    "/fund/holdings": {
+      "capturedAt": "2026-10-13",
+      "provenance": "test-script/window_contract.py --live --write（现场腿，真响应键面）",
+      "topLevel": [
+        "code",
+        "degraded",
+        "holdings",
+        "note",
+        "quarter",
+        "source"
+      ],
+      "rows": {
+        "holdings": [
+          "code",
+          "name",
+          "weight"
+        ]
+      }
+    },
+    "/fund/report": {
+      "capturedAt": "2026-10-13",
+      "provenance": "test-script/window_contract.py --live --write（现场腿，真响应键面）",
+      "topLevel": [
+        "code",
+        "degraded",
+        "industry",
+        "note",
+        "reports",
+        "source"
+      ],
+      "rows": {
+        "reports": [
+          "date",
+          "id",
+          "title"
+        ]
+      }
+    },
+    "/bond/yieldcurve": {
+      "capturedAt": "2026-10-13",
+      "provenance": "test-script/window_contract.py --live --write（现场腿，真响应键面）",
+      "topLevel": [
+        "curve",
+        "degraded",
+        "note"
+      ],
+      "rows": null
+    },
+    "/hotspots/status": {
+      "capturedAt": "2026-10-13",
+      "provenance": "test-script/window_contract.py --live --write（现场腿，真响应键面）",
+      "topLevel": [
+        "fromDisk",
+        "jobs",
+        "lastResult",
+        "lastRun",
+        "running",
+        "runs",
+        "timezone"
+      ],
+      "rows": {
+        "jobs": [
+          "id",
+          "nextRun"
+        ]
       }
     }
   }

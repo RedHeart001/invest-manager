@@ -248,10 +248,15 @@ describe("闸2 L3 陈旧：快照不得比 ds 响应构造面更旧", () => {
       endpoints: { "/quote": entry("2026-10-01"), "/news": entry("2026-10-01") },
     };
     expect(staleEndpoints(old, b)).toEqual(["/news", "/quote"]);
-    // `/quote` 在真清单里＝已知；`/news` 不在＝新增，必须响
-    expect(newlyStaleEndpoints(old, b)).toEqual(["/news"]);
+    // 隔离只在「清单里」的那一枚——`known` 由夹具自己给，不读生产清单
+    // （10-13 收尾第 4 步把 `KNOWN_STALE_SNAPSHOTS` 清空后，读生产配置的那句就跟着翻了）
+    expect(newlyStaleEndpoints(old, b, {})).toEqual(["/news", "/quote"]);
+    expect(newlyStaleEndpoints(old, b, { "/quote": "fixture-known" })).toEqual(["/news"]);
+    expect(obsoleteKnownStale(old, b, { "/quote": "fixture-known", "/kline": "fixture-known" })).toEqual([
+      "/kline",
+    ]);
     old.endpoints["/news"] = entry("2026-10-07");
-    expect(newlyStaleEndpoints(old, b)).toEqual([]);
+    expect(newlyStaleEndpoints(old, b, { "/quote": "fixture-known" })).toEqual([]);
   });
 
   it("构造面时刻那把尺自己也要两半样本：脏的那一枚要拧成「现在」，干净的不许动", () => {

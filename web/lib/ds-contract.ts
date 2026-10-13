@@ -137,9 +137,10 @@ export const DS_CONTRACT: readonly EndpointContract[] = [
   {
     path: "/bond/yieldcurve",
     method: "GET",
-    requiredTop: ["degraded", "note", "source", "curve"],
+    requiredTop: ["degraded", "note", "curve"],
     requiredRows: { curve: ["date", "values"] },
     readBy: ["web/app/product/[type]/[code]/page.tsx"],
+    note: "`source` **不在 requiredTop**：它只在成功分支有（`akshare_provider.py:888`），降级分支只回 `{degraded,note,curve}`（`main.py:323`）——声明成必需要求降级响应也带它。消费侧本来就按可选处理（`page.tsx:55` `source?: string`、`:454` 空则不渲染「· 来源：」）。10-13 现场腿采到的正是降级态（note＝`yield curve no valid rows`）。",
   },
   {
     path: "/hotspots/status",
@@ -207,9 +208,8 @@ export function builderMsFor(committedMs: number, isDirty: boolean, nowMs: numbe
 
 /** 已知陈旧清单自证用：这些条目的来路（谁把构造面改新的、什么时候重采） */
 export const KNOWN_STALE_SNAPSHOTS: Record<string, string> = {
-  "/quote": "10-13 CR9-92 改了 `main.py`＋新增 `realtime.py` ⇒ 构造面比 10-07 那份快照新，判过期是**对的**；"
-    + "重采归 10-13 A 窗最后一步（`test-script/window_contract.py --live --write`）",
-  "/kline": "同上（同一枚构造面，10-08 那份快照同样被这次落码判过期）；重采同归那一次现场腿",
+  // 10-13 13:47 `window_contract.py --live --write` 重采后销账（原两条＝`/quote`／`/kline`，
+  // 由 CR9-92 落码判过期）。这一格只在"有人把构造面改新、快照还没重采"时才有内容。
 };
 
 /** L3 的"新增"那一半：不在已知清单里的过期才该红 */
