@@ -16,8 +16,12 @@
 
 用法：
     python test-script/window_bond_map.py --selftest
-    python test-script/window_bond_map.py --dry-run     # 只读盘上锁定版源码，零 HTTP
-    python test-script/window_bond_map.py               # 真跑（10-13 到场，且主人给字之后）
+    python test-script/window_bond_map.py                 # 演练态（默认）：只读盘上锁定版源码，零 HTTP
+    python test-script/window_bond_map.py --live          # 真调上游（10-13 到场，且主人给字之后）
+
+形制与 `window_contract.py` 对齐（10-13 下午改）：花钱那一侧**必须显式点名 `--live`**。
+此前这里是"不带 `--dry-run` 就真调"，而 docstring 与 `test-script/README.md` 都写着 `--live`
+⇒ 到场的人照文档敲 `--live` 会 argparse 报错（安全地失败），照裸敲的人则静默买上游。
 """
 
 from __future__ import annotations
@@ -185,14 +189,14 @@ def summarize(rec: dict[str, Any]) -> dict[str, Any]:
 
 
 def run(a: argparse.Namespace) -> int:
-    receipt = Receipt("windowC1-covmap", dry=a.dry_run)
+    receipt = Receipt("windowC1-covmap", dry=not a.live)
     ev = offline_evidence()
     print("== 离线证据（零出网，读盘上锁定版源码）")
     print(json.dumps(ev, ensure_ascii=False, indent=1))
     receipt.add({"kind": "offlineEvidence", **ev})
-    if a.dry_run:
+    if not a.live:
         print(
-            "\n[dry-run] 真跑会发：1 次 ak.bond_zh_cov() ⇒ 按 pageSize=500 逐页循环，"
+            "\n[dry-run] 真跑会发（要它：加 `--live`）：1 次 ak.bond_zh_cov() ⇒ 按 pageSize=500 逐页循环，"
             f"硬闸 {CAP_REQUESTS} 发；请求数由本件自己数（不经 ds 桶，读不到桶增量）。"
         )
         receipt.finish(summarize({"verdict": "dry-run", "usable": None, "requestsCounted": 0}))
@@ -247,6 +251,24 @@ def selftest() -> int:
     ck("抛之后再没有新请求发出（数到的 == 上限）", len(calls) == CAP_REQUESTS)
 
     ck("分页估数：1052 只 / 500 ⇒ 3 发（账上原记 1 发是错的）", estimate_pages(1052) == 3)
+    # 花钱那一侧必须显式点名（10-13 下午与 `window_contract.py` 对齐的形制）。
+    # 这一枚是**会红的样本**：谁把 `if not a.live` 那道门拆掉，`live_run` 被换成"一调就炸"的桩后
+    # 裸跑就会在这里响亮地失败——而不是等到某个到场的人敲裸命令、静默买走上游额度。
+    entered: list[str] = []
+    real_live_run = globals()["live_run"]
+
+    def boom_live_run(receipt):  # noqa: ANN001
+        entered.append("live_run")
+        raise AssertionError("演练态不许进 live_run")
+
+    globals()["live_run"] = boom_live_run
+    try:
+        rc = run(argparse.Namespace(dry_run=False, live=False))
+    except AssertionError:
+        rc = 1
+    finally:
+        globals()["live_run"] = real_live_run
+    ck("不带 `--live` 的裸跑＝演练态：一次都没进 `live_run`（花钱要显式点名）", rc == 0 and not entered)
     ev = offline_evidence()
     ck("离线证据件三键齐（读不到源码时也得给出这三键）",
        set(ev.keys()) == {"sourceFile", "stockColInRenameTable", "keptColumns"})
@@ -260,8 +282,9 @@ def selftest() -> int:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--dry-run", action="store_true", help="（已是默认，保留兼容旧字面）零 HTTP，只读盘上锁定版源码")
     ap.add_argument("--selftest", action="store_true")
+    ap.add_argument("--live", action="store_true", help="真调 ak.bond_zh_cov()（会花上游额度；不给这一枚就演练）")
     a = ap.parse_args()
     if a.selftest:
         return selftest()

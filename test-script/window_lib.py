@@ -253,7 +253,10 @@ def listening_endpoint(port: int) -> dict:
     ps = (
         f"$p=(Get-NetTCPConnection -LocalPort {port} -State Listen "
         "| Select-Object -First 1 -Expand OwningProcess);"
-        "Get-Process -Id $p | Select-Object -Expand StartTime"
+        # 格式必须钉死成 ISO（`ToString('s')`）。裸取 `StartTime` 走控制台区域设置，中文机器上给的是
+        # `2026年10月13日 13:08:33`——拿去和 ISO 的 mtime 按字符串比大小，`'-' < '年'` 恒成立，
+        # 于是"装载证据"这一档在任何真实时序下都判"成立"＝常绿（10-13 18:1x 实测抓到）。
+        "Get-Process -Id $p | ForEach-Object { $_.StartTime.ToString('s') }"
     )
     started = run(["powershell", "-NoProfile", "-Command", ps], timeout=15)
     info["processStartTime"] = started.splitlines()[0] if started else None
