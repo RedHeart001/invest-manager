@@ -11,6 +11,14 @@ CR9-33（2026-09-27）追加：补跑态实测 ≥29 分钟会打穿定时态预
 
 import os
 import sys
+import tempfile
+
+# CR9-94（#68 乙-1）：先于 app 的任何 import 把 marker 指到临时目录——`_execute` 收尾会
+# 覆写 `runtime/sync-state.json`，不指走就会把**假轮**的日期写进真文件 ⇒ 当天之后任何一次
+# 合法补跑都被静默挡掉（与 `test_cr9_92_realtime.py:14`、`test_p2_m8.py:354` 同一条纪律）。
+os.environ["SYNC_STATE_FILE"] = os.path.join(
+    tempfile.mkdtemp(prefix="c3-syncstate-"), "sync-state.json"
+)
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # CR9-14：用例名含 🔁 等非 GBK 字符，Windows GBK 控制台会 UnicodeEncodeError。

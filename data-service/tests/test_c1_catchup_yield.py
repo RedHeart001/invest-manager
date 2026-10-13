@@ -19,8 +19,11 @@
     PYTHONPATH=. .venv/Scripts/python tests/test_c1_catchup_yield.py
 """
 
+import json
 import os
+import shutil
 import sys
+import tempfile
 import time as _time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -33,6 +36,43 @@ for _s in (sys.stdout, sys.stderr):
 
 import app.sync_scheduler as ss  # noqa: E402
 from app.utils.timeutil import beijing_today  # noqa: E402
+
+# CR9-94（#68 乙-1）：本套件**必须**把 marker 指到临时文件。真的 `runtime/sync-state.json`
+# 在正常日子里就带着今天的日期（当天跑过任何一轮同步就会写）⇒ 不隔离的话，①②⑤⑥⑦⑧⑨⑩⑪
+# 全会在新加的第五条早退分支上早退（`ran.n==0`），套件就退化成"只在从没同步过的机器上才绿"。
+# 这枚隔离本身就是 CR9-94 交付物的一部分：它让"闸自己变成常绿"这一形在套件层面不可能发生。
+_TMPDIR = tempfile.mkdtemp(prefix="c1-catchup-marker-")
+os.environ["SYNC_STATE_FILE"] = os.path.join(_TMPDIR, "sync-state.json")
+_MARKER = os.environ["SYNC_STATE_FILE"]
+
+
+def _write_marker(date: str, trigger: str = "startup-catchup", outcome: object = "running") -> None:
+    with open(_MARKER, "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "lastAttemptDate": date,
+                "lastAttemptTrigger": trigger,
+                "lastAttemptOutcome": outcome,
+                "at": "unit-test",
+            },
+            f,
+            ensure_ascii=False,
+        )
+
+
+def _read_marker_file() -> dict | None:
+    try:
+        with open(_MARKER, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def _clear_marker() -> None:
+    try:
+        os.remove(_MARKER)
+    except OSError:
+        pass
 
 results: list[tuple[str, bool, str]] = []
 
@@ -284,6 +324,9 @@ def test_sync_catchup_off_switch() -> None:
 def test_skip_reason_written_by_each_early_return() -> None:
     """⑪ #21（10-01 提出、10-02 随刀 3 落地）：四条早退分支都要在状态位上留字面痕迹。
 
+    **第五条**（CR9-94 的磁盘态 marker）不在这里，由 ⑫ 覆盖——它要连"写点／回滚／fail-open"
+    一起断言，混进本用例会看不清哪一枚红了。
+
     为什么不是日志：`sync_scheduler` 的 `log.info` 在 uvicorn 默认配置下**完全不打**
     （10-01 实测整轮同步在 ds 日志里只剩四行启动信息＋访问日志），四条分支此前只能靠
     `/sync/status` ＋ `Product.updatedAt` 反推。`GET /sync/status` 的 `skippedReason`
@@ -345,6 +388,108 @@ def test_skip_reason_written_by_each_early_return() -> None:
         ss._state.update(saved)
 
 
+def test_cr9_94_disk_attempt_marker() -> None:
+    """⑫ CR9-94（#68 乙-1）：跨进程的"今天起过一轮"落盘判据。
+
+    为什么必须有这一枚（10-13 实测代价）：补跑判据只读内存 `_state["lastDate"]`，而 web 的
+    #23 磁盘闸比的是"当日**已落库**"（`freshness.listSyncedToday`＝`MAX(updatedAt)` 的北京日）
+    ⇒ 只要当天没有一轮真落库（那天 `MAX(updatedAt)` 停在 10-09 02:01），**每重启一次就白买
+    一整轮列表**（4 分钟内进程内 `eastmoney granted 47／denied 0`）。
+
+    四枚一起看才成立：(a) 今天⇒拦住；(b) 🔁 昨天⇒照跑（少了它，这条分支就是"永远不跑"的
+    常绿牙齿）；(c) 缺文件／损坏⇒照跑（fail-open：通宵没开机那天的补跑比省一次钱重要）；
+    (d) 写点在 `run_now` 里真落盘、收尾能覆写 outcome、线程启动失败要回滚。
+    """
+    saved = dict(ss._state)
+    fake = _FakeHotspot(running=False, resolved=beijing_today())
+    try:
+        # (a) 磁盘＝今天 且内存 lastDate 为空 ⇒ 这正是"重启之后"的真实形态
+        ss._state["lastDate"] = None
+        ss._state["skippedReason"] = None
+        _write_marker(beijing_today(), outcome="rejected")
+        r = _run_case(fake, at_hour=9, at_minute=0)
+        check("CR9-94⑫：磁盘 marker＝今天 且内存 lastDate 为空 → 不补跑（重启不再白买一轮）",
+              r["n"] == 0 and r["polls"] == 0, str(r))
+        check("CR9-94⑫：状态位点明是**磁盘态**并带出上一轮 trigger/outcome（一条 curl 分得清）",
+              "磁盘态" in str(ss._state.get("skippedReason"))
+              and "rejected" in str(ss._state.get("skippedReason")),
+              str(ss._state.get("skippedReason")))
+        check("CR9-94⑫：文件读得到 ⇒ markerReadError 必须是 None（缺文件不算错，坏文件才算）",
+              ss._state.get("markerReadError") is None, str(ss._state.get("markerReadError")))
+
+        # (b) 🔁 反向：昨天的 marker 不算数
+        ss._state["skippedReason"] = None
+        _write_marker("2026-01-01")
+        r2 = _run_case(fake, at_hour=9, at_minute=0)
+        check("CR9-94⑫🔁：昨天的 marker 不生效 → 照常补跑（证明这条分支不是恒假桩）",
+              r2["n"] == 1 and r2["polls"] == 0, str(r2))
+
+        # (c) fail-open：缺文件 / JSON 损坏 都要放行
+        ss._state["skippedReason"] = None
+        _clear_marker()
+        r3 = _run_case(fake, at_hour=9, at_minute=0)
+        check("CR9-94⑫：marker 缺失 → 照常补跑（通宵没开机那天必须放行）",
+              r3["n"] == 1 and ss._state.get("markerReadError") is None, str(r3))
+        with open(_MARKER, "w", encoding="utf-8") as f:
+            f.write("{ 这不是 JSON")
+        ss._state["skippedReason"] = None
+        r4 = _run_case(fake, at_hour=9, at_minute=0)
+        check("CR9-94⑫：marker 损坏 → 照常补跑（fail-open），但错误字面看得见、不许静默",
+              r4["n"] == 1 and str(ss._state.get("markerReadError")).startswith("unreadable"),
+              str(ss._state.get("markerReadError")))
+
+        # (d) 写点：起跑前落盘 → 收尾覆写 outcome → 线程启动失败要回滚
+        _clear_marker()
+        ss._state["running"] = False
+        orig_execute, orig_threading = ss._execute, ss.threading
+        ss._execute = lambda trigger="manual", force=False: None  # type: ignore[assignment]
+
+        class _FakeThreading:
+            """只替 `ss.threading` 这一个模块属性，不动真的 threading 模块。"""
+
+            class Thread:
+                def __init__(self, *a, **k):
+                    raise RuntimeError("unit-test: 线程启动失败")
+
+        try:
+            acc = ss.run_now(trigger="unit-test")
+            m = _read_marker_file() or {}
+            check("CR9-94⑫：run_now 认领成功后**起跑前**就落盘（＝钱已被承诺的那一刻）",
+                  acc.get("accepted") is True and m.get("lastAttemptDate") == beijing_today()
+                  and m.get("lastAttemptTrigger") == "unit-test"
+                  and m.get("lastAttemptOutcome") == "running", str(m))
+            check("CR9-94⑫：写成功 ⇒ markerWriteFailed 必须是 False（仪器位不许恒真）",
+                  ss._state.get("markerWriteFailed") is False, str(ss._state.get("markerWriteFailed")))
+            ss._mark_outcome("unit-test", "completed")
+            m2 = _read_marker_file() or {}
+            check("CR9-94⑫：收尾覆写真结局，日期沿用起跑那一份（跨午夜的轮不改写归属日）",
+                  m2.get("lastAttemptOutcome") == "completed"
+                  and m2.get("lastAttemptDate") == beijing_today(), str(m2))
+            ss._state["running"] = False  # 上一枚的假 _execute 不会放开 running
+            ss.threading = _FakeThreading  # type: ignore[assignment]
+            try:
+                ss.run_now(trigger="unit-test-boom")
+                boom_raised = False
+            except RuntimeError:
+                boom_raised = True
+            check("CR9-94⑫：线程启动失败要抛（CR4 同族，不许把失败吞成 accepted）",
+                  boom_raised, "run_now 没抛")
+            m3 = _read_marker_file() or {}
+            check("CR9-94⑫：线程没起来＝一次网都没出 ⇒ marker 还原成写之前那一份"
+                  "（否则零代价锁死一天）",
+                  m3.get("lastAttemptOutcome") == "completed"
+                  and m3.get("lastAttemptTrigger") == "unit-test", str(m3))
+            check("CR9-94⑫：回滚后 running 也已放开（不会永久卡 True）",
+                  ss._state.get("running") is False, str(ss._state.get("running")))
+        finally:
+            ss.threading = orig_threading
+            ss._execute = orig_execute  # type: ignore[assignment]
+    finally:
+        ss._state.clear()
+        ss._state.update(saved)
+        _clear_marker()
+
+
 def main() -> int:
     test_yields_while_hotspot_running()
     test_proceeds_when_hotspot_resolved_with_output()
@@ -357,11 +502,13 @@ def main() -> int:
     test_cr9_35_before_schedule_gate_skips_without_polling()
     test_sync_catchup_off_switch()
     test_skip_reason_written_by_each_early_return()
+    test_cr9_94_disk_attempt_marker()
     passed = sum(1 for _n, ok, _d in results if ok)
     fails = [x for x in results if not x[1]]
     for name, _ok, detail in fails:
         print(f"[FAIL] {name}  <- {detail[:160]}")
     print(f"===== {passed}/{len(results)} 通过 =====")
+    shutil.rmtree(_TMPDIR, ignore_errors=True)
     return 0 if not fails else 1
 
 

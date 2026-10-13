@@ -22,10 +22,21 @@ data-service 只负责"按时触发"。**刀 3/甲-1（2026-10-02）起一轮有
 把 `force` 透传下去、认 web 回的行内 `skipped` 标记（整轮都跳过 ⇒ `outcome="skipped"`
 第六态 ＋ 一句可 curl 出的 `skippedReason`），以及**保持内存 `lastDate` 原样不动**
 （它管"同进程内当天只试一次，含失败轮"，正是 CR9-28 那条被测试钉住的取舍）。
+
+**CR9-94（#68 乙-1，主人 2026-10-13「确认按这个方案落码」）起的第四件事**：把
+"今天这台机器**起过**一轮同步"也落盘（`runtime/sync-state.json`）。为什么 web 那道
+#23 磁盘闸不够——它比的是"当日**已落库**"（`freshness.listSyncedToday`＝
+`MAX(updatedAt)` 的北京日），答不出"当日**已试过**"；于是只要当天没有一轮真落库
+（10-13 实测：`MAX(updatedAt)` 停在 10-09 02:01），**每重启一次就白买一整轮列表**
+（那一次 4 分钟内进程内 `eastmoney granted 47／denied 0`）。三枚判据因此各管一格、
+互不替换：内存 `lastDate`＝本进程当天只试一次／web 的 #23＝逐类"已落库就别再出网"／
+盘上 `lastAttemptDate`＝跨进程的"今天试过没有"。**只在启动补跑那一条路上读**——
+cron 与手动 `POST /sync/run` 两条路都不读它，主人的两个既有出口一行没改。
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import threading
@@ -104,7 +115,130 @@ _state: dict = {
     "skippedReason": None,
     # 刀 3/甲-1：刷新腿自己的那份结果（None＝本轮根本没走到刷新腿）
     "lastRefresh": None,
+    # CR9-94（#68 乙-1）：落盘 marker 自己的两枚"仪器有没有坏"位。fail-open 是有意取舍
+    # （读不出就当"今天没试过"，通宵没开机那天的补跑比省一次钱重要），但**不许静默**——
+    # `:242` 那条纪律：有没有读过与读到没读到是两件事，别用省略冒充。
+    "markerReadError": None,
+    "markerWriteFailed": False,
 }
+
+
+# CR9-94（#68 乙-1）：跨进程的"今天起过一轮"落盘件。形状照 `hotspot-state.json`
+# （`hotspot/scheduler.py:46-88`）／`limiter-state.json`（`utils/limiter.py:216`）那一族：
+# 覆写、先 `.tmp` 再 `os.replace`（读者看不到半截）、不回显绝对路径、写不进只 `log.warning`
+# （CR9-45：观测位不得拖垮主功能）。**按北京日取值**，不是布尔——`hotspot/scheduler.py:260`
+# 那句"`catchUpResolved` 更不许从盘上捞"防的就是"昨天的定案值放到今天"，带日期的形状不受它影响。
+SYNC_STATE_NAME = "sync-state.json"
+
+
+def _sync_state_path() -> str:
+    """落点默认 `data-service/runtime/sync-state.json`（该目录已在 `.gitignore`）。
+
+    `SYNC_STATE_FILE` 可整条覆盖——离线单测靠它指向临时目录，**绝不碰仓库里那份真的**
+    （否则套件会把 marker 写进真文件，之后任何一次重启都被静默挡掉＝闸自己变成常绿）。
+    """
+    env = os.environ.get("SYNC_STATE_FILE", "")
+    if env:
+        return env
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    return os.path.join(root, "runtime", SYNC_STATE_NAME)
+
+
+def _read_marker() -> tuple[dict | None, str | None]:
+    """返回 `(数据, 错误字面)`。错误分三形：`missing`（正常态）／`unreadable:<类型>`／
+    `not-an-object`——后两形要能被 `/sync/status` 读出来，缺文件不算错。"""
+    try:
+        with open(_sync_state_path(), encoding="utf-8") as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        return None, "missing"
+    except (OSError, ValueError) as e:
+        return None, f"unreadable: {type(e).__name__}"
+    if not isinstance(data, dict):
+        return None, "not-an-object"
+    return data, None
+
+
+def read_sync_state() -> dict | None:
+    """读回磁盘那份 marker；缺失／损坏／非对象一律当"没有"，**不抛**（观测位不许让 status 500）。"""
+    return _read_marker()[0]
+
+
+def _write_marker(payload: dict) -> bool:
+    path = _sync_state_path()
+    tmp = path + ".tmp"
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, sort_keys=True)
+        os.replace(tmp, path)
+        return True
+    except (OSError, TypeError, ValueError) as e:
+        log.warning("sync state could not be written: %s", e)
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        return False
+
+
+def _mark_attempt(trigger: str) -> tuple[dict | None, bool]:
+    """起跑前落"今天这台机器起过一轮"。返回 `(写之前盘上那一份, 是否写成功)`。
+
+    时机＝**钱已被承诺的那一刻**：列表腿随后按源族桶 `min_interval=5s` 逐发买东财
+    （一整轮 ≈244s／≈48 发，与 web 日志 `POST /api/sync 200 in 244167ms` 同量级）。
+    写在收尾而不是起跑，就会留下今天 18:57 那一形的漏洞——被 kill 的轮钱已花、盘上无痕迹。
+    """
+    prev, _ = _read_marker()
+    ok = _write_marker(
+        {
+            "lastAttemptDate": beijing_today(),
+            "lastAttemptTrigger": trigger,
+            "lastAttemptOutcome": "running",
+            "at": datetime.now(TZ).isoformat(timespec="seconds"),
+        }
+    )
+    with _lock:
+        _state["markerWriteFailed"] = not ok
+    return prev, ok
+
+
+def _unmark_attempt(prev: dict | None, wrote: bool) -> None:
+    """线程启动失败的回滚（CR4 同族，见 `run_now` 里那条 `running` 回滚）。
+
+    不回滚就会把当天吃掉，而代价是一分钱都没花——那是最坏的一种失败形态。
+    """
+    if not wrote:
+        return
+    if prev is None:
+        try:
+            os.remove(_sync_state_path())
+        except OSError as e:
+            log.warning("sync state rollback could not remove file: %s", e)
+        return
+    _write_marker(prev)
+
+
+def _mark_outcome(trigger: str, outcome: object) -> None:
+    """收尾覆写真结局（成功与失败两条出口都要写，照 hotspot `_execute` 的 `finally` 口径）。
+
+    为什么要 outcome 而不只是一个日期：它把"今天试过"分成两种——「试过且结局是
+    `rejected`／`inconclusive`／`partial_failed`」与「试过且 `completed`，可
+    `Product.updatedAt` 还是旧的」。后者才是更该 alarm 的那一形，而这一枚是它唯一
+    零出网可读的仪器（#69 那枚账缺的就是这个）。日期沿用**起跑时**那一份：跨午夜的轮
+    不该把昨天的起跑记成今天。
+    """
+    prev, _ = _read_marker()
+    ok = _write_marker(
+        {
+            "lastAttemptDate": (prev or {}).get("lastAttemptDate") or beijing_today(),
+            "lastAttemptTrigger": (prev or {}).get("lastAttemptTrigger") or trigger,
+            "lastAttemptOutcome": outcome,
+            "at": datetime.now(TZ).isoformat(timespec="seconds"),
+        }
+    )
+    with _lock:
+        _state["markerWriteFailed"] = not ok
 
 
 def _sync_hour_minute() -> tuple[int, int]:
@@ -385,6 +519,9 @@ def _execute(trigger: str, force: bool = False) -> dict:
         # 整轮被 web 的当日幂等闸门挡下 ⇒ 把那条原因挂到同一个状态位上，
         # `GET /sync/status` 一条 curl 就分得清"没到点／已经跑过／被闸门跳过"。
         _state["skippedReason"] = result.get("skippedReason")
+    # CR9-94：同步腿的真结局覆写进 marker。放在这里而不是整轮收尾——刷新腿还要 ≈40min，
+    # 而"钱已经花完"这件事在同步腿收尾这一刻就成立了（被 kill 的轮也要留下结局）。
+    _mark_outcome(trigger, result.get("outcome"))
     result["tookMsTotal"] = int((time.time() - started) * 1000)
     # CR9-33：把本次实际生效的预算回写进状态，`GET /sync/status` 才说得出
     # "这轮用的是哪个形态的预算"（否则超时说明只能靠读代码对）。
@@ -423,6 +560,11 @@ def run_now(trigger: str = "manual", force: bool = False) -> dict:
         # #21：走到"认领成功"这一步，上一条"为什么没跑"就此作废（清空只放在这一个入口，
         # 三条触发路径——cron／手动／启动补跑——都经过这里）
         _state["skippedReason"] = None
+    # CR9-94（#68 乙-1）：marker 的**写点只有这一处**——正因为三条触发路径都经过这里，
+    # 它的语义才是"今天这台机器起过一轮"而不是"今天补跑过"（后者会漏掉"02:00 cron 失败
+    # ⇒ 午后重启又买一整轮"这一形）。`accepted=False` 那条路不写：没有新的钱被承诺。
+    # 读点只有 `_catch_up_if_needed` 一处 ⇒ cron 与手动两条路的既有行为一字未动。
+    prev_marker, wrote_marker = _mark_attempt(trigger)
     try:
         threading.Thread(
             target=_execute, args=(trigger, force), name="sync-manual", daemon=True
@@ -430,6 +572,9 @@ def run_now(trigger: str = "manual", force: bool = False) -> dict:
     except Exception:  # noqa: BLE001 CR4：线程启动失败要回滚 running，否则永久卡 True
         with _lock:
             _state["running"] = False
+        # CR4 同族：线程没起来＝这一轮一次网都没出 ⇒ marker 也必须还原，
+        # 否则一次线程启动失败就把当天吃掉（代价为零却锁死一天，是最坏的失败形态）。
+        _unmark_attempt(prev_marker, wrote_marker)
         raise
     return {"accepted": True, "note": "已提交后台执行，进度见 /sync/status"}
 
@@ -471,8 +616,8 @@ def _catch_up_if_needed() -> None:
     热点结束后（或当日已有产出）再跑同步。轮询上限 10 分钟：热点侧自身有
     300s 预算 + 单飞，超上限按超时放弃本轮补跑（下个调度周期 02:00 再试）。
 
-    下面四条早退分支**都要留下机器可读的去向**（#21，10-02 随刀 3 落地）——
-    四条都写成 `skippedReason`，`GET /sync/status` 一条 curl 就能分清是哪一条。
+    下面五条早退分支**都要留下机器可读的去向**（#21，10-02 随刀 3 落地；第五条是
+    CR9-94 加的）——五条都写成 `skippedReason`，`GET /sync/status` 一条 curl 就能分清是哪一条。
     """
     if _catchup_disabled():
         _set_skip("catchup: SYNC_CATCHUP=off（每日 cron 不受影响）")
@@ -485,6 +630,24 @@ def _catch_up_if_needed() -> None:
         return
     if _state.get("lastDate") == beijing_today():
         _set_skip("catchup: already synced today（lastDate 命中，内存态）")
+        return
+
+    # CR9-94（#68 乙-1）：第五条早退分支——跨进程的"今天起过一轮"。
+    # 放在内存 `lastDate` 之后（同一件事的进程内版先答，答不出才问盘）、**让位热点那个
+    # 600s 循环之前**（否则热点在跑时要先白等满 `CATCHUP_YIELD_MAX_WAIT_S` 才发现不该跑）。
+    # fail-open：读不出（缺文件／损坏）就当"今天没试过"⇒ 通宵没开机那天的补跑照旧放行，
+    # 但错误字面要挂到状态位上（`markerReadError`），不许静默。
+    disk, disk_err = _read_marker()
+    with _lock:
+        _state["markerReadError"] = None if disk_err == "missing" else disk_err
+    attempt_date = (disk or {}).get("lastAttemptDate")
+    if attempt_date == beijing_today():
+        _set_skip(
+            f"catchup: already attempted today（磁盘态 lastAttemptDate={attempt_date}"
+            f"，trigger={(disk or {}).get('lastAttemptTrigger')}"
+            f"，outcome={(disk or {}).get('lastAttemptOutcome')}）"
+            "——今天这台机器已经起过一轮，不再重买列表；确要重跑走 POST /sync/run?force=true"
+        )
         return
 
     # C1（CR7-7）让位热点。**CR9-4/CR9-22 修正（2026-09-26）**：
@@ -570,17 +733,28 @@ def status() -> dict:
     if _scheduler is not None:
         for j in _scheduler.get_jobs():
             jobs.append({"id": j.id, "nextRun": str(j.next_run_time)})
+    disk_marker = read_sync_state()
     return {
         "running": _state["running"],
         "runs": _state["runs"],
         "lastRun": _state["lastRun"],
         "lastDate": _state["lastDate"],
         "lastResult": _state["lastResult"],
-        # #21：一条 curl 就能读出"上一轮为什么没跑"（off／未到点／当日已同步／让位热点超时），
-        # 这些原因此前只存在于 `log.info` 里，而 uvicorn 默认配置根本不打 info。
+        # #21：一条 curl 就能读出"上一轮为什么没跑"（off／未到点／当日已同步／当日已试过／
+        # 让位热点超时），这些原因此前只存在于 `log.info` 里，而 uvicorn 默认配置根本不打 info。
         "skippedReason": _state.get("skippedReason"),
         # 刀 3/甲-1：刷新腿那份结果（含它自己的 outcome／预算／skippedReason）
         "lastRefresh": _state.get("lastRefresh"),
+        # CR9-94（#68 乙-1）：跨进程那份"今天起过一轮"（含 `lastAttemptOutcome`，它把
+        # "今天试过"分成 rejected／inconclusive 与 completed 两种——后者配上 `Product.updatedAt`
+        # 没动，就是 #69 那枚唯一零出网可读的仪器）。`lastAttemptFromDisk` 照 hotspot
+        # `status()` 的 `fromDisk` 先例：本进程一轮没跑而盘上有 ⇒ 那是**上一个进程**起的。
+        # ⚠️ `runs` 的义一字不动（`hotspot/scheduler.py:259` 同族纪律：它管"本进程跑了几轮"）。
+        "lastAttempt": disk_marker,
+        "lastAttemptFromDisk": bool(disk_marker) and _state["runs"] == 0,
+        # fail-open 的两枚仪器位：读不出／写不进都要看得见，不许用省略冒充
+        "markerReadError": _state.get("markerReadError"),
+        "markerWriteFailed": bool(_state.get("markerWriteFailed")),
         "jobs": jobs,
         "timezone": str(TZ),
     }
