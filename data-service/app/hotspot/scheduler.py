@@ -5,6 +5,10 @@
 - 启动补跑（P3 补强）：启动时若当日尚无 digest 且已过调度时刻 → 立即补跑一次
 - 单飞（single-flight）：并发触发只执行一个
 - 每轮收尾把 `lastRun`/`lastResult` 覆写落盘（#34／CR9-62）：`/hotspots/status` 内存空时回落到它
+- 起跑前把「今天这台机器起过一轮」落盘（CR9-95＝#68 同族的另一半，10-13 主人的字＝「执行A桶B桶」）：
+  启动补跑此前只问「今天有没有 digest」（结果态），于是**跑过但 0 产出／失败**的那一轮
+  在每次重启后都会被重买一遍（一整轮 pipeline＝akshare＋东财＋Tavily）。判据换成 date-keyed
+  的「试过」，与同步侧 `runtime/sync-state.json` 同形；逃出口＝`POST /hotspots/run`（手动不看这枚）。
 """
 
 from __future__ import annotations
@@ -41,6 +45,17 @@ _state: dict = {
     "lastResult": None,
     "runs": 0,
     "catchUpResolved": None,
+    # CR9-95：date-keyed 的「试过」三件（与 `sync-state.json` 同名同义）。
+    # 它们与 `catchUpResolved` 是两码事——后者不带日期，所以「不许从盘上捞」那条理由只对
+    # 它成立；这三件自带日期，读的时候拿它跟今天比，昨天的值自然不生效。
+    "lastAttemptDate": None,
+    "lastAttemptTrigger": None,
+    "lastAttemptOutcome": None,
+    "lastAttemptAt": None,
+    # 写不进去只 warning（CR9-45），但要在 `/hotspots/status` 上留一枚机器可读位：
+    # 判据落不了盘时，「重启不重买」这条保护就是失效的，而它失效的样子是**什么都不发生**。
+    "stateWriteFailed": False,
+    "catchUpSkipReason": None,
 }
 
 STATE_NAME = "hotspot-state.json"
@@ -59,7 +74,10 @@ def _state_path() -> str:
 
 
 def _write_state() -> bool:
-    """每轮收尾把 `lastRun`/`lastResult` 覆写落盘（先 `.tmp` 再 `os.replace`，读者看不到半截）。
+    """把 `lastRun`/`lastResult` 与那三件「试过」覆写落盘（先 `.tmp` 再 `os.replace`，读者看不到半截）。
+
+    CR9-95 起它一轮被调两次：起跑前（`_mark_attempt`，此时 outcome=`running`）与收尾
+    （`_execute` 的 `finally`，写真结局）。两次都是整份覆写 ⇒ 不需要"读回旧值再合并"。
 
     为什么 #34 要有这个文件：`lastResult` 此前**只有内存态**，重启即失，于是"08:30 那一轮的
     合并计数"在最需要它的两个时刻都读不到——① 事后任何一次重启之后，② 手动/定时跑完但没人
@@ -69,16 +87,26 @@ def _write_state() -> bool:
     这一轮 pipeline 的返回值带崩）。
     """
     path = _state_path()
-    payload = {"lastRun": _state["lastRun"], "lastResult": _state["lastResult"]}
+    payload = {
+        "lastRun": _state["lastRun"],
+        "lastResult": _state["lastResult"],
+        # CR9-95：三件「试过」与 lastRun/lastResult 同住一个文件（不新造第二份状态位）。
+        "lastAttemptDate": _state["lastAttemptDate"],
+        "lastAttemptTrigger": _state["lastAttemptTrigger"],
+        "lastAttemptOutcome": _state["lastAttemptOutcome"],
+        "lastAttemptAt": _state["lastAttemptAt"],
+    }
     tmp = path + ".tmp"
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False, sort_keys=True)
         os.replace(tmp, path)
+        _state["stateWriteFailed"] = False
         return True
     except (OSError, TypeError, ValueError) as e:
         log.warning("hotspot state could not be written: %s", e)
+        _state["stateWriteFailed"] = True
         try:
             os.remove(tmp)
         except OSError:
@@ -96,18 +124,62 @@ def read_state() -> dict | None:
     return data if isinstance(data, dict) else None
 
 
+def _attempt_outcome(result: object) -> str:
+    """把一轮的结局压成一个可比较的字面（`run_pipeline` 的返回里没有 `ok`/`outcome` 键）。
+
+    三档＝`failed`（顶层异常，`lastResult` 只剩 `error`）／`zero-items`（跑通了但一条热点都没
+    产出＝新闻源全挂或全被去重掉）／`completed`。为什么单分 `zero-items`：它就是"今天试过、
+    什么都没落下"那一形——重启后最容易被重买，也最该被一条 curl 读出来。
+    """
+    if not isinstance(result, dict):
+        return "unknown"
+    if result.get("error"):
+        return "failed"
+    items = result.get("items")
+    if isinstance(items, list) and not items:
+        return "zero-items"
+    return "completed"
+
+
+def _mark_attempt(trigger: str) -> bool:
+    """起跑前落「今天这台机器起过一轮」。写点＝**钱已被承诺的那一刻**。
+
+    `run_pipeline` 一进去就开始买上游（新闻三源＋板块映射），所以写在收尾就会留下同步侧
+    10-13 18:57 那一形的漏洞：被 kill 的那轮钱已花、盘上无痕迹。
+    日期取**起跑时**那一份且此后不被覆写（收尾只改 `lastAttemptOutcome`）⇒ 跨午夜的轮
+    不会把昨天的起跑记成今天。
+    """
+    _state["lastAttemptDate"] = beijing_today()
+    _state["lastAttemptTrigger"] = trigger
+    _state["lastAttemptOutcome"] = "running"
+    _state["lastAttemptAt"] = datetime.now(TZ).isoformat(timespec="seconds")
+    return _write_state()
+
+
+def _set_skip(reason: str | None) -> None:
+    """#21 同族：把「这一轮补跑为什么没跑」写进状态位（`log.info` 在 uvicorn 默认配置下不打）。"""
+    with _lock:
+        _state["catchUpSkipReason"] = reason
+
+
 def _execute(trigger: str) -> dict:
     """执行 pipeline 并收尾（调用方必须已认领 running 标志）。"""
+    # CR9-95：先落「今天起过一轮」再买上游。放在 `_execute` 而不是两个入口
+    # （`run_now` 同步／`request_run` 异步）⇒ 只有一处写点，且线程启动失败那一支
+    # 根本走不到这里——零成本的失败不该把当天吃掉（与同步侧的回滚同义，形状更简单）。
+    _mark_attempt(trigger)
     try:
         result = run_pipeline(trigger=trigger)
         _state["lastRun"] = datetime.now(TZ).isoformat(timespec="seconds")
         _state["lastResult"] = result
         _state["runs"] += 1
+        _state["lastAttemptOutcome"] = _attempt_outcome(result)
         log.info("hotspot pipeline done: %s", result)
         return result
     except Exception as e:  # noqa: BLE001 顶层兜底，任务不因异常终止调度
         log.exception("hotspot pipeline failed: %s", e)
         _state["lastResult"] = {"error": f"{type(e).__name__}: {e}"}
+        _state["lastAttemptOutcome"] = "failed"
         return _state["lastResult"]
     finally:
         with _lock:
@@ -174,7 +246,25 @@ def _catch_up_if_needed() -> None:
 def _catch_up_decide() -> None:
     now = datetime.now(TZ)
     if not _reached_schedule_today(now):
+        _set_skip(
+            f"before pre-market schedule（now={now:%H:%M} < "
+            f"{PRE_MARKET_HOUR:02d}:{PRE_MARKET_MINUTE:02d}）"
+        )
         log.info("catch-up skipped: before pre-market schedule")
+        return
+    # CR9-95：先问盘上那枚 date-keyed 的「试过」，再问 web「今天有没有 digest」。
+    # 两问不重复——digest 计数对"跑过但 0 产出／失败"那一形永远答 0，于是每次重启都重买
+    # 一整轮 pipeline；「试过」正好补上它。昨天的日期不算数（自带日期 ⇒ 隔夜机器照常补跑）。
+    disk = read_state() or {}
+    attempt_date = disk.get("lastAttemptDate")
+    if attempt_date == beijing_today():
+        _set_skip(
+            f"already attempted today（磁盘态 lastAttemptDate={attempt_date}"
+            f"，trigger={disk.get('lastAttemptTrigger')}"
+            f"，outcome={disk.get('lastAttemptOutcome')}）"
+            "——今天这台机器已经起过一轮热点，不再重买 pipeline；确要重跑走 POST /hotspots/run"
+        )
+        log.info("catch-up skipped: already attempted today (%s)", attempt_date)
         return
     try:
         import requests
@@ -190,11 +280,17 @@ def _catch_up_decide() -> None:
         )
         count = int((r.json() or {}).get("count", 0)) if r.ok else 0
         if count == 0:
+            _set_skip(None)  # 真触发补跑 ⇒ 清掉跳过原因（否则状态位变成常驻噪声，#21 🔁 同口径）
             log.info("catch-up: today's digest missing, running pipeline now")
             run_now(trigger="startup-catchup")
         else:
+            _set_skip(f"today's digest exists (count={count})")
             log.info("catch-up skipped: today's digest exists (%s)", count)
     except Exception as e:  # noqa: BLE001 web 未启动等情况不影响服务
+        # 保持原行为＝不补跑（web 都没起来时，买一整轮上游也无处落库）。这一支同样要置
+        # `catchUpResolved`（由 `_catch_up_if_needed` 的 finally 负责）⇒ 同步侧不会死等，
+        # 这正是 CR9-4 立「查询失败也算定案」那一档的理由。
+        _set_skip(f"catch-up check failed: {type(e).__name__}: {e}")
         log.warning("catch-up check failed: %s", e)
 
 
@@ -245,6 +341,10 @@ def status() -> dict:
     if _scheduler is not None:
         for j in _scheduler.get_jobs():
             jobs.append({"id": j.id, "nextRun": str(j.next_run_time)})
+    # CR9-95：盘上那一份读一次，两处用（`lastAttempt` 与下面的 lastResult 回落）。
+    disk = read_state()
+    attempt_keys = ("lastAttemptDate", "lastAttemptTrigger", "lastAttemptOutcome", "lastAttemptAt")
+    attempt = {k: disk.get(k) for k in attempt_keys} if isinstance(disk, dict) else None
     out = {
         "running": _state["running"],
         "runs": _state["runs"],
@@ -253,14 +353,22 @@ def status() -> dict:
         "jobs": jobs,
         "timezone": str(TZ),
         "fromDisk": False,
+        # 「今天这台机器起过一轮」＝只认盘上那份（内存态重启即失，正是要治的那一半）。
+        # `lastAttemptFromDisk` 与同步侧同义：盘上有、而本进程一轮没跑 ⇒ 那是上个进程留下的。
+        "lastAttempt": attempt if attempt and attempt.get("lastAttemptDate") else None,
+        "lastAttemptFromDisk": bool(attempt and attempt.get("lastAttemptDate")) and _state["runs"] == 0,
+        "stateWriteFailed": bool(_state.get("stateWriteFailed")),
+        "catchUpSkipReason": _state.get("catchUpSkipReason"),
     }
     # #34（CR9-62）：内存为空 ⇒ 回落到磁盘那份并标 `fromDisk=True`，一条 curl 就能把
     # "这个进程跑过"与"上个进程跑过、我重启了"分开（同 #29／CR9-53 的备份状态位）。
     # **刻意只回落 lastRun/lastResult 两件**：`runs` 保持"本进程跑了几轮"的原义（p3 的轮询
     # 条件靠它），`catchUpResolved` 更不许从盘上捞——同步侧拿它判"当日要不要让位"，
     # 昨天的定案值放到今天就是错的。
+    # ⚠️ CR9-95 给这条理由划个界：它成立的前提是**那个值不带日期**。`lastAttempt*` 自带
+    # `lastAttemptDate`，读的时候就跟今天比（昨天的自然不生效）⇒ 从盘上捞是安全的，
+    # 而且必须捞——否则重启后判据又只剩内存态，正是要治的那一半。
     if out["lastResult"] is None:
-        disk = read_state()
         last = (disk or {}).get("lastResult")
         if isinstance(last, dict):
             out["lastResult"] = last
