@@ -849,3 +849,37 @@ eastmoney_quote_ctl    ok= 0/10 gap=6s  ERR=['ConnectionError'] x10
 ⑨ **门禁读数**：闸1 于 19:13–19:15 全绿＝① `tsc` 0 错＋vitest **425/425（48 文件）**｜② ds 离线 **22 套 845/845**｜docs **NEW=0／KNOWN 21/21**、断链 0、表格 43·443·错位 0，用时 72s。回执＝`data-service/runtime/gate1-30-1013-1914.out`，抬头 `dev b1a262c dirty=0` ⇒ 这一枚对的是**已提交的干净树**（上面「追加六十一」⑫ 那三枚都对着一棵脏树）。
 
 ⑩ **残留（拦不住的那一半）**：ds 是我这轮重起的 ⇒ **今天 13:08 那一棵的"进程内"读数从此不可比**（跨重启只能读 durable 与 7 日窗，而 durable 里那 47 发属于一次没人批准的支出）；B1 仍未通过（样本本身错那半已记在「追加六十一」⑩）；`/products` 键面仍缺；push 欠 10 笔。
+
+#### 追加六十三 · 10-13 19:5x（CR9-94＝#68 定档乙-1 落码：把"今天这台机器起过一轮同步"落盘；落码前我先推翻了自己上一轮的推荐）
+
+① **主人的字（四句，按序）**＝「#68（午后重启会重买一整轮全量同步）：乙和丙从长远看哪个更适合，或者说两个能不能合并成一个？」→「先别管别的，集中思考处理这个问题」→「继续针对现在这个方案，再看下是否还能优化」→**「确认按这个方案落码」**。前三句都是评估轮（零代码、零出网），第四句才是写权。本轮改动面＝`data-service/app/sync_scheduler.py` ＋ 三个离线套件（`test_c1_catchup_yield.py`／`test_c3_readtimeout.py`／`test_cr9_sync_status.py`），**web 侧零改动**。
+
+② **落码前先自纠：我上一轮推荐的方向是反的，两处被盘上数据推翻。**
+
+- **「乙-2＝问 web 现成的结果真值就能少花钱」＝伪。** `web/lib/freshness.ts:64-70` 的判据是 `beijingDateOf(MAX(updatedAt)) === beijingToday()`；现查 `Product`（只读连接 `mode=ro`，走 WAL）＝`max(updatedAt)=2026-10-09 02:01:22`、`max(snapshotAt)=2026-10-09 02:28:03`，而 10-11／10-12／10-13 三天**被写过的行数＝0／0／0**（同一连接读得到 `HotspotDigest.createdAt=10-13 19:09:19`、`ResearchReport.updatedAt=10-13 19:12:32` ⇒ 不是我读到了旧快照）。⇒ 今天去问那枚"结果真值"，它答的是「没落库 ⇒ 放行」，那 47 发照买。它唯一生效的形态是"当天已成功落库"，而**那种形态本来就零出网**——`web/lib/sync.ts:142` 的 `_syncTypeGated` 在 `dsGet("/products")` **之前**就 return（`sync_scheduler.py` 自己那句注释：「代价只是两次毫秒级读库，一次网也不出」）。
+- **「乙-1 会把今天该补的冻住」这条反对成立，但它踩的是主人已经拍过的字。** `sync_scheduler.py` 顶部那段写着「保持内存 `lastDate` 原样不动（它管'同进程内当天只试一次，**含失败轮**'，正是 CR9-28 那条被测试钉住的取舍）」，钉它的两枚断言＝`test_cr9_sync_status.py:215-227`（失败轮仍置位）与 `:626-635`（#23 是**叠加**不是**替换**）。⇒ 乙-1＝把那条既有决定从"进程内"延到"盘上"；乙-2＝跨进程把它改判。**"严格更优"的那一枚是乙-1，我上轮说反了。**
+- **归属自纠：那 47 发我没有逐函数归因。** `limiter-state.json` 的 `eastmoney` 桶是 `{granted:159, denied:47, seen:{}}`——**`seen` 是空的**，只有总量；同一时间窗里热点补跑也在跑（`HotspotDigest.createdAt=10-13 19:09:19`）。能说的只到量级：web 日志字面 `POST /api/sync 200 in 244167ms`，而列表腿被源族桶按 `min_interval=5s` 逐发掐 ⇒ ≈48 发，与 47 同量级。**这是推算，不是归因**（想按额度设上限，得先给 limiter 加逐函数维度＝#66 那一族）。
+- **一条证据作废**：我上轮那句「ds 访问日志除两发 `/health` 一条请求行都没有 ⇒ 补跑不经 HTTP」——那份日志只有 **502 字节**，因为那棵树是我 kill 的，缓冲里的访问行没落盘 ⇒ 推论的证据不成立（结论仍对：补跑在后台线程，不经 ds 的 HTTP）。
+
+③ **落码本体（四处，全在 `sync_scheduler.py`）**：
+
+- **落盘件**＝`runtime/sync-state.json`（`:131` `SYNC_STATE_NAME`／`:134` `_sync_state_path()`，`SYNC_STATE_FILE` 可整条覆盖），形状照 `hotspot-state.json`（`hotspot/scheduler.py:46-88`）／`limiter-state.json`（`utils/limiter.py:216`）那一族：覆写、先 `.tmp` 再 `os.replace`、不回显绝对路径、写不进只 `log.warning`（CR9-45）。**按北京日取值，不是布尔**——`hotspot/scheduler.py:260` 那句「`catchUpResolved` 更不许从盘上捞」防的是"昨天的定案值放到今天"，带日期的形状不受它影响。
+- **写点＝`run_now` 认领 `running` 之后、线程起跑之前**（`:567`），**只此一处**；`:423-425` 那句注释自己写着「三条触发路径——cron／手动／启动补跑——都经过这里」⇒ marker 的语义因此是"今天这台机器**起过**一轮"，而不是"今天补跑过"。**`accepted=False` 那条路不写**（没有新的钱被承诺）；**线程启动失败要连 marker 一起回滚**（`:577` `_unmark_attempt`，CR4 同族——不回滚就是一次线程启动失败白吃掉一天，而代价是一分钱都没花）。
+- **读点＝只在 `_catch_up_if_needed`**（`:640-651`），位置在内存 `lastDate` 之后（同一件事的进程内版先答）、**让位热点那个 600s 循环之前**（否则热点在跑时要先白等满 `CATCHUP_YIELD_MAX_WAIT_S` 才发现不该跑）⇒ 早退分支从四条变五条，`skippedReason` 带出 `lastAttemptTrigger`／`lastAttemptOutcome`。**cron 与手动两条路都不读它** ⇒ 主人两个既有出口一行没改，`force` 也不需要新增分支。
+- **fail-open 但不静默**：缺文件／JSON 损坏／非对象一律当"今天没试过"（通宵没开机那天的补跑比省一次钱重要），错误字面挂 `_state["markerReadError"]`（`:121`／`:642`）、写失败挂 `markerWriteFailed`——`:242` 那条纪律（有没有读过与读到没读到是两件事，别用省略冒充）在这里同样适用。
+
+④ **相对我上一轮方案的两处更正（都是"再看下是否还能优化"那一轮撞出来的）**：写点从"补跑里"上移到 `run_now` ⇒ **顺带堵住我上轮漏掉的一形**（02:00 cron 跑过但失败 ⇒ 午后重启 ⇒ 上轮的设计里 marker 还没写，因为它只在补跑路径写 ⇒ 照样再买一整轮）；字段名从 `catchupAttemptDate` 改成 `lastAttemptDate`／`lastAttemptTrigger`／`lastAttemptOutcome`——写点上移之后旧名字对 cron／手动轮**是撒谎的**（常真／名不副实的键＝没有键）。
+
+⑤ **连 `outcome` 一起落不是加功能，是把 web 侧已在跑的同构件搬过来**：`web/lib/refresh-progress.ts:30-37` 就是 `{startedAt, types, current, done, outcome}`，`:91-137` 三段式 `startRefreshProgress → recordRefreshResult → finishRefreshProgress`，而 `:107` 明写「`done` 从**盘上**接着写，不是从模块内存：HMR/重启后仍能续上」。ds 这一枚同形：起跑写 `running`（`_mark_attempt`），同步腿收尾覆写真结局（`:524`，**放在刷新腿之前**——刷新腿还要 ≈40min，而"钱已花完"这件事在同步腿收尾这一刻就成立，被 kill 的轮也要留下结局）。收益＝一次 `GET /sync/status` 就把"今天试过"分成两种：「试过且 `rejected`／`inconclusive`／`partial_failed`」与「试过且 `completed`，可 `Product.updatedAt` 还是旧的」——**后者才是更该 alarm 的那一形**，而这一枚是它唯一零出网可读的仪器。
+
+⑥ **观测位**：`status()` 加 `lastAttempt`／`lastAttemptFromDisk`／`markerReadError`／`markerWriteFailed`（`:750-757`）。`lastAttemptFromDisk` 照 hotspot `status()` 的 `fromDisk` 先例（`hotspot/scheduler.py:255-268`）：本进程一轮没跑（`runs==0`）而盘上有 ⇒ 那是**上一个进程**起的，一条 curl 就能把"这个进程跑过"与"我重启了"分开。⚠️ **`runs` 的义一字未动**（`hotspot/scheduler.py:259` 钉住：它管"本进程跑了几轮"，p3 的轮询条件靠它）。
+
+⑦ **测试面＝33/33（21→33，＋12 枚），而"隔离"本身就是本枚交付物的一部分。** 四组：(a) 磁盘＝今天且内存 `lastDate=None` ⇒ 不补跑，且状态位点明**磁盘态**＋带出上一轮 outcome（**只有这一枚长得像今天真实的重启形态**：新进程内存是空的、盘上有）；(b) 🔁 磁盘＝昨天 ⇒ 照常补跑（少了它这条分支就是"永远不跑"的常绿牙齿）；(c) 缺文件／损坏 ⇒ 照常补跑，且损坏那枚必须读得到 `unreadable:` 字面；(d) 写点真落盘（`run_now` 后文件里有今天＋`trigger`＋`outcome=running`）、`markerWriteFailed` 不许恒真、收尾能覆写 `completed` 且日期沿用起跑那一份、**线程启动失败要抛且 marker 还原成写之前那一份**、回滚后 `running` 已放开。**三个套件都在 import 之前把 `SYNC_STATE_FILE` 指到临时目录**（同 `test_cr9_92_realtime.py:14`、`test_p2_m8.py:354` 那条纪律）。为什么这不是可选项：真的 `runtime/sync-state.json` 在**正常日子里就带着今天的日期**，不隔离的话 ①②⑤⑥⑦⑧⑨⑩⑪ 全会在新加的第五条分支上早退（`ran.n==0`）⇒ 套件退化成"只在从没同步过的机器上才绿"；而 `_execute` 收尾现在也会写它 ⇒ 假轮会把真文件写成"今天试过"，**当天之后任何一次合法补跑都被静默挡掉**。跑完现查 `runtime/sync-state.json`＝**不存在**（污染没发生）。
+
+⑧ **我反对做的一处优化**：把 `_catch_up_if_needed` 开头那道 `time.sleep(8)` 挪到判据之后（省 8 秒）。`test_c1_catchup_yield.py:93` 钉着 CR9-35 那条时刻判据（「09-27 00:4x 实测」），动它＝改一枚被测试钉住的既有取舍，收益 8 秒。不值。
+
+⑨ **门禁读数**：闸1 于 19:56 全绿（用时 71s）＝① `tsc` 0 错＋vitest **425/425（48 文件）**｜② ds 离线 **22 套 857/857**（845→857＝＋12，全在本轮那三枚套件里）｜docs 基线对账 **NEW=0／KNOWN 21/21**｜断链 **0**；抬头＝`dev e6abac0 dirty=4`（那 4 个文件正是本轮改动面）。回执＝`data-service/runtime/gate1-40-1013-1956.out`（闸1 自己另写了一份 `gate1-41-1013-2225.out`）；单套件回执＝`cr94-catchup-1013-195x.out`（33/33）／`cr94-syncstatus-1013-195x.out`（66/66，含那两枚"叠加而非替换"的钉子仍绿）／`cr94-c3-1013-195x.out`（17/17）。⚠️ **新码未装载**：ds 仍是 19:02:42 那棵（PID 10728）⇒ 重启归主人；本轮零出网。
+
+⑩ **拦不住的那一半**：① 热点腿的 `catchUpResolved` 是同一模式（`hotspot/scheduler.py:260` 明令不落盘）⇒ 19:02 那棵**带了 `SYNC_CATCHUP=off`** 的树照样在 19:09:19 又出了一份今天的 digest；要跟进得先改那句注释的理由（它的理由只在"值不带日期"时成立）＝另一枚字。② **两棵 ds 并存**（18:57／19:02 交接那几分钟我真有过两棵）⇒ marker 拦不住并发，真解是单实例锁，超本枚范围。③ 失败日不再自动重试（`force` 兜，且这是 CR9-28 已有取舍的延伸）。④ **数据不新鲜这件事它不治**：现查 `Product` 自 10-09 02:2x 起没有一行被写过（stock 5571／fund 27998／bond 1059／crypto 250／us 178／**hk 0**），成因至少三桩、零出网分不开（10-10 那天 ds 没起／10-11 `eastmoney granted 24 denied 85`＝桶被饿死／10-13 两轮被 `off` 或我的 kill 挡在半路）⇒ 这一枚**本轮未立案**（主人的字是"其他事情先不用管"），只在此记一笔。⑤ push 欠 12 笔。
+
+⑪ **顺带读到、未归因的一枚**：web 日志里 `POST /api/sync 403 in 32ms` 与 `POST /api/market/refresh?type=all 403 in 956ms`。`web/lib/request-origin.ts:47` 是"无 Origin 就放行"，而 ds 那两条腿的 `requests.post` 都不带 Origin ⇒ **那两发 403 不是 ds 发的**。没归因，也没拿它当任何结论的证据。
