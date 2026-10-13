@@ -13,12 +13,16 @@ import ts from "typescript";
 import {
   DS_CONTRACT,
   DS_RESPONSE_FILES,
+  KNOWN_STALE_SNAPSHOTS,
   NO_LIVE_PROBE,
+  builderMsFor,
   coverage,
   declaredButUnused,
   keysAbsentInDsSource,
   loadSnapshot,
   missingContractKeys,
+  newlyStaleEndpoints,
+  obsoleteKnownStale,
   snapshotDenominator,
   staleEndpoints,
   unregisteredEndpoints,
@@ -100,12 +104,18 @@ function allContractKeys(c: (typeof DS_CONTRACT)[number]): string[] {
 
 function builderLatestMs(): number {
   let max = 0;
+  const now = Date.now();
   for (const f of DS_RESPONSE_FILES) {
     const out = execFileSync("git", ["log", "-1", "--format=%ct", "--", f], {
       cwd: REPO_ROOT,
       encoding: "utf8",
     }).trim();
-    if (out) max = Math.max(max, Number(out) * 1000);
+    // 脏＝"代码已改、还没提交"那一态；`builderMsFor` 把它拧成"现在"（见 ds-contract.ts 的注释）
+    const dirty = execFileSync("git", ["status", "--porcelain", "--", f], {
+      cwd: REPO_ROOT,
+      encoding: "utf8",
+    }).trim() !== "";
+    max = Math.max(max, builderMsFor(out ? Number(out) * 1000 : 0, dirty, now));
   }
   return max;
 }
@@ -159,10 +169,10 @@ describe("闸2 L2 键名：清单要的键，快照与 ds 源码都得承认", (
   });
 
   it("覆盖面读数（不许把「没采到」读成「没问题」）", () => {
-    expect(coverage(snap)).toMatchObject({ declared: DS_CONTRACT.length, 分母: 10 });
+    expect(coverage(snap)).toMatchObject({ declared: DS_CONTRACT.length, 分母: 11 });
   });
 
-  it("分母口径（10-12 主人的字＝改成 10）：排除表自证，且跑满＝100%", () => {
+  it("分母口径（10-12 主人的字＝10；10-13 CR9-92 落 `/quote/realtime` ⇒ 现值 11）：排除表自证，跑满＝100%", () => {
     const paths = DS_CONTRACT.map((c) => c.path);
     // 排除表里写错一个路径名＝那条排除静默失效、分母悄悄变化 ⇒ 必须逐条点名
     const ghost = Object.keys(NO_LIVE_PROBE).filter((p) => !paths.includes(p));
@@ -205,21 +215,51 @@ describe("闸2 L2 键名：清单要的键，快照与 ds 源码都得承认", (
 });
 
 describe("闸2 L3 陈旧：快照不得比 ds 响应构造面更旧", () => {
-  it(`现存快照（${Object.keys(snap.endpoints).length} 枚）不早于 ${DS_RESPONSE_FILES.length} 枚构造面的最后提交`, () => {
-    expect(staleEndpoints(snap, builderLatestMs())).toEqual([]);
+  const builder = builderLatestMs();
+
+  it(`现存快照里「清单外」的过期＝0（构造面共 ${DS_RESPONSE_FILES.length} 枚，已知陈旧另有清单）`, () => {
+    expect(newlyStaleEndpoints(snap, builder)).toEqual([]);
+    // 原始读数仍然要说得出（不许把"已隔离"读成"没问题"）
+    expect(staleEndpoints(snap, builder).sort()).toEqual(Object.keys(KNOWN_STALE_SNAPSHOTS).sort());
   });
 
-  it("合成样本能点亮 L3：构造面在快照之后被改过＝过期", () => {
-    const builder = Date.parse("2026-10-06T20:43:00+08:00");
+  it("已知陈旧清单自证：每条都在分母里（重采这条路存在）、都带理由、且**确实还过期**", () => {
+    const paths = DS_CONTRACT.map((c) => c.path);
+    const denom = snapshotDenominator(paths);
+    expect(Object.keys(KNOWN_STALE_SNAPSHOTS).filter((p) => !paths.includes(p))).toEqual([]);
+    expect(Object.keys(KNOWN_STALE_SNAPSHOTS).filter((p) => !denom.includes(p))).toEqual([]);
+    expect(Object.entries(KNOWN_STALE_SNAPSHOTS).filter(([, why]) => why.trim().length < 20)).toEqual([]);
+    // 现场腿重采之后这一条会变红＝"清单比现实长"那一形——这是设计，不是故障：
+    // 摘掉它才是正确处置（10-13 A 窗的收尾第 4 步写着这件事）。
+    expect(obsoleteKnownStale(snap, builder)).toEqual([]);
+  });
+
+  it("合成样本能点亮 L3：构造面在快照之后被改过＝过期，不在清单里的那一枚必须被点名", () => {
+    const b = Date.parse("2026-10-06T20:43:00+08:00");
+    const entry = (day: string): SnapshotFile["endpoints"][string] => ({
+      capturedAt: day,
+      provenance: "fixture",
+      topLevel: ["price"],
+      rows: null,
+    });
     const old: SnapshotFile = {
       schemaVersion: 1,
       capturedBy: "fixture",
-      endpoints: {
-        "/quote": { capturedAt: "2026-10-01", provenance: "fixture", topLevel: ["price"], rows: null },
-      },
+      endpoints: { "/quote": entry("2026-10-01"), "/news": entry("2026-10-01") },
     };
-    expect(staleEndpoints(old, builder)).toEqual(["/quote"]);
-    old.endpoints["/quote"].capturedAt = "2026-10-07";
-    expect(staleEndpoints(old, builder)).toEqual([]);
+    expect(staleEndpoints(old, b)).toEqual(["/news", "/quote"]);
+    // `/quote` 在真清单里＝已知；`/news` 不在＝新增，必须响
+    expect(newlyStaleEndpoints(old, b)).toEqual(["/news"]);
+    old.endpoints["/news"] = entry("2026-10-07");
+    expect(newlyStaleEndpoints(old, b)).toEqual([]);
+  });
+
+  it("构造面时刻那把尺自己也要两半样本：脏的那一枚要拧成「现在」，干净的不许动", () => {
+    const committed = Date.parse("2026-10-06T20:43:00+08:00");
+    const now = Date.parse("2026-10-13T09:00:00+08:00");
+    expect(builderMsFor(committed, false, now)).toBe(committed);
+    expect(builderMsFor(committed, true, now)).toBe(now);
+    expect(builderMsFor(0, true, now)).toBe(now); // 还没进版本管理的新文件（10-13 的 `realtime.py`）
+    expect(builderMsFor(0, false, now)).toBe(0);
   });
 });

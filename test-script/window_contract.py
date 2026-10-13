@@ -14,7 +14,8 @@
  - 快照只存**键面**，不存数值 ⇒ 回写文件不会把行情抄进仓库。但它是**版本管理里的文件**，
    `--write` 之后 `web/lib/ds-contract.snapshot.json` 会变 dirty，窗口收尾要单独一笔提交。
  - 判据是"快照里的键在真响应里一个都不能少"（改名/摘键＝红）；多出来的键不算红（CR9-31 加键不破坏调用方）。
- - 覆盖面分母**从 `ds-contract.ts` 的 `NO_LIVE_PROBE` 现查**（10-12 定档＝10 枚：12 登记 − 2 枚有理由的排除），
+ - 覆盖面分母**从 `ds-contract.ts` 的 `NO_LIVE_PROBE` 现查**（10-12 定档＝10 枚：12 登记 − 2 枚排除；
+   10-13 CR9-92 落 `/quote/realtime` ⇒ 现值 11 枚＝13 登记 − 同样那 2 枚排除），
    本件不抄第二份；`--selftest` 里"探针集合 == 分母"是一枚真牙齿 ⇒ 清单加了端点而现场腿没加探针＝自测红。
 
 用法：
@@ -57,6 +58,10 @@ PROBES: list[dict[str, Any]] = [
     {"path": "/quote", "params": {"type": "stock", "code": "600519"}, "egress": "1 发（TTL 命中则 0）"},
     {"path": "/kline", "params": {"type": "stock", "code": "600519", "interval": "1d"}, "egress": "1 发"},
     {"path": "/quote/verified", "params": {"type": "stock", "code": "600519", "field": "price"}, "egress": "≈3 发（主源＋备源比对）"},
+    # CR9-92（10-13）新增的这一枚是**第一次对着真响应核实时区的键面**：它同时是 1a 的验收腿
+    # （`sources`／`hasTodayData` 这些键在真响应里到底有没有），也是闸2 L3 那条"已知陈旧"清单的销账动作。
+    {"path": "/quote/realtime", "params": {"type": "stock", "code": "600519"},
+     "egress": "3 发（腾讯现价＋新浪现价＋腾讯分时＝实时区「一次取全」那一跳；10s 只问现价的那一跳是 2 发）"},
     {"path": "/news", "params": {"code": "600519"}, "egress": "1 发（东财新闻）"},
     {"path": "/quotes", "params": {"type": "stock", "codes": "600519"}, "egress": "1 发"},
     {"path": "/fund/holdings", "params": {"code": "510300"}, "egress": "1 发"},
@@ -240,7 +245,7 @@ def selftest() -> int:
     # 这一枚是真牙齿：清单加了端点而现场腿没加探针／或探针偷偷多采一枚被排除的 ⇒ 自测红
     ck("探针集合 == 分母（分母现查 NO_LIVE_PROBE，不抄第二份）",
        sorted(p["path"] for p in PROBES) == sorted(denominator()))
-    ck("分母＝10（12 登记 − 2 枚各有理由的排除）", len(denominator()) == len(declared) - 2 == 10)
+    ck("分母＝11（13 登记 − 2 枚各有理由的排除；10-13 CR9-92 加了 `/quote/realtime`）", len(denominator()) == len(declared) - 2 == 11)
     ck("/hotspots/status 已挪进探针清单且零上游（0 发＝不动桶）",
        any(p["path"] == "/hotspots/status" and p["egress"].startswith("0") for p in PROBES))
     ck("有副作用的 POST 永不自动采（run 触发抓取／start 起研报）",

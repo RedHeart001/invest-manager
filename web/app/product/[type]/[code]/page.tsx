@@ -6,6 +6,7 @@ import PageBack from "@/app/components/PageBack";
 import VerifyQuoteButton from "@/app/components/VerifyQuoteButton";
 import WatchButton from "@/app/components/WatchButton";
 import ProductCharts from "./ProductCharts";
+import RealtimeStrip from "./RealtimeStrip";
 import ResearchPanel from "./ResearchPanel";
 import { QUOTE_TIMEOUT_MS, dsGet, type Quote } from "@/lib/data-service";
 import { priceWithCurrency } from "@/lib/currency";
@@ -328,6 +329,17 @@ export default async function ProductPage({
           </p>
         )}
       </section>
+
+      {/* 当日实时行情条（CR9-92＝OPT-3 第一批 1a）：`docs/PLAN.md:170` 要的那一块，
+          位置＝第 2、3 区之间（六区→七区见 `:178`）。它自己按规则①决定整块出不出现，
+          所以这里没有分支——留个空盒子就等于给"点了看到别的数据"开门。
+          ⚠️ 这个文件注释里的 ①–⑥ 是**页内位置标签**，不是 PLAN 的七区编号，别混引。 */}
+      <RealtimeStrip
+        key={`realtime:${type}:${code}`}
+        type={type}
+        code={code}
+        valueDecimals={valueDecimals}
+      />
 
       {/* ③④ 主图区 + 变化解读区 */}
       {kline ? (

@@ -73,6 +73,31 @@ export const DS_CONTRACT: readonly EndpointContract[] = [
     note: "10-08 那一枚读错键的就是这一条：`verifyVerdict` 三态才是分歧率的分子分母",
   },
   {
+    path: "/quote/realtime",
+    method: "GET",
+    requiredTop: [
+      "type",
+      "code",
+      "observedAt",
+      "parts",
+      "price",
+      "intraday",
+      "crossChecked",
+      "verifyVerdict",
+      "consensus",
+      "hasTodayData",
+      "intradayDateIsToday",
+      "wired",
+      "sources",
+      "degraded",
+      "note",
+    ],
+    requiredRows: { sources: ["kind", "source", "ok", "latencyMs", "detail"] },
+    readBy: ["web/app/api/realtime/route.ts", "web/lib/realtime.ts"],
+    note: "CR9-92 1a：`hasTodayData`／`intradayDateIsToday` 是**三态**（`null`＝这一轮只问了现价），"
+      + "web 侧把它读成 `false` 就是「当日没数据」的假结论；`sources` 是「这一轮点名了谁」的面，不是快照",
+  },
+  {
     path: "/kline",
     method: "GET",
     requiredTop: ["type", "code", "interval", "source", "candles"],
@@ -155,7 +180,56 @@ export const DS_RESPONSE_FILES = [
   "data-service/app/providers/chain.py",
   "data-service/app/providers/akshare_provider.py",
   "data-service/app/providers/tencent_provider.py",
+  "data-service/app/realtime.py",
 ];
+
+/**
+ * L3 的**已知陈旧**清单（10-13 落 CR9-92 这一轮登记）。
+ *
+ * 为什么要这张表，而不是把 L3 关掉或改松：这一条腿的构造面是「四枚文件里最新的那次提交」，
+ * 所以**任何一次 ds 落码**都会把所有已存快照判成过期——而重采要真打上游、只能在人工窗口做
+ * （10-13 A 窗最后一步）。如果不隔离，落 CR9-92 的那一笔就会让闸1 常红，
+ * 而常红的闸等于没有闸（CR9-14 那一轮的教训原话：不先隔离，后续任何一批都失去门禁判别力）。
+ *
+ * 两条牙齿都留着，这张表不是"压红"用的：
+ *  - 清单外的过期＝**新增**，当场红；
+ *  - 清单里的已经不再过期（重采之后）＝也红，逼着把这一条摘掉，否则它就变成第二个 `PASSTHROUGH`。
+ */
+/** 构造面的"最新时刻"：最后一次**提交**时间；工作区里已改但未提交的那一枚按"现在"算。
+ *
+ * 为什么要带上脏的那一半：L3 原来只看 `git log`，于是"代码已改、快照还没跟上"这一态它是瞎的——
+ * 10-13 落 CR9-92 时 `main.py` 在提交前就已经改了，而 `git log -1` 只看得见上一次提交（10-06），
+ * 结果"已登记为已知陈旧"的清单在提交那一刻反而对不上尺（与 CR9-24「代码已改、未证进程」同一形）。
+ * 脏文件只会把尺**拧紧**（判成更新＝更容易判过期），不会反过来放过真过期。 */
+export function builderMsFor(committedMs: number, isDirty: boolean, nowMs: number): number {
+  return Math.max(committedMs, isDirty ? nowMs : 0);
+}
+
+/** 已知陈旧清单自证用：这些条目的来路（谁把构造面改新的、什么时候重采） */
+export const KNOWN_STALE_SNAPSHOTS: Record<string, string> = {
+  "/quote": "10-13 CR9-92 改了 `main.py`＋新增 `realtime.py` ⇒ 构造面比 10-07 那份快照新，判过期是**对的**；"
+    + "重采归 10-13 A 窗最后一步（`test-script/window_contract.py --live --write`）",
+  "/kline": "同上（同一枚构造面，10-08 那份快照同样被这次落码判过期）；重采同归那一次现场腿",
+};
+
+/** L3 的"新增"那一半：不在已知清单里的过期才该红 */
+export function newlyStaleEndpoints(
+  snap: SnapshotFile,
+  builderLatestMs: number,
+  known: Record<string, string> = KNOWN_STALE_SNAPSHOTS,
+): string[] {
+  return staleEndpoints(snap, builderLatestMs).filter((p) => !(p in known));
+}
+
+/** 清单自己也得有人清：重采之后就没人过期了，那一条必须摘，不然这张表只会长 */
+export function obsoleteKnownStale(
+  snap: SnapshotFile,
+  builderLatestMs: number,
+  known: Record<string, string> = KNOWN_STALE_SNAPSHOTS,
+): string[] {
+  const stillStale = new Set(staleEndpoints(snap, builderLatestMs));
+  return Object.keys(known).filter((p) => !stillStale.has(p)).sort();
+}
 
 export const SNAPSHOT_PATH = path.join(HERE, "ds-contract.snapshot.json");
 
