@@ -131,8 +131,10 @@ export const DS_CONTRACT: readonly EndpointContract[] = [
     method: "GET",
     requiredTop: ["degraded", "note", "reports", "industry"],
     requiredRows: { reports: ["title", "date", "id"] },
-    readBy: ["web/lib/tools.ts"],
-    note: "E-3 刀 A 依据：`reports` 只有定期报告清单（`PERIODIC_KEYWORDS` 四串），兑现不了「分红节点」",
+    readBy: ["web/lib/tools.ts", "web/app/product/[type]/[code]/page.tsx"],
+    note: "E-3 刀 A 依据：`reports` 只有定期报告清单（`PERIODIC_KEYWORDS` 四串），兑现不了「分红节点」。"
+      + "CR9-98（#65 刀 B）起详情页也读它——读的是 `industry` 那一块（`lib/fund-industry.ts` 判三态），"
+      + "`reports` 仍只在 MCP 工具侧用",
   },
   {
     path: "/bond/yieldcurve",

@@ -11,6 +11,7 @@ import ResearchPanel from "./ResearchPanel";
 import { QUOTE_TIMEOUT_MS, dsGet, type Quote } from "@/lib/data-service";
 import { priceWithCurrency } from "@/lib/currency";
 import { fetchEvents, narrowByDates, pickEventDates } from "@/lib/events";
+import { buildIndustryView, type FundReportResp } from "@/lib/fund-industry";
 import { getKlineRange, normalizeRange, type KlineResult } from "@/lib/kline";
 import { quoteClockText } from "@/lib/market-clock";
 import { detectPhases } from "@/lib/phases";
@@ -80,7 +81,7 @@ export default async function ProductPage({
   const range = normalizeRange(null, null);
   const rangeOk = "start" in range;
 
-  const [quoteRes, klineRes, eventsRes, holdingsRes, yieldRes] = await Promise.allSettled([
+  const [quoteRes, klineRes, eventsRes, holdingsRes, yieldRes, fundReportRes] = await Promise.allSettled([
     dsGet<Quote>("/quote", { type, code }, QUOTE_TIMEOUT_MS),
     rangeOk ? getKlineRange(type, code, range.start, range.end) : Promise.reject(new Error("非法区间")),
     fetchEvents(type, code),
@@ -88,6 +89,11 @@ export default async function ProductPage({
     type === "bond"
       ? dsGet<YieldResp>("/bond/yieldcurve", { days: "90" }, 30_000)
       : Promise.resolve(null),
+    // #65 刀 B（CR9-98）：行业配置上屏。与持仓同一个条件（只有**场外**基金有这份披露），
+    // 且与持仓同一枚 `Promise.allSettled` ⇒ 它超时/失败不会把整页带崩（R10 同口径）。
+    // 代价按 10-12 23:2x 那次读码更正过：一条 `/fund/report`＝**2–3 发**（公告 1 发＋行业配置
+    // 按年份 1–2 发，provider 侧内存缓存 6h），走的是东财桶（`_em_ak_request`）不是 CR9-97 那枚新闸。
+    otcFund ? dsGet<FundReportResp>("/fund/report", { code }, 30_000) : Promise.resolve(null),
   ]);
 
   let quote: Quote | null = null;
@@ -160,6 +166,19 @@ export default async function ProductPage({
       yieldData = { degraded: true, note: "收益率曲线获取失败", curve: [] };
     }
   }
+  // #65 刀 B：三态由纯函数判（`lib/fund-industry.ts`）——"上游说没披露"与"这一轮取不到"
+  // 在 ds 响应里同形（`industry: null`），混说一句就是谎报。
+  let fundReport: FundReportResp | null = null;
+  let fundReportError: string | null = null;
+  if (otcFund) {
+    if (fundReportRes.status === "fulfilled" && fundReportRes.value) {
+      fundReport = fundReportRes.value;
+    } else if (fundReportRes.status === "rejected") {
+      fundReportError =
+        fundReportRes.reason instanceof Error ? fundReportRes.reason.message : "行业配置获取失败";
+    }
+  }
+  const industry = buildIndustryView(fundReport, fundReportError);
 
   const profile = buildProfile(
     { type, name: product.name, code, exchange: product.exchange, tags },
@@ -443,6 +462,43 @@ export default async function ProductPage({
               <p className="mt-2 text-xs text-amber-600">
                 持仓数据不可用（{holdings?.note ?? holdingsError ?? "该基金可能未披露股票持仓"}）
               </p>
+            )}
+          </div>
+        )}
+
+        {/* #65 刀 B（CR9-98）：行业配置上屏。措辞沿用 `lib/tools.ts:390-394` 已有的那两句
+            （「行业配置截至 X」／「行业配置未披露」），一列宽度与上面的重仓持股表同形。
+            三态各自有自己的出口：有数⇒表；上游说没披露⇒一句陈述；这一轮取不到⇒照持仓区
+            那一格的写法说"不可用（原因）"——不把后者说成前者。 */}
+        {otcFund && (
+          <div className="rounded-xl border border-zinc-200 bg-white p-4">
+            <h3 className="text-xs font-medium text-zinc-500">
+              {industry.state === "ok" && industry.asOf ? `行业配置截至 ${industry.asOf}` : "行业配置"}
+              {industry.state === "ok" && industry.source ? ` · 来源：${industry.source}` : ""}
+            </h3>
+            {industry.state === "ok" ? (
+              <table className="mt-2 w-full text-left text-xs">
+                <thead>
+                  <tr className="text-zinc-400">
+                    <th className="py-1.5 pr-3 font-normal">行业类别</th>
+                    <th className="py-1.5 font-normal">占净值比例</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {industry.items.map((it) => (
+                    <tr key={it.name} className="border-t border-zinc-100 tabular-nums">
+                      <td className="py-1.5 pr-3 text-zinc-700">{it.name}</td>
+                      <td className="py-1.5 text-zinc-700">
+                        {it.weight != null ? `${Number(it.weight).toFixed(2)}%` : "--"}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            ) : industry.state === "undisclosed" ? (
+              <p className="mt-2 text-xs text-zinc-500">{industry.text}</p>
+            ) : (
+              <p className="mt-2 text-xs text-amber-600">行业配置不可用（{industry.text}）</p>
             )}
           </div>
         )}
