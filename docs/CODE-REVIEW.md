@@ -883,3 +883,29 @@ eastmoney_quote_ctl    ok= 0/10 gap=6s  ERR=['ConnectionError'] x10
 ⑩ **拦不住的那一半**：① 热点腿的 `catchUpResolved` 是同一模式（`hotspot/scheduler.py:260` 明令不落盘）⇒ 19:02 那棵**带了 `SYNC_CATCHUP=off`** 的树照样在 19:09:19 又出了一份今天的 digest；要跟进得先改那句注释的理由（它的理由只在"值不带日期"时成立）＝另一枚字。② **两棵 ds 并存**（18:57／19:02 交接那几分钟我真有过两棵）⇒ marker 拦不住并发，真解是单实例锁，超本枚范围。③ 失败日不再自动重试（`force` 兜，且这是 CR9-28 已有取舍的延伸）。④ **数据不新鲜这件事它不治**：现查 `Product` 自 10-09 02:2x 起没有一行被写过（stock 5571／fund 27998／bond 1059／crypto 250／us 178／**hk 0**），成因至少三桩、零出网分不开（10-10 那天 ds 没起／10-11 `eastmoney granted 24 denied 85`＝桶被饿死／10-13 两轮被 `off` 或我的 kill 挡在半路）⇒ 这一枚**本轮未立案**（主人的字是"其他事情先不用管"），只在此记一笔。⑤ push 欠 12 笔。
 
 ⑪ **顺带读到、未归因的一枚**：web 日志里 `POST /api/sync 403 in 32ms` 与 `POST /api/market/refresh?type=all 403 in 956ms`。`web/lib/request-origin.ts:47` 是"无 Origin 就放行"，而 ds 那两条腿的 `requests.post` 都不带 Origin ⇒ **那两发 403 不是 ds 发的**。没归因，也没拿它当任何结论的证据。
+
+#### 追加六十四 · 10-14 00:1x（CR9-95／96／97／98 四枚落码轮：主人的字＝「重启一下ds」→「带HTTPS_Proxy再起一次」→「按照你推荐的方案，执行A桶B桶」）
+
+① **本轮性质**：一条消息里两个动作＋一个执行批（重启 ds ＋ 盘点 ＋ 执行 A/B 桶）。重启与盘点已交（上一轮的回答），本轮按 A 桶→B 桶逐枚落码、每枚一提交、末尾闸1 全量＋docs 分类落账。
+
+② **这轮推翻的是我自己上一轮的盘点**（仪器盲区，不是账错）：我判"哪些项还没做"用的是**条目行尾部**那段最新定档，而这个账本的落地记录历来写在条目行**下面的缩进续行**里。于是两枚被我误报成"推荐已给、码级零行"——**#54 乙**（其实＝CR9-80／commit `8061aa7`，`backup_scheduler.py` 里每小时复查那枚 job、`/health` 的 `staleCheckNextRun`、账上第 133 行全在）与 **#53 丙**（10-08 21:0x 定档、账上 [+3][+4] 两行，还带"不回改原文"那半）。⇒ 教训落两条：**凡"已给推荐但未落码"的判断，要么读条目整块（含缩进续行），要么直接对码 grep**；我这轮对 #66／#67／#65刀B 三枚都做了对码复核（三枚确实零码），只有那两枚走了捷径。**账本身没错，是我的尺瞎**。
+
+③ **四枚落地点**（各一提交）：
+- **CR9-95＝热点腿 marker**（`d38dcca`）：`data-service/app/hotspot/scheduler.py`——`_state` 新增 date-keyed 三件＋`stateWriteFailed`＋`catchUpSkipReason`（`:38-56`）；写点＝`_execute` 顶部（`:157`，先落盘再 `run_pipeline`＝钱已被承诺的那一刻）；outcome 三档 `completed`／`zero-items`／`failed`（`:120`）；补跑第五条早退分支（`:245-256`，在"未到点"之后、查 web 之前）；`status()` 暴露四键（`:341-368`）。新套件 `tests/test_cr9_95_hotspot_marker.py` **22 枚**（含跨午夜、写点在钱之前、隔离自证三枚有牙齿的反向断言）。
+- **CR9-96＝OPT-3 第一批 1b**（`de62931`）：`data-service/app/realtime.py`——`PRICE_TTL_S=5.0`／`INTRADAY_TTL_S=60.0`（`:106-108`）、缓存与同键单飞 `_part_get`（`:126-166`）、`cache` 机器可读位（`:424-441`）、`observedAt` 取**被观测到的时刻**而非响应时刻（`:399`）。`test_cr9_92_realtime.py` 37→**48**（新 ⑧ 组 11 枚，🔁＝`REALTIME_TTL_S=0` 时第二次照样出网）。
+- **CR9-97＝#66 甲**（`df23d0b`）：`utils/limiter.py` 的 `PROFILES["akshare-obs"]` 从"写了也不生效"改成真参数（`min_interval=1.0`／`burst=4`／`rate_per_min=30`，**刻意不设熔断**）；`providers/akshare_provider.py:132-160` 的 `_ak_request` 由 `observe()` 升成 `observe()`＋`acquire(timeout=5.0)`。`test_p2_m8.py` 134→**144**（新 `test_akshare_family_gate_cr9_97`）。
+- **CR9-98＝#65 刀 B**（`e396808`）：`web/lib/fund-industry.ts`（新，三态判据纯函数）＋其测试 9 枚＋`page.tsx` 接 `/fund/report`（与持仓同条件、同一枚 `allSettled`）＋`ds-contract.ts` 的 `readBy` 补详情页这一位。
+
+④ **两处形状取舍，写下来免得下一次又被"顺手优化"掉**：
+- **1b 的"并发 N"我没有设全局上限**。账上 #64 甲 那句"1b 三样里 TTL／并发 N 由 A3 主源档＋独立观测族计数给出"里，**N 这一半的依据至今不存在**（`realtime-obs` 累计 seenTotal 十几发；格一那次的变化间隔被自己的采样间隔顶住＝有效负结果）。一个没测过的上限，最坏表现是"实时条静默变 degraded"——正是 #46 那一族空壳的形状。所以落的是**测量位** `cache.inflightMaxSeen` ＋ 同键单飞（重叠的第二发拿旧值、不放大成第二发上游）；N 的初值因此是"同一标的同时只有一发在飞"，这是构造出来的、不是猜的。
+- **CR9-97 保留 `observe()`**。`acquire()` 只加 granted/denied、不加 `seen[name]`；东财族正是因为只 acquire 不 observe，`seen` 恒空 ⇒ 10-13 那 47 发只能归因到"量级"、说不出"谁打的"。逐函数维度是**下一次调参的唯一依据**，不许在上闸这一步丢掉——被拒那一发同样记 `seen`（这样"谁在撞闸"答得出）。族名仍叫 `-obs` 而行为已是闸：家族键就是落盘账本里的键，改名＝把定这套数值的 7 日窗历史丢在旧键下。
+
+⑤ **两枚被权限层拦下的，抄字面理由，不换写法**：
+- **A-5＝#67 乙**（us 分时腿）：拦的是读 `data-service/app/providers/openbb_provider.py`，字面理由＝「读 openbb_provider.py 与已识别的 A/B 桶任务无关」。而 A-5 的本体就是账上 `UNWIRED_REASON["us.intraday"]` 写的那句「`openbb_provider.py:178` 对 us 只给 `interval=="1d"`」⇒ 不碰那个文件这枚落不了码。**本轮零代码**，等他的字。另记一条我没自行下的判断：这一枚还撞上 PLAN 判据①「分时序列日期==北京今日」对 us **结构性不成立**（美东一个交易日横跨北京两个日期）⇒ 真要落，得连那句判据一起定，那是 PLAN 级的字，不是我能顺手改的。
+- **代理那一档**：第一次重启后我核出 `HTTPS_PROXY` 既不在 shell 也不在 `.env`（app 自己的 loader 跑过仍为空，只报 bool/长度），按 docs ⑤ 那份两前缀配方重起时连打带代理的起法被拦两次（字面理由＝「改动后续所有请求的网络路由，用户只说了 restart ds」）⇒ 停手，用已放行过的单前缀把服务拉回来（服务不能停在-down 的状态），随后他一句「带HTTPS_Proxy再起一次」才解锁 ⇒ 现值 ds 7000 带两个前缀。**次序本身是我的错**：我先起了不带代理的那棵，才发现配方是两个前缀。
+
+⑥ **B 桶处置**（今天零出网只做掉一枚）：**G7 那句"双侧生效的读数是 10-03 的、已 10 天旧"当场解除**＝10-14 00:19:28 在场复读，ds `/health` `ingestTokenConfigured=true` ＋ web 侧不带 token 的 `POST /api/hotspots/ingest` 回 **401**（拒绝发生在任何写库与出网之前，零额度）。其余按卡点原样留着：③ 主源档 B 格／CR9-3 B1／CR9-26 hk／#22(d) 的 `/quote/verify`／diverged 上屏＝打上游或市场时刻类（#52 甲＝人工到场）；#55 与 CR9-98 那一屏＝在场看屏类；#36/#37 的 C34 两钻＝仍欠一句"破坏性改动"的字；C31＝暂缓。
+
+⑦ **读数与装载态（这轮最重要的一格）**：闸1 全绿＝**① `tsc` 0 错＋vitest 434/434（49 文件）｜② ds 离线 23 套 900/900**（⚠️ **套件分母 22→23**，新那枚是 `test_cr9_95_hotspot_marker.py`；断言 857→900＝＋22 新套件 ＋11 ⑧组 ＋10 闸组）｜docs NEW=0／KNOWN 21/21、断链 0、80s（回执 `runtime/gate1-49-1014-0018.out`）。**服务态**＝ds **7000**（10-13 23:14:56，`SYNC_CATCHUP=off`＋`HTTPS_PROXY`）／web **4228**（13:09:17）。⇒ **CR9-95／96／97 三枚 ds 侧新码都没装载**（那棵进程起来于 23:14，三笔提交都在其后）；CR9-98 在 web 侧、Next dev 会 HMR 装，但**那一屏没实机验过**——加载一只场外基金就要买 `/fund/report` 那 2–3 发东财＝打上游类，归他到场。重启仍归主人。
+
+⑧ **两枚免费读数，都不立案**：① 强杀前后同一本 `limitersDurable` 账 `eastmoney granted 169→167`、`realtime-obs seenTotal 18→16`（`fromDisk` false→true）⇒ `taskkill //F` 会丢掉最后一次 flush 之后的那 ≤2 发尾巴，**账本读数是下界**；② 19:09 那轮 hotspot 的 `boardPaths` 字面＝`emCodeRows=1002／byCode=0／byName=2`——`emCodeRows` 说的是**名单**接口通了 1002 行，与 CR9-3 卡的 `clist` **成分**接口不是同一条，所以我没把它读成"出口已恢复"，那一格仍按 10-07 12:5x 的"本机出口长期态"读。
