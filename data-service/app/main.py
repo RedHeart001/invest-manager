@@ -197,6 +197,39 @@ def quote_verified(
         raise HTTPException(status_code=502, detail=str(e))
 
 
+@app.get("/quote/realtime")
+def quote_realtime(
+    type: str = Query(
+        "stock",
+        description="产品类型：stock/fund(场内)/hk 两半都有腿；us 只有现价腿；bond/crypto 未接入首轮",
+    ),
+    code: str = Query(..., description="产品代码，如 600519"),
+    parts: str = Query(
+        "price,intraday",
+        description="这一轮跑哪几条腿：price／intraday（现价 10s、分时 60s 是两个节奏，别每 10s 都带那条 11–14KB 的分时腿）",
+    ),
+):
+    """当日实时行情条的取数侧（OPT-3 第一批 1a＝CR9-92）：现价＋分时＋`sources` 全公开。
+
+    三条红线住在 `app/realtime.py` 顶部：不注册成链上的 provider、不打东财、
+    实时路径上不出现 20s 排队（只 `observe` 不 `acquire`）。
+    失败形态＝**200 ＋ `degraded`/`note`**（R10：详情页不该因为一条实时条而整页报错），
+    只有"这个类型压根没登记腿"或"parts 写了不存在的一条腿"才是 400。
+    """
+    from . import realtime
+
+    want = tuple(p.strip() for p in parts.split(",") if p.strip()) or realtime.PARTS
+    unknown = [p for p in want if p not in realtime.PARTS]
+    if unknown:
+        raise HTTPException(status_code=400, detail=f"unknown parts: {','.join(unknown)}")
+    try:
+        return realtime.aggregate(type, code, want)
+    except KeyError:
+        raise HTTPException(
+            status_code=400, detail=f"realtime zone has no legs for type: {type}"
+        ) from None
+
+
 @app.get("/kline")
 def kline(
     type: str = Query("stock"),

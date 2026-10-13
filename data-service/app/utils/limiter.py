@@ -468,6 +468,18 @@ PROFILES: dict[str, dict] = {
         "cooldown_base": 0.0,
         "cooldown_max": 0.0,
     },
+    # CR9-92（OPT-3 第一批 1a）：实时区那条路**没有族闸可讲**。10-12 三条改判的第 (二) 条＝
+    # 格三那句 `N×(60/TTL)≤12` 算的是 eastmoney 族，而实时轮询不打东财、腾讯侧本文件里没族
+    # ⇒ 并发 N 只能由这一枚观测族攒真计数来回答。与 `akshare-obs` 同一条纪律：调用点走
+    # `observe()` 而不是 `acquire()`，参数一律不生效，写在这里只给"真要限它"的那一步留唯一调参来源。
+    "realtime-obs": {
+        "min_interval": 0.0,
+        "burst": 10**9,
+        "rate_per_min": 10**9,
+        "failure_threshold": 10**9,
+        "cooldown_base": 0.0,
+        "cooldown_max": 0.0,
+    },
 }
 
 

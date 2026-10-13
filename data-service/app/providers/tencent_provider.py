@@ -134,56 +134,125 @@ def _symbol_for(type_: str, code: str) -> str | None:
 from ..utils.num import to_float as _num  # noqa: E402
 
 
+# ---------- 可被"点名"的模块级件（CR9-92：实时区要用更短的超时走同一条腿） ----------
+#
+# 为什么从类方法里抽出来：`OPT-3` 的实时聚合端点**不得注册成链上的 provider**，也不得复用
+# `chain_call`——它会先向主源（东财）要额度，而桶是"先睡后拒"（`acquire(timeout=20)`），
+# "现价 10s 一跳"会被自家排队打破（docs/PLAN.md:174 那条改判）。但它点的恰恰就是腾讯这条腿，
+# 字段位与口径（累计→增量 diff）只能有一份 ⇒ 抽成模块级函数，类方法照常调用它们。
+# `timeout` 的默认值＝原来的 `REQ_TIMEOUT`，既有链路行为一字不变（离线套件的
+# `tp.requests = SimpleNamespace(get=...)` 打的仍然是本模块的 `requests` 名）。
+
+
+def fetch_quote_fields(symbols: list[str], timeout: float = REQ_TIMEOUT) -> dict[str, list[str]]:
+    """`qt.gtimg.cn/q=<sym>` 批量现价，返回 `{symbol: 字段数组}`；一条都没有时抛 ProviderError。"""
+    # NO_PROXY=* 已在 main 侧设置，这里直连国内源
+    out: dict[str, list[str]] = {}
+    for i in range(0, len(symbols), 60):  # 腾讯单次建议 ≤60 个
+        chunk = symbols[i : i + 60]
+        r = requests.get(
+            "https://qt.gtimg.cn/q=" + ",".join(chunk),
+            timeout=timeout,
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+        r.raise_for_status()
+        text = r.content.decode("gbk", errors="ignore")
+        for line in text.split(";"):
+            line = line.strip()
+            if not line.startswith("v_"):
+                continue
+            head, _, payload = line.partition("=")
+            sym = head[2:]
+            fields = payload.strip().strip('"').split("~")
+            if len(fields) > 34:
+                out[sym] = fields
+    if not out:
+        raise ProviderError("tencent quote empty")
+    return out
+
+
+def fields_to_quote(source: str, type_: str, code: str, f: list[str]) -> dict:
+    """腾讯字段位 → 统一行情 dict（纯函数：实时区与主链共用同一张映射表）。"""
+    # 仅映射位置确定的字段（1 名称、3 现价、4 昨收、5 今开、6 成交量、30 时间、
+    # 31 涨跌、32 涨跌幅、33 最高、34 最低）；不确定的扩展字段不映射，避免展示错数据
+    return {
+        "type": type_,
+        "code": code,
+        "name": f[1],
+        "price": _num(f[3]),
+        "prevClose": _num(f[4]),
+        "open": _num(f[5]),
+        "volume": _num(f[6]),  # 手
+        "timestamp": _ts_iso(f[30]),  # CR9-7：统一 ISO
+        "change": _num(f[31]),
+        "changePct": _num(f[32]),
+        "high": _num(f[33]),
+        "low": _num(f[34]),
+        # CR9-6：备源也得带币种，否则降级一次就丢一次语义
+        "currency": CURRENCY_BY_TYPE.get(type_, "CNY"),
+        "source": source,
+    }
+
+
+def fetch_minute_payload(sym: str, timeout: float = REQ_TIMEOUT) -> tuple[str, list[str]]:
+    """`ifzq.gtimg.cn/appstock/app/minute/query` 的当日分时原始体，返回 `(归属日, 行)`。"""
+    r = requests.get(
+        "https://ifzq.gtimg.cn/appstock/app/minute/query",
+        params={"code": sym},
+        timeout=timeout,
+        headers={"User-Agent": "Mozilla/5.0"},
+    )
+    r.raise_for_status()
+    payload = ((r.json() or {}).get("data") or {}).get(sym) or {}
+    rows = ((payload.get("data") or {}).get("data")) or []
+    day = str((payload.get("data") or {}).get("date") or "")
+    return day, rows
+
+
+def minute_rows_to_candles(day: str, rows: list[str]) -> list[dict]:
+    """分时行 → 统一 candles；累计量/额 diff 成增量（口径见 `_minute_kline` 的 docstring）。"""
+    parsed: list[tuple[str, float, float, float]] = []
+    for s in rows:
+        parts = s.split()
+        if len(parts) < 3:
+            continue
+        t, price, cum_vol = parts[0], _num(parts[1]), _num(parts[2])
+        cum_amt = _num(parts[3]) if len(parts) > 3 else None
+        if price is None or cum_vol is None:
+            continue
+        hhmm = t[:4].zfill(4)
+        parsed.append((f"{day[:4]}-{day[4:6]}-{day[6:8]} {hhmm[:2]}:{hhmm[2:]}", price, cum_vol, cum_amt or 0.0))
+
+    candles: list[dict] = []
+    prev_vol = 0.0
+    for i, (dt, price, cum_vol, cum_amt) in enumerate(parsed):
+        # 累计 → 增量（首行原样；负值 = 上游数据异常，截 0 防御）
+        vol = max(cum_vol - prev_vol, 0.0)
+        prev_vol = cum_vol
+        candles.append(
+            {
+                "date": dt,
+                "open": price,
+                "close": price,
+                "high": price,
+                "low": price,
+                "volume": vol,
+                "amount": max(cum_amt - (parsed[i - 1][3] if i > 0 else 0.0), 0.0),
+            }
+        )
+    return candles
+
+
 class TencentProvider(BaseProvider):
     source = "tencent"
 
     # ---------- 实时行情 ----------
 
     def _fetch_quotes_raw(self, symbols: list[str]) -> dict[str, list[str]]:
-        # NO_PROXY=* 已在 main 侧设置，这里直连国内源
-        out: dict[str, list[str]] = {}
-        for i in range(0, len(symbols), 60):  # 腾讯单次建议 ≤60 个
-            chunk = symbols[i : i + 60]
-            r = requests.get(
-                "https://qt.gtimg.cn/q=" + ",".join(chunk),
-                timeout=REQ_TIMEOUT,
-                headers={"User-Agent": "Mozilla/5.0"},
-            )
-            r.raise_for_status()
-            text = r.content.decode("gbk", errors="ignore")
-            for line in text.split(";"):
-                line = line.strip()
-                if not line.startswith("v_"):
-                    continue
-                head, _, payload = line.partition("=")
-                sym = head[2:]
-                fields = payload.strip().strip('"').split("~")
-                if len(fields) > 34:
-                    out[sym] = fields
-        if not out:
-            raise ProviderError("tencent quote empty")
-        return out
+        return fetch_quote_fields(symbols)
 
     def _fields_to_quote(self, type_: str, code: str, f: list[str]) -> dict:
-        # 仅映射位置确定的字段（1 名称、3 现价、4 昨收、5 今开、6 成交量、30 时间、
-        # 31 涨跌、32 涨跌幅、33 最高、34 最低）；不确定的扩展字段不映射，避免展示错数据
-        return {
-            "type": type_,
-            "code": code,
-            "name": f[1],
-            "price": _num(f[3]),
-            "prevClose": _num(f[4]),
-            "open": _num(f[5]),
-            "volume": _num(f[6]),  # 手
-            "timestamp": _ts_iso(f[30]),  # CR9-7：统一 ISO
-            "change": _num(f[31]),
-            "changePct": _num(f[32]),
-            "high": _num(f[33]),
-            "low": _num(f[34]),
-            # CR9-6：备源也得带币种，否则降级一次就丢一次语义
-            "currency": CURRENCY_BY_TYPE.get(type_, "CNY"),
-            "source": self.source,
-        }
+        return fields_to_quote(self.source, type_, code, f)
 
     def get_quote(self, type_: str, code: str) -> dict:
         sym = _quote_symbol(type_, code)
@@ -326,50 +395,14 @@ class TencentProvider(BaseProvider):
         if sym is None:
             raise ProviderNotSupported(f"tencent does not support code: {code}")
 
-        r = requests.get(
-            "https://ifzq.gtimg.cn/appstock/app/minute/query",
-            params={"code": sym},
-            timeout=REQ_TIMEOUT,
-            headers={"User-Agent": "Mozilla/5.0"},
-        )
-        r.raise_for_status()
-        payload = ((r.json() or {}).get("data") or {}).get(sym) or {}
-        rows = ((payload.get("data") or {}).get("data")) or []
-        day = str((payload.get("data") or {}).get("date") or "")
+        day, rows = fetch_minute_payload(sym)
         if not rows or len(day) != 8:
             raise ProviderError(f"tencent minute empty: {code}")
 
-        parsed: list[tuple[str, float, float, float]] = []
-        for s in rows:
-            parts = s.split()
-            if len(parts) < 3:
-                continue
-            t, price, cum_vol = parts[0], _num(parts[1]), _num(parts[2])
-            cum_amt = _num(parts[3]) if len(parts) > 3 else None
-            if price is None or cum_vol is None:
-                continue
-            hhmm = t[:4].zfill(4)
-            parsed.append((f"{day[:4]}-{day[4:6]}-{day[6:8]} {hhmm[:2]}:{hhmm[2:]}", price, cum_vol, cum_amt or 0.0))
-        if not parsed:
+        candles = minute_rows_to_candles(day, rows)
+        if not candles:
             raise ProviderError(f"tencent minute unparsable: {code}")
 
-        candles = []
-        prev_vol = 0.0
-        for i, (dt, price, cum_vol, cum_amt) in enumerate(parsed):
-            # 累计 → 增量（首行原样；负值 = 上游数据异常，截 0 防御）
-            vol = max(cum_vol - prev_vol, 0.0)
-            prev_vol = cum_vol
-            candles.append(
-                {
-                    "date": dt,
-                    "open": price,
-                    "close": price,
-                    "high": price,
-                    "low": price,
-                    "volume": vol,
-                    "amount": max(cum_amt - (parsed[i - 1][3] if i > 0 else 0.0), 0.0),
-                }
-            )
         return {
             "type": type_,
             "code": code,
