@@ -122,8 +122,8 @@ export default async function ProductPage({
   const phases = kline && kline.candles.length > 1 ? detectPhases(kline.candles) : [];
 
   // 事件标注（R11 轻量归因）
-  // CR-10：只保留"阶段转折点 + 大波动日"的事件（此前全量按日期返回，
-  // pickEventDates 未接线）。无 K 线时保持全量（降级路径）。
+  // CR-10：只保留"阶段转折点 + 大波动日"的事件（此前全量按日期返回）。
+  // 收窄由下方 pickEventDates+narrowByDates 完成；无 K 线时保持全量（降级路径）。
   const rawEvents =
     eventsRes.status === "fulfilled"
       ? eventsRes.value
