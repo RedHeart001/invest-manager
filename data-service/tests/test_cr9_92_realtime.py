@@ -215,10 +215,20 @@ def test_consensus() -> None:
           r["verifyVerdict"] == "agree" and r["crossChecked"] is True and r["consensus"]["diffPct"] is not None,
           str(r["consensus"]))
 
-    make_fake_get(price=1250.0, sina_price=1258.0)  # 偏差 0.64%（1256 只有 0.48%，压不过 0.5% 阈值）
+    make_fake_get(price=1250.0, sina_price=1258.0)  # 偏差 0.64%（8/1250，1256 只有 0.48%，压不过 0.5% 阈值）
     r = rt.aggregate("stock", "600519")
-    check("③偏差 > 0.5% ⇒ `diverged`，note 点名两家与偏差值（屏上不猜）",
-          r["verifyVerdict"] == "diverged" and "双源偏差" in (r["note"] or ""), str(r["note"]))
+    note = r["note"] or ""
+    warn = next((s for s in note.split("；") if s.startswith("⚠")), "")
+    check("③偏差 > 0.5% ⇒ `diverged`，屏上那一句点名两家的来源名",
+          r["verifyVerdict"] == "diverged" and "tencent" in warn and "sina" in warn, note)
+    # 这一枚是 10-13 下午复核补的：`note` 在 diverged 分支被屏上直接显示（`RealtimeStrip.tsx:109`），
+    # 而此前那句里带着「阈值 0.5%，暂定值」＋偏差百分比＝三样面向开发者的数上了用户屏。
+    check("③比率／阈值／暂定值只住机器可读位 ⇒ 屏上这一句里一个数字都不许出现",
+          warn != "" and "阈值" not in warn and "暂定" not in warn and "%" not in warn
+          and not any(c.isdigit() for c in warn), warn)
+    check("③同一轮的数在机器可读位仍读得到（阈值 0.5／provisional true／偏差 0.64）",
+          r["consensus"]["thresholdPct"] == 0.5 and r["consensus"]["provisional"] is True
+          and r["consensus"]["diffPct"] == 0.64, str(r["consensus"]))
 
     make_fake_get()
     r = rt.aggregate("fund", "510300")  # 只有腾讯一条腿

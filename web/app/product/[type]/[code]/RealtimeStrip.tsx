@@ -106,7 +106,7 @@ export default function RealtimeStrip({
   const path = sparkPath(data.intraday?.points ?? [], SPARK_W, SPARK_H);
   const clock = quoteClockText(type, data.price?.timestamp);
   const verdictText =
-    verdict === "diverged" ? (data.note ?? "双源偏差超阈值") : verdict === "agree" ? REALTIME_TEXT.agree : REALTIME_TEXT.noSecondSource;
+    verdict === "diverged" ? (data.note ?? REALTIME_TEXT.diverged) : verdict === "agree" ? REALTIME_TEXT.agree : REALTIME_TEXT.noSecondSource;
 
   return (
     <section

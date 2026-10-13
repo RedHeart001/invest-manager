@@ -78,6 +78,9 @@ export const REALTIME_TEXT = {
   stale: (hhmmss: string) => `已停在 ${hhmmss} 的最后已知值（最近一次刷新没成功）`,
   agree: "双源一致",
   noSecondSource: "无双源可比对",
+  /** 这句此前住在组件里（`RealtimeStrip.tsx:109` 的 `??` 右半）＝这张表的第二处硬编码文案。
+   *  搬进来不是新字面——它是 note 缺失时的兜底，字面一字未改（10-13 下午复核）。 */
+  diverged: "双源偏差超阈值",
 };
 
 /** 第 N 跳该问哪几条腿（tick 从 0 起，0 是进页面的那一次）。 */

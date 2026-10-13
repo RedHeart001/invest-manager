@@ -217,11 +217,26 @@ describe("迷你折线（不引 ECharts 的那一条）", () => {
 });
 
 describe("屏上字面（归主人定：改字要改这张表，这一枚会点名是哪一句）", () => {
-  it("五串字面锁住形状，实时条不留任何第二处硬编码文案", () => {
+  it("六串字面锁住形状，实时条不留任何第二处硬编码文案", () => {
     expect(REALTIME_TEXT.heading).toBe("当日实时");
     expect(REALTIME_TEXT.agree).toBe("双源一致");
     expect(REALTIME_TEXT.noSecondSource).toBe("无双源可比对");
+    expect(REALTIME_TEXT.diverged).toBe("双源偏差超阈值");
     expect(REALTIME_TEXT.lastUpdate("09:31:02")).toBe("最后更新 09:31:02（北京）");
     expect(REALTIME_TEXT.stale("09:31:02")).toBe("已停在 09:31:02 的最后已知值（最近一次刷新没成功）");
+  });
+
+  // 10-13 下午复核补的那一枚：这一句此前会带着「阈值 0.5%，暂定值」＋偏差百分比上屏，
+  // 因为组件的 diverged 分支直接把 ds 的 `note` 当文案用（`RealtimeStrip.tsx:109`）。
+  // 数改住 `consensus.{diffPct,thresholdPct,provisional}` 之后，这里钉住"表里这几串不许有数字"——
+  // ⚠ 它钉的是这张表，不是 ds 那句 note（note 那一半由 `test_cr9_92_realtime.py` 的 ③ 段钉）。
+  it("这张表的判定文案不许含数字／%／'暂定'（比率与阈值取值只住机器可读位，10-05 那条纪律）", () => {
+    // 禁的是"数"，不是"阈值"这个词——`diverged` 那句既有字面「双源偏差超阈值」本来就该绿。
+    // 牙齿：谁把 `0.5%`／`暂定值` 再拼回屏上文案，这一枚点名是哪一句。
+    for (const key of ["heading", "agree", "noSecondSource", "diverged"] as const) {
+      const text = REALTIME_TEXT[key];
+      expect(`${key}:${text}`).not.match(/[0-9０-９]/);
+      expect(`${key}:${text}`).not.match(/%|暂定/);
+    }
   });
 });

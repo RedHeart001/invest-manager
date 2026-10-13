@@ -261,10 +261,10 @@ def aggregate(type_: str, code: str, parts: tuple[str, ...] = PARTS) -> dict:
         verdict = "diverged" if diff_pct > CONSENSUS_THRESHOLD_PCT else "agree"
         cross_checked = True
         if verdict == "diverged":
-            notes.append(
-                f"⚠ 双源偏差 {diff_pct:.2f}%（{prices[0]['source']} vs {prices[1]['source']}，"
-                f"阈值 {CONSENSUS_THRESHOLD_PCT}%，暂定值）"
-            )
+            # 这一句会**原样上屏**（`RealtimeStrip.tsx:109` 的 diverged 分支显示 `note`），所以它只说"谁和谁"：
+            # 偏差百分比／阈值／"暂定值"三样都住在 `consensus.{diffPct,thresholdPct,provisional}`——
+            # 面向开发者的比率不进用户可见文案（10-05 那条纪律；:52-54 的注释此前只说了没说）。
+            notes.append(f"⚠ 双源价格不一致（{prices[0]['source']} vs {prices[1]['source']}）")
     else:
         verdict = "no_second_source"
         cross_checked = False
