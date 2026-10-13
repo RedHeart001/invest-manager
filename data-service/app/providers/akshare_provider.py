@@ -78,6 +78,13 @@ EM_LIMITER = get_limiter("eastmoney")
 # 把"不占东财桶"这件事悄悄改掉（第一步刻意零行为变化）。
 AK_OBS_LIMITER = get_limiter("akshare-obs")
 
+# CR9-97（#66 甲）：这一族上闸之后，取额度的等待上限**不用 `acquire()` 的默认 20s**。
+# 理由＝web 侧 BFF 的预算是 15s（CR9-88 §B 契约），20s 的等待本身就比调用方的耐心长
+# （＝账上那条尚未立案的 P1「`acquire()` 20s vs BFF 15s 倒挂」的同一形）。按 PROFILES 的
+# `min_interval=1.0` 算，正常最坏等待 ≈1s，5s 已经留了 5 倍余量；真撞到 5s 就说明这一族
+# 正在被谁打成 runaway，那时候**拒**比让详情页挂着更符合 R10。
+AK_ACQUIRE_TIMEOUT_S = 5.0
+
 
 def _em_request(fn):
     """东财按需请求统一入口：限速排队 + 成功/失败回报（连续失败触发熔断）。"""
@@ -114,19 +121,36 @@ def _em_ak_request(fn, seconds: float = 30.0, name: str = "akshare"):
 
 
 def _ak_request(fn, seconds: float = 30.0, name: str = "akshare"):
-    """非东财域名族的 akshare 调用：仅加看门狗超时（不占东财额度）。
+    """非东财域名族的 akshare 调用：看门狗超时 ＋ **本族自己的闸**（CR9-97／#66 甲）。
 
-    #27 第一步＝**纯观测**（10-03）：这条路上每一次调用按 `name` 记一笔进
-    `get_limiter("akshare-obs")`。之所以只计数不拦截，是因为这条红线破口今天**没有任何
-    可读计数面**——想判断"该不该给它补桶、补多大"，先得有真实次数。刻意**不调 `acquire()`**：
-    观测不得改变行为（含"到限就拒"）。域名归属由计数与名字自证，不在注释里猜。
+    沿革（两段都要读，否则会把这一枚当成"新加的限流"）：
+    - #27 第一步（10-03）刻意**只 `observe()` 不拦截**——当时"该不该上闸、闸开多大"没有任何
+      可读计数面，先攒数；`PROFILES["akshare-obs"]` 的参数因此写了也不生效。
+    - 第二步的前置在 10-13 兑现（落盘 7 日窗：`seenTotal` 42／其中打东财域名 22 次），
+      数值据此定（`min_interval=1.0`／`burst=4`／`rate_per_min=30`，**不设熔断**）⇒ 这一版
+      把调用点换成 `observe()` ＋ `acquire()`。
+
+    两个刻意保留的形状：
+    1. **仍然不占东财桶**（红线不变：两枚实例不同族）。上闸不是为了省东财额度，而是因为这条路
+       里有 22 次/周实际打的是东财域名，而此前那部分压力完全不记账——撞桶被拒的是别人。
+    2. **`observe()` 不撤**。`acquire()` 只加 granted/denied，不加 `seen[name]`；东财族就是因为
+       只 acquire 不 observe，`seen` 恒空 ⇒ 47 发那种读数只能归因到"量级"、说不出"谁打的"。
+       逐函数维度是下一次调参的唯一依据，不许在上闸这一步丢掉。
     """
     from ..utils.timeout import run_with_timeout
 
     AK_OBS_LIMITER.observe(name)
-    value, err = run_with_timeout(fn, seconds, name)
+    if not AK_OBS_LIMITER.acquire(timeout=AK_ACQUIRE_TIMEOUT_S):
+        raise ProviderError(f"{name} rate-limited (akshare family gate)")
+    try:
+        value, err = run_with_timeout(fn, seconds, name)
+    except Exception:
+        AK_OBS_LIMITER.on_failure()
+        raise
     if err is not None:
+        AK_OBS_LIMITER.on_failure()
         raise ProviderError(f"{name} failed: {err}") from err
+    AK_OBS_LIMITER.on_success()
     return value
 
 

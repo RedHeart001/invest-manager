@@ -122,11 +122,16 @@ def test_limiter_profile_single_source() -> None:
 
 
 def test_akshare_out_of_bucket_observation() -> None:
-    """#27 第一步：桶外那条 akshare 路只**数数**，一条都不拦。
+    """#27 第一步：桶外那条 akshare 路的**计数面**。
 
     红线是「OPT-3 不得动东财桶」，而 `_ak_request` 里若干处实际打的仍是 eastmoney 域名。
     补限流之前先得有次数可看 ⇒ 观测族 `akshare-obs`。C34 成对：计数长在真实调用点上
-    ⇔ 观测不改行为（不走 `acquire`、不进冷却、不与东财族同实例）⇔ 老族参数一个没动。
+    ⇔ `observe()` 本身不改行为（不走 `acquire`、不进冷却、不与东财族同实例）⇔ 老族参数一个没动。
+
+    ⚠️ **本组的口径在 CR9-97（#66 甲）之后收窄了一半**：原文写的是"只数数、一条都不拦"，
+    而 `_ak_request` 现在**确实会拦**（`observe()` ＋ `acquire()`，参数见 PROFILES）。
+    所以本组从此只证两件仍然为真的事——`observe()` 这个**方法**纯计数不拦，以及两族仍是
+    不同实例／东财族参数没被挪动；"闸会不会咬、咬到什么程度"归下面那一组（`cr9_97`）。
     """
     from app.providers import akshare_provider as akp
     from app.utils import limiter
@@ -159,7 +164,8 @@ def test_akshare_out_of_bucket_observation() -> None:
     seen_before = akp.AK_OBS_LIMITER.state()["seenTotal"]
     got = akp._ak_request(lambda: "ok", 5.0, name)
     st2 = akp.AK_OBS_LIMITER.state()
-    check("#27：`_ak_request` 记了一笔且返回值原样通过（观测不改行为）",
+    check("#27：`_ak_request` 记了一笔且返回值原样通过（CR9-97 之后它还 `acquire`，"
+          "但成功路径的返回值与逐函数计数都不变）",
           got == "ok" and st2["seenTotal"] == seen_before + 1
           and akp.AK_OBS_LIMITER._seen.get(name) == 1, str(st2))
     try:
@@ -177,6 +183,102 @@ def test_akshare_out_of_bucket_observation() -> None:
         obs._seen.pop(k, None)
     check("#27：探针样本已清（观测位不得把自己的计数留在别人读到的地方）",
           probe not in obs.state()["seen"] and name not in obs.state()["seen"], str(obs.state()))
+
+
+# ---------- CR9-97（#66 甲）：`akshare-obs` 从"只数数"变成真闸 ----------
+
+
+def test_akshare_family_gate_cr9_97() -> None:
+    """#66 甲：数值已定（7 日窗 `seenTotal` 42／其中打东财域名 22 次）⇒ 调用点从 `observe()`
+    升成 `observe()`＋`acquire()`。四件事必须一起证，缺一件这枚闸就是装饰品：
+
+    ① 它**会咬**（构造一个必然等不到的额度 ⇒ 拒绝＋ProviderError）；
+    ② 🔁 按 PROFILES 那套真参数**日常咬不到**（同一形放宽后两发都过 ⇒ ①不是恒真桩）；
+    ③ 上闸**没丢掉逐函数维度**（`seen[name]` 仍在涨——东财族 `seen` 恒空、47 发只能归因到
+      "量级"就是先例，不许在这一步重演）；
+    ④ 不连坐＋不动东财桶：这一族**没有熔断**（连续失败后仍能拿到额度），且整组跑完
+      `eastmoney` 的 granted/denied 一个都没变。
+    """
+    from app.providers import akshare_provider as akp
+    from app.utils import limiter
+
+    obs = limiter.get_limiter("akshare-obs")
+    em = limiter.get_limiter("eastmoney")
+    declared = limiter.PROFILES["akshare-obs"]
+    check("CR9-97：PROFILES 里这一族已是真参数（三个速率位不再是「写了也不生效」的极大值）",
+          declared["min_interval"] == 1.0 and declared["burst"] == 4
+          and declared["rate_per_min"] == 30 and declared["failure_threshold"] > 10**6
+          and declared["cooldown_max"] == 0.0, str(declared))
+    check("CR9-97：参数逐项等于实例上的值（调参仍只有 PROFILES 一处，CR9-18 同条纪律）",
+          {k: getattr(obs, k) for k in declared} == declared, str(obs.state()))
+    check("CR9-97：取额度的等待上限＝5s，不是 `acquire()` 的默认 20s（BFF 预算 15s，#63 那条倒挂同形）",
+          akp.AK_ACQUIRE_TIMEOUT_S == 5.0, str(akp.AK_ACQUIRE_TIMEOUT_S))
+
+    name = "ak.__cr9_97_gate"
+    saved = (obs.min_interval, obs.burst, obs.rate_per_min, akp.AK_ACQUIRE_TIMEOUT_S)
+    seen0 = obs.state()["seenTotal"]
+    em0 = em.state()
+    try:
+        # ① 会咬：min_interval 抬到 5s、突发容量收到 0、等待上限压到 0.05s ⇒ 第二发必等不到。
+        #    滑窗与"上一发时刻"要先清：上一组 #27 真调过两次 `_ak_request`，留着它们的话
+        #    `burst=0` 会让**第一发**就被判超突发 ⇒ 红在错的地方（10-13 23:5x 首跑实测）。
+        obs._recent.clear()
+        obs._last_ts = 0.0
+        obs.min_interval, obs.burst, obs.rate_per_min = 5.0, 0, 10**9
+        akp.AK_ACQUIRE_TIMEOUT_S = 0.05
+        denied0 = obs.state()["denied"]
+        first = akp._ak_request(lambda: "ok", 5.0, name)
+        try:
+            akp._ak_request(lambda: "ok", 5.0, name)
+            raised = None
+        except akp.ProviderError as e:
+            raised = str(e)
+        st = obs.state()
+        check("CR9-97①：撞到闸 ⇒ 第二发被拒并抛 ProviderError，文案点名是**本族的闸**不是东财冷却",
+              first == "ok" and raised is not None and "rate-limited" in raised
+              and "akshare family gate" in raised, str(raised))
+        check("CR9-97①：拒绝在读数面留痕（denied +1）⇒ 撞闸这件事一条 curl 就读得到，不靠日志",
+              st["denied"] == denied0 + 1, f'{denied0} → {st["denied"]}')
+        check("CR9-97③：上闸之后 `seen[name]` 仍逐函数在记，**被拒那一发也记**（谁在撞闸答得出）",
+              obs._seen.get(name) == 2 and obs.state()["seenTotal"] == seen0 + 2,
+              f'seen={obs._seen.get(name)} delta={obs.state()["seenTotal"] - seen0}')
+        em1 = em.state()
+        check("CR9-97④：整组跑完东财桶 granted/denied 一个都没动（红线：两族仍是两个实例）",
+              (em1["granted"], em1["denied"]) == (em0["granted"], em0["denied"]),
+              f'{(em0["granted"], em0["denied"])} → {(em1["granted"], em1["denied"])}')
+    finally:
+        obs.min_interval, obs.burst, obs.rate_per_min = saved[0], saved[1], saved[2]
+        akp.AK_ACQUIRE_TIMEOUT_S = saved[3]
+        obs._recent.clear()
+
+    # ②🔁 真参数下同一形（连打两发）都过 ⇒ 上面那枚红不是恒真桩；burst=4 的突发容量内
+    #    豁免 min_interval，所以"日常那 3–4 发一次都不等"这句是跑出来的、不是算出来的
+    loose = f"{name}-loose"
+    got = [akp._ak_request(lambda: "ok", 5.0, loose) for _ in range(2)]
+    check("CR9-97②🔁：按真参数连打两发都通过、且不进冷却（日常量级咬不到 ⇒ 闸只治 runaway）",
+          got == ["ok", "ok"] and obs.in_cooldown() is False and obs.state()["cooldown"] == 0.0,
+          str(got))
+
+    # ④ 不连坐：连失败 5 次也不进冷却，下一发照样放行
+    fail_name = f"{name}-fail"
+    fails = 0
+    for _ in range(5):
+        try:
+            akp._ak_request(lambda: (_ for _ in ()).throw(RuntimeError("boom")), 5.0, fail_name)
+        except akp.ProviderError:
+            fails += 1
+    after = obs.state()
+    through = akp._ak_request(lambda: "still-through", 5.0, fail_name)
+    check("CR9-97④：连失败 5 次也不进冷却、下一发照样放行（`failure_threshold` 刻意不设＝不连坐，"
+          "CR7-7 那条「stock 熔断连坐 hk」的教训）",
+          fails == 5 and obs.in_cooldown() is False and after["cooldown"] == 0.0
+          and through == "still-through", f"fails={fails} cooldown={after['cooldown']}")
+
+    for k in (name, loose, fail_name):
+        obs._seen.pop(k, None)
+    obs._recent.clear()
+    check("CR9-97：探针样本已清（不许把自己的计数留在别人读到的地方）",
+          not any(str(k).startswith("ak.__cr9_97") for k in obs._seen), str(sorted(obs._seen)))
 
 
 # ---------- 列表来源元信息（CR9-31） ----------
@@ -1395,6 +1497,7 @@ if __name__ == "__main__":
         test_limiter()
         test_limiter_profile_single_source()
         test_akshare_out_of_bucket_observation()
+        test_akshare_family_gate_cr9_97()
         test_limiter_counters_survive_a_restart()
         test_limiter_dumps_from_the_event_path()
         test_limiter_window_rolls_up_the_days()
