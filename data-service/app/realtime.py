@@ -17,11 +17,28 @@
 1a 与 1b 的分工（`PLAN.md:176`）：本文件里**没有任何"测出来的数"**——
 TTL、并发 N、共识阈值三样都属于 1b，欠的是前置实测 ②③④（10-13 A 窗）。
 ⇒ 本端点**不缓存**：浏览器每 10s 一跳就是每 10s 真出网一次，这正是格三要靠独立观测族攒计数的原因。
+
+**1b 已落（CR9-96，10-13 23:2x 主人的字＝「按照你推荐的方案，执行A桶B桶」）**，上面那段"不缓存"
+自此是 1a 的历史态。三样各自的处置与来路（没有一个是新造出来的数）：
+
+- **TTL**＝现价 5s／分时 60s（`PRICE_TTL_S`／`INTRADAY_TTL_S`）。5s 的来路＝系统里最细的那一档
+  节奏（东财族 `min_interval=5.0`；#51 甲 定档"新鲜度上限由自家闸给出＝5s 一跳"）；60s 的来路＝
+  `PLAN.md:172` 定的分时节奏本身。⇒ 单枚标签每 10s 一跳**仍会真出网**（10s > 5s），TTL 收的是
+  并发消费者那一半（多标签／BFF 重试／同键重叠），不是把 10s 那一跳吃掉。
+- **并发 N**＝本轮**不设全局上限**，改为落一枚峰值读数（`cache.inflightMaxSeen`）＋同键单飞
+  （重叠的第二发拿旧值，不放大成第二发上游）。为什么不设：N 的实测依据至今不存在
+  （`realtime-obs` 累计 seenTotal 十几发；格一那次采样被自己的间隔顶住＝有效负结果），
+  而一个没测过的上限最坏表现是"实时条静默变 degraded"——正是 #46 那一族空壳的形状。
+- **共识阈值**＝**维持 0.5% 不变**。10-13 两次读数都不构成改它的依据：A 窗 A2 4/4 `agree`、
+  分歧率 0.0（样本只剩 stock／fund 两类，bond 两发 502），B 窗那一跑是降级档（桶被自己打满）。
+  `consensus.basis` 里把这句证据写清，`provisional` 仍为 `true`（还没与实时区源集交叉核对过）。
 """
 
 from __future__ import annotations
 
+import os
 import re
+import threading
 import time
 
 import requests
@@ -57,6 +74,82 @@ CONSENSUS_THRESHOLD_PCT = 0.5
 # 独立观测族（10-12 三条改判的第 (二) 条）：腾讯侧在 `PROFILES` 里没有族闸，
 # 格三那句 `N×(60/TTL)≤12` 算的是错对象 ⇒ N 只能靠这一族攒真计数。只 observe 不 acquire。
 OBS_FAMILY = "realtime-obs"
+
+# ---- 1b（CR9-96）：两条节奏各自的 TTL。来路见文件头，两个数都不是新造的 ----
+PRICE_TTL_S = 5.0
+INTRADAY_TTL_S = 60.0
+PART_TTL_S: dict[str, float] = {"price": PRICE_TTL_S, "intraday": INTRADAY_TTL_S}
+
+# 进程内缓存：`{key: (monotonic 时刻, 那一 part 的载荷)}`。刻意**不落盘**——它治的是
+# "同一秒里几个消费者要同一份数"，跨重启没有价值，而落盘就会引出"陈旧到什么时候算数"
+# 这个新问题（同族教训＝#54 的备份状态位、#68 的同步 marker 都必须是 date-keyed 才敢落盘）。
+_CACHE: dict[str, tuple[float, dict]] = {}
+_INFLIGHT: dict[str, int] = {}
+_INFLIGHT_MAX_SEEN = 0
+_cache_lock = threading.Lock()
+
+
+def _ttl_s(kind: str) -> float:
+    """这一档的 TTL；`REALTIME_TTL_S` 可整族覆盖（`=0` ⇒ 关缓存）。
+
+    为什么必须有这个口子：离线套件要在同一个进程里连着调 `aggregate()` 几十次、每次换一套
+    桩响应，缓存一开就会把第二次起的所有断言变成"读上一枚桩的旧值"＝**假绿**。
+    与 `SYNC_STATE_FILE`／`HOTSPOT_STATE_FILE` 同一条纪律（隔离本身是交付物的一部分）。
+    """
+    raw = os.environ.get("REALTIME_TTL_S", "")
+    if raw:
+        try:
+            return max(0.0, float(raw))
+        except ValueError:
+            pass
+    return PART_TTL_S.get(kind, 0.0)
+
+
+def _clear_cache() -> None:
+    """清空缓存与那枚峰值读数（离线套件逐组自清；生产侧不需要——TTL 自己会让它过期）。"""
+    global _INFLIGHT_MAX_SEEN
+    with _cache_lock:
+        _CACHE.clear()
+        _INFLIGHT.clear()
+        _INFLIGHT_MAX_SEEN = 0
+
+
+def _part_get(kind: str, type_: str, code: str, fetch) -> tuple[dict, bool, float]:
+    """取一条 part 的载荷：命中交旧的、没命中才真跑腿。返回 `(载荷, 是否命中, 年龄秒)`。
+
+    同键重叠的第二发**不放大成第二发上游**：拿过期但年龄有界（≤ 腿数 × `LEG_TIMEOUT_S`）的
+    旧值，并在 `cache.inflightMaxSeen` 上记一笔——那一枚就是"并发 N 到底有多大"的读数来源。
+    """
+    global _INFLIGHT_MAX_SEEN
+    key = f"{kind}:{type_}:{code}"
+    ttl = _ttl_s(kind)
+    now = time.monotonic()
+    with _cache_lock:
+        ent = _CACHE.get(key)
+        overlapping = _INFLIGHT.get(key, 0) + 1
+        if overlapping > _INFLIGHT_MAX_SEEN:
+            _INFLIGHT_MAX_SEEN = overlapping
+    if ent is not None and ttl > 0.0:
+        age = now - ent[0]
+        # 两种命中：还在 TTL 内 ／ 已过期但同键有一发在飞（拿旧值，不放大成第二发上游）
+        if age < ttl or overlapping > 1:
+            return ent[1], True, round(age, 1)
+    with _cache_lock:
+        _INFLIGHT[key] = _INFLIGHT.get(key, 0) + 1
+    try:
+        payload = fetch()
+    finally:
+        with _cache_lock:
+            left = _INFLIGHT.get(key, 1) - 1
+            if left > 0:
+                _INFLIGHT[key] = left
+            else:
+                _INFLIGHT.pop(key, None)
+    if ttl > 0.0:
+        with _cache_lock:
+            _CACHE[key] = (time.monotonic(), payload)
+    return payload, False, 0.0
+
 
 # 两条节奏（`PLAN.md:172`＝现价 10s、分时 60s）落到请求面上就是这一位：一次调用可以只跑现价。
 PARTS: tuple[str, ...] = ("price", "intraday")
@@ -232,27 +325,68 @@ def aggregate(type_: str, code: str, parts: tuple[str, ...] = PARTS) -> dict:
     today = beijing_today()
     sources: list[dict] = []
     notes: list[str] = []
+    # 1b（CR9-96）：逐 part 的命中态与年龄。**没问的那条 part 不进这两个字典**——
+    # 与 `hasTodayData` 的三态同一条纪律：「这一轮没问」不许被读成「没命中」。
+    hits: dict[str, bool] = {}
+    ages: dict[str, float] = {}
+    observed: list[str] = []
 
     prices: list[dict] = []
     if "price" in wanted:
-        for src in legs["price"]:
-            entry, value = _run_leg("price", src, type_, code)
-            sources.append(entry)
-            if isinstance(value, dict):
-                prices.append(value)
-            elif entry["detail"]:
-                notes.append(f"{src} 现价腿不可用（{entry['detail']}）")
+        def _fetch_price() -> dict:
+            ents: list[dict] = []
+            vals: list[dict] = []
+            ns: list[str] = []
+            for src in legs["price"]:
+                entry, value = _run_leg("price", src, type_, code)
+                ents.append(entry)
+                if isinstance(value, dict):
+                    vals.append(value)
+                elif entry["detail"]:
+                    ns.append(f"{src} 现价腿不可用（{entry['detail']}）")
+            return {
+                "sources": ents,
+                "prices": vals,
+                "notes": ns,
+                "observedAt": beijing_now().strftime("%Y-%m-%dT%H:%M:%S"),
+            }
+
+        payload, hit, age = _part_get("price", type_, code, _fetch_price)
+        hits["price"], ages["price"] = hit, age
+        sources.extend({**e, "fromCache": hit} for e in payload["sources"])
+        prices.extend(payload["prices"])
+        notes.extend(payload["notes"])
+        observed.append(payload["observedAt"])
 
     intraday_date: str | None = None
     candles: list[dict] = []
     if "intraday" in wanted:
-        for src in legs["intraday"]:
-            entry, value = _run_leg("intraday", src, type_, code)
-            sources.append(entry)
-            if isinstance(value, tuple):
-                intraday_date, candles = value[0], value[1]
-            elif entry["detail"]:
-                notes.append(f"{src} 分时腿不可用（{entry['detail']}）")
+        def _fetch_intraday() -> dict:
+            ents: list[dict] = []
+            ns: list[str] = []
+            date: str | None = None
+            rows: list[dict] = []
+            for src in legs["intraday"]:
+                entry, value = _run_leg("intraday", src, type_, code)
+                ents.append(entry)
+                if isinstance(value, tuple):
+                    date, rows = value[0], value[1]
+                elif entry["detail"]:
+                    ns.append(f"{src} 分时腿不可用（{entry['detail']}）")
+            return {
+                "sources": ents,
+                "date": date,
+                "candles": rows,
+                "notes": ns,
+                "observedAt": beijing_now().strftime("%Y-%m-%dT%H:%M:%S"),
+            }
+
+        payload, hit, age = _part_get("intraday", type_, code, _fetch_intraday)
+        hits["intraday"], ages["intraday"] = hit, age
+        sources.extend({**e, "fromCache": hit} for e in payload["sources"])
+        intraday_date, candles = payload["date"], payload["candles"]
+        notes.extend(payload["notes"])
+        observed.append(payload["observedAt"])
 
     # 共识维（定案 (a)＋(e)：做不到两源的类别必须显式说"未交叉核对"，不许显示成"已核对"）
     diff_pct: float | None = None
@@ -310,7 +444,10 @@ def aggregate(type_: str, code: str, parts: tuple[str, ...] = PARTS) -> dict:
     return {
         "type": type_,
         "code": code,
-        "observedAt": beijing_now().strftime("%Y-%m-%dT%H:%M:%S"),
+        # 1b：命中时这一位必须是**那一份数被观测到的时刻**，不是"响应拼出来的时刻"——
+        # 屏上「最后更新」读的就是它，写成 now 就等于把最多 5s（分时 60s）的旧数说成刚拿到。
+        # 两条 part 都问到时取**较旧**的那一个（保守：任何时候都不高估新鲜度）。
+        "observedAt": min(observed) if observed else beijing_now().strftime("%Y-%m-%dT%H:%M:%S"),
         "price": price,
         "intraday": (
             None
@@ -331,9 +468,23 @@ def aggregate(type_: str, code: str, parts: tuple[str, ...] = PARTS) -> dict:
             "diffPct": None if diff_pct is None else round(diff_pct, 3),
             "thresholdPct": CONSENSUS_THRESHOLD_PCT,
             "provisional": True,
-            "basis": "阈值＝沿用 `/quote/verified` 的 0.5% 预设；1b 欠的三样之一（#64 甲 之后"
-            "主链共识参考值仍未测到，"
-            "「取比实测更宽的一档」落不了地）",
+            "basis": "阈值＝沿用 `/quote/verified` 的 0.5% 预设；1b 三样之一，CR9-96 复核后**维持不变**"
+            "——10-13 两次读数都不构成改它的依据（A 窗 A2 4/4 `agree`、分歧率 0.0，样本只剩"
+            " stock／fund；B 窗那一跑是降级档）。`provisional` 仍为 true＝还没与实时区源集交叉核对过",
+        },
+        # 1b（CR9-96）的机器可读位：TTL 与命中态住在这里，**不进 note、不进屏**
+        # （10-05 那条纪律：面向开发者的比率／分母不塞进用户可见文案）。
+        "cache": {
+            "ttlS": {k: _ttl_s(k) for k in wanted},
+            "hit": hits,
+            "ageS": ages,
+            # 进程内计数、重启归零（与 limiter 那本账同一个限制）⇒ 读它是读"这一棵进程
+            # 从起来到现在，同一个键最多被几个调用方同时问过"，不是读历史。
+            "inflightMaxSeen": _INFLIGHT_MAX_SEEN,
+            "provisional": True,
+            "basis": "TTL 来路＝现价 5s（系统里最细的一档节奏：东财族 min_interval=5.0／#51 甲）"
+            "／分时 60s（PLAN.md:172 的节奏本身）；并发 N **本轮不设全局上限**，只落这一枚峰值读数"
+            "＋同键单飞——没测过的上限最坏表现是实时条静默变 degraded（#46 那一族的形状）",
         },
         # 判据①的机器可读位：屏上不该为此多一句话，但"为什么这一整块不见了"必须读得出
         "parts": list(wanted),

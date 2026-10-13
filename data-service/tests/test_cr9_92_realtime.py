@@ -22,6 +22,10 @@ import tempfile
 # 先于 app 的任何 import：观测族一 `observe()` 就可能落盘，落点必须是临时目录。
 _STATE = os.path.join(tempfile.mkdtemp(prefix="cr992-limiter-"), "limiter-state.json")
 os.environ["LIMITER_STATE_FILE"] = _STATE
+# CR9-96（1b）：本套件**必须**把 TTL 钉成 0（关缓存）。①–⑦ 每组都换一套桩响应再调
+# `aggregate()`，缓存一开就会从第二次起读上一枚桩的旧值＝**假绿**（与 `SYNC_STATE_FILE`／
+# `HOTSPOT_STATE_FILE` 同一条纪律：隔离本身是交付物的一部分）。缓存那一组自己临时把它打开。
+os.environ["REALTIME_TTL_S"] = "0"
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 for _s in (sys.stdout, sys.stderr):
@@ -361,6 +365,110 @@ def test_http_mapping() -> None:
           body["type"] == "stock" and "degraded" in body)
 
 
+# ---------- ⑧ 1b（CR9-96）：TTL 缓存、同键单飞、阈值维持 ----------
+
+def test_ttl_cache_single_flight() -> None:
+    """模块头把 TTL 钉成 0（关缓存）⇒ ①–⑦ 每次调用都真跑腿。这一组反过来把它临时打开，
+    并且**两半都要翻**：开着缓存第二次不出网 ⇔ 关掉缓存第二次照样出网（否则那枚是恒真桩）。
+    """
+    import time as _time
+    from datetime import datetime as _dt
+
+    make_fake_get()
+    rt._clear_cache()
+    prev_ttl = os.environ.get("REALTIME_TTL_S")
+    prev_now = rt.beijing_now
+    os.environ["REALTIME_TTL_S"] = "60"
+    try:
+        URLS.clear()
+        r1 = rt.aggregate("stock", "600519", ("price",))
+        base = len(URLS)
+        r2 = rt.aggregate("stock", "600519", ("price",))
+        check("⑧TTL 内第二次调用**零出网**（桩的 URL 计数不涨），且 `cache.hit.price` 为真",
+              len(URLS) == base and r2["cache"]["hit"]["price"] is True
+              and r2["cache"]["ageS"]["price"] >= 0.0,
+              f"urls={len(URLS)} base={base} cache={r2['cache']}")
+        check("⑧命中时每条 `sources` 带 `fromCache:true`、未命中那轮是 false（本轮没点名谁，不许装成点过）",
+              bool(r2["sources"]) and all(s["fromCache"] is True for s in r2["sources"])
+              and all(s["fromCache"] is False for s in r1["sources"]), str(r2["sources"])[:200])
+        check("⑧只问现价 ⇒ `cache.hit`/`ttlS` 里都没有 intraday（没问的不许被读成「没命中」）",
+              "intraday" not in r2["cache"]["hit"] and "intraday" not in r2["cache"]["ttlS"],
+              str(r2["cache"])[:200])
+        check("⑧命中不新增任何屏上文案：`note` 逐字与未命中那轮相同（开发者读数只住 `cache` 那一块）",
+              r2["note"] == r1["note"], f'{r1["note"]!r} vs {r2["note"]!r}')
+
+        # 两档 TTL 不是一个数：读**默认值**（把 env 摘掉），否则读到的是覆盖值
+        os.environ.pop("REALTIME_TTL_S", None)
+        rt._clear_cache()
+        r3 = rt.aggregate("stock", "600519")
+        check("⑧两档 TTL 不是一个数＝现价 5s／分时 60s（钉住「两条节奏」，防止被合成一个常量）",
+              r3["cache"]["ttlS"] == {"price": rt.PRICE_TTL_S, "intraday": rt.INTRADAY_TTL_S}
+              and rt.PRICE_TTL_S == 5.0 and rt.INTRADAY_TTL_S == 60.0, str(r3["cache"]["ttlS"]))
+
+        # 命中时 `observedAt` 必须是那一份数被观测到的时刻（屏上「最后更新」读的就是它）
+        os.environ["REALTIME_TTL_S"] = "60"
+        rt._clear_cache()
+        box = {"t": _dt(2026, 10, 13, 21, 0, 0)}
+        rt.beijing_now = lambda: box["t"]
+        try:
+            a = rt.aggregate("stock", "600519", ("price",))
+            box["t"] = _dt(2026, 10, 13, 21, 0, 30)
+            b = rt.aggregate("stock", "600519", ("price",))
+        finally:
+            rt.beijing_now = prev_now
+        check("⑧命中时 `observedAt` 仍是那一份数的时刻，不是响应时刻（写成 now＝把 5s 旧数说成刚拿到）",
+              a["observedAt"] == b["observedAt"] == "2026-10-13T21:00:00",
+              f'{a["observedAt"]} / {b["observedAt"]}')
+
+        # 同键有一发在飞 ⇒ 过期也交旧值、不放大成第二发上游（构造态，不是竞态取样）
+        os.environ["REALTIME_TTL_S"] = "0.001"
+        rt._clear_cache()
+        URLS.clear()
+        c = rt.aggregate("stock", "600519", ("price",))
+        base2 = len(URLS)
+        _time.sleep(0.15)  # > TTL(0.001) ⇒ 这一份已过期；`ageS` 按 0.1s 精度报，睡得比精度长才不恒真
+        rt._INFLIGHT["price:stock:600519"] = 1
+        try:
+            d = rt.aggregate("stock", "600519", ("price",))
+        finally:
+            rt._INFLIGHT.pop("price:stock:600519", None)
+        check("⑧同键有一发在飞 ⇒ 已过期也交旧值、不再出网（这一枚就是把同键并发压到 1＝N 的初值）",
+              len(URLS) == base2 and d["cache"]["hit"]["price"] is True
+              and d["cache"]["ageS"]["price"] > 0.0, f"urls={len(URLS)} base={base2} {d['cache']}")
+        check("⑧`inflightMaxSeen` 记到了重叠（N 的读数来源：它长期是 1 ⇒ 全局上限没有对象）",
+              d["cache"]["inflightMaxSeen"] >= 2, str(d["cache"]["inflightMaxSeen"]))
+        check("⑧命中不改判定：同一份数两次读出的 `verifyVerdict`／`degraded` 逐字相同",
+              (c["verifyVerdict"], c["degraded"]) == (d["verifyVerdict"], d["degraded"]),
+              f'{c["verifyVerdict"]}/{c["degraded"]} vs {d["verifyVerdict"]}/{d["degraded"]}')
+
+        # 🔁 关缓存（模块头那一枚钉子）⇒ 同键第二次照样出网
+        os.environ["REALTIME_TTL_S"] = "0"
+        rt._clear_cache()
+        URLS.clear()
+        rt.aggregate("stock", "600519", ("price",))
+        base3 = len(URLS)
+        e = rt.aggregate("stock", "600519", ("price",))
+        check("⑧🔁 TTL=0（关缓存）⇒ 同键第二次照样出网、hit 为假（证明上面几条不是恒真桩）",
+              len(URLS) > base3 and e["cache"]["hit"]["price"] is False
+              and all(s["fromCache"] is False for s in e["sources"]),
+              f"urls={len(URLS)} base={base3} {e['cache']}")
+
+        # 阈值那一格：维持 0.5%，且 basis 里要写得出"为什么没改"
+        check("⑧共识阈值维持 0.5%（10-13 两次读数都不构成改它的依据），provisional 仍为 true",
+              rt.CONSENSUS_THRESHOLD_PCT == 0.5 and e["consensus"]["thresholdPct"] == 0.5
+              and e["consensus"]["provisional"] is True
+              and "维持不变" in e["consensus"]["basis"] and "4/4" in e["consensus"]["basis"],
+              str(e["consensus"])[:260])
+    finally:
+        if prev_ttl is None:
+            os.environ.pop("REALTIME_TTL_S", None)
+        else:
+            os.environ["REALTIME_TTL_S"] = prev_ttl
+        rt.beijing_now = prev_now
+        rt._clear_cache()
+        make_fake_get()
+
+
 if __name__ == "__main__":
     try:
         test_red_lines()
@@ -370,6 +478,7 @@ if __name__ == "__main__":
         test_parts_cadence()
         test_unwired_types_are_declared()
         test_http_mapping()
+        test_ttl_cache_single_flight()
     finally:
         cleanup()
     ng = [n for n, ok, _ in results if not ok]
