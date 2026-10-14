@@ -952,6 +952,6 @@ eastmoney_quote_ctl    ok= 0/10 gap=6s  ERR=['ConnectionError'] x10
 
 ③ **本刀放大出来的危害比原缺陷更值钱**：钩子读的是**退出那一刻**的 env，而 `finally` 先把 `LIMITER_STATE_FILE` 恢复成未设 ⇒ 收尾落盘把测试计数倒进**仓库**那本账。实测 18:35→19:3x `akshare-obs granted 0→24`（4 次 run × 6 发；`ak.stock_zh_a_spot 16`／`ak.bond_zh_hs_cov_spot 8`）＝**测试流量，不是生产流量**。修＝在窗口内先 `_lim.flush(force=True)` 再恢复 env；复验＝套件跑完那本账 size＋sha256 前后一致（2069／`4df2dc172fc8d548`）；并补 ⑤ 枚替身用例（两枚临时落点：把窗口内那次 flush 摘掉 ⇒ 换走的落点被写上、⑤ 精确红）。⇒ **丙（给那 16 枚补隔离）从可选变必须**：闸1 的 ② 整批现在一次写进真账本 `akshare-obs granted +11／eastmoney +3`（钩子之前只 +2）。
 
-④ **批次②（甲）已就位**＝web `:3000` 起为 PID 7080（`Ready in 3.2s`）、ds 2200（18:15:51）仍在听、cron `nextRun 2026-10-15 02:00:00`；三枚判据照「追加六十六」④ 全在盘上。Q2-1 按 ⑤ 换档＝读 ds **进程内** `/health limiters[]`（本轮那棵全 0＝自 18:15 起没走过一次 gated 调用）。⚠️ CR9-99 的新码**未装载**（ds 仍是 18:15 那一棵，重启归主人），但 02:00 那一轮的读数不依赖它。
+④ **批次②（甲）已就位＋已装载**＝web 7080、cron `nextRun 2026-10-15 02:00:00`；三枚判据照「追加六十六」④ 全在盘上，Q2-1 读 ds 进程内 `/health limiters[]`。✅ **22:32 字＝「重启加载新码」**＝ds **21620 @22:33:29 ＞ `b861faf` 19:30:20 ⇒ CR9-99 已装载**（本枚无运行时新键可读，装载证据只有时间戳法）；启动零出网＝进程内两族全 0、热点补跑读盘报 `already attempted today`。
 
 ⑤ **闸1**＝`data-service/runtime/gate1-57-1014-194x.out`（抬头 `dev 1472f6c dirty=2`、50s）＝① `tsc` 0 错＋vitest **434/434**（49 文件）｜② 23 套 **905/905**（900→905＝＋5 枚 CR9-99）｜docs NEW=0／KNOWN 21/21、断链 0。docs 尾账另用 `docs-scan --baseline` 复跑——本轮只改文字，不重买 ② 里那一发真报价。
