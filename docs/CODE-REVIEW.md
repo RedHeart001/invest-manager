@@ -943,3 +943,15 @@ eastmoney_quote_ctl    ok= 0/10 gap=6s  ERR=['ConnectionError'] x10
 ⑥ 覆盖面读数（两把尺，判据一起给；出处＝18:4x 静态扫 `tests/`，25 枚套件）＝直接引用 limiter 而未设 `LIMITER_STATE_FILE`＝**2 枚**（`test_cr9_59_us_list.py`／`test_opt2_news_fusion.py`，下界）；import 了会创建 limiter 的模块树而未隔离＝**16 枚**（上界）。静态尺判不了运行时真走不走 `acquire` ⇒ **这两个数都不是"污染发数"**，只划出"谁有权写真账本"的范围。
 
 ⑦ **补记（同轮，更正我自己那句的范围）**＝① 与上一笔 commit 抬头里的「零出网」要说窄一点才是真话：闸1 的 ② 名单只把 `test_p0.py`／`test_p1.py` 划成 live（`scripts/gate.mjs:41` 那个 `LIVE_SUITES`），而 `test_p6_mcp.py:86` 那条 `[网络项] get_quote 600519` 是**无条件 attempt**（失败也只记成 note、不 skip）⇒ 本轮 18:49 那一跑**按定义不是零出网，额度账上要记这一发**。同轮 durable `eastmoney granted 13→15` 与它同向，但我**不并账**：测试进程里的 `acquire()` 只是取额度、本身不出网，且 ⑤ 已证明那一列在短命进程里根本落不了盘。本笔只改措辞与加这一条，**不动已提交那笔的字**（`d039869` 的抬头按它自己的范围读，以本条为准）。
+
+#### 追加六十七 · 10-14 19:1x–19:5x（CR9-99＝#69 定档乙 落码轮；批次② 按甲就位）
+
+① **字＝「1、批次② 走甲 2、#69 走乙 3、执行完做全量测试、通过则更新 docs 并 commit」**。生产码两处＝`app/utils/limiter.py` 加 `_flush_at_exit()`＋`atexit.register`（退出不节流、补一次 `flush(force=True)`，异常只 warning）；`tests/test_p2_m8.py` 加五枚 CR9-99 断言＋本套件 `finally` 的顺序修正。
+
+② **摘钩钻**＝注释掉 `atexit.register` 那行 ⇒ **148/149**，唯一那枚红的 detail 逐字就是缺陷本体：`bucket={'denied':0,'granted':0,'seen':{'ak.both':1},'seenTotal':1}`（＝「追加六十五」⑧ 那一形，现在由我自己的用例复现）。恢复后 149/149、DRILL 残留 0。**五枚里只有 ① 判别这枚钩子**：②（无增量不碰文件）／③（纯 observe 不虚增）／④（写不进仍以 0 退出）摘钩后照样绿，账上不许把它们算成钩子的牙齿。
+
+③ **本刀放大出来的危害比原缺陷更值钱**：钩子读的是**退出那一刻**的 env，而 `finally` 先把 `LIMITER_STATE_FILE` 恢复成未设 ⇒ 收尾落盘把测试计数倒进**仓库**那本账。实测 18:35→19:4x `akshare-obs granted 0→24`（4 次 run × 6 发；`ak.stock_zh_a_spot 16`／`ak.bond_zh_hs_cov_spot 8`）＝**测试流量，不是生产流量**。修＝在窗口内先 `_lim.flush(force=True)` 再恢复 env；复验＝套件跑完那本账 size＋sha256 前后一致（2069／`4df2dc172fc8d548`）；并补 ⑤ 枚替身用例（两枚临时落点：把窗口内那次 flush 摘掉 ⇒ 换走的落点被写上、⑤ 精确红）。⇒ **丙（给那 16 枚补隔离）从可选变必须**：闸1 的 ② 整批现在一次写进真账本 `akshare-obs granted +11／eastmoney +3`（钩子之前只 +2）。
+
+④ **批次②（甲）已就位**＝web `:3000` 起为 PID 7080（`Ready in 3.2s`）、ds 2200（18:15:51）仍在听、cron `nextRun 2026-10-15 02:00:00`；三枚判据照「追加六十六」④ 全在盘上。Q2-1 按 ⑤ 换档＝读 ds **进程内** `/health limiters[]`（本轮那棵全 0＝自 18:15 起没走过一次 gated 调用）。⚠️ CR9-99 的新码**未装载**（ds 仍是 18:15 那一棵，重启归主人），但 02:00 那一轮的读数不依赖它。
+
+⑤ **闸1**＝`data-service/runtime/gate1-57-1014-194x.out`（抬头 `dev 1472f6c dirty=2`、50s）＝① `tsc` 0 错＋vitest **434/434**（49 文件）｜② 23 套 **905/905**（900→905＝＋5 枚 CR9-99）｜docs NEW=0／KNOWN 21/21、断链 0。docs 尾账另用 `docs-scan --baseline` 复跑——本轮只改文字，不重买 ② 里那一发真报价。
