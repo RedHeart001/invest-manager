@@ -8,41 +8,6 @@
   [
    "docs/FIX-LEDGER.md",
    "LINE",
-   "    **(b) R14 行情快照没有新鲜度标记，且实测已陈旧**。✅ **刀 1 已落（10-01 17:4x）**"
-  ],
-  [
-   "docs/FIX-LEDGER.md",
-   "LINE",
-   "    **(d) 6 条 HTTP 路由零断言**。🟡 **刀 2 锁了 4 条，剩 2 条**：p2 第 [10] "
-  ],
-  [
-   "docs/FIX-LEDGER.md",
-   "LINE",
-   "   > **三条处置，推荐甲**：**甲＝把计数落盘**——仿 `backups/state.json`／`hotsp"
-  ],
-  [
-   "docs/FIX-LEDGER.md",
-   "LINE",
-   "31. **`next dev` 的重编译触发源不止\"编辑源文件\"——对 `web/prisma/dev.db` 的每一"
-  ],
-  [
-   "docs/FIX-LEDGER.md",
-   "LINE",
-   "34. **`merge_news` 的产出说明里没有\"合并前\"那个数 ⇒ `OPT-2` 的相似度阈值（0.5/0.8"
-  ],
-  [
-   "docs/FIX-LEDGER.md",
-   "LINE",
-   "37. **备份只在\"ds 恰好活着跨过 03:30\"时才存在＝起服务时查一次、落后就补一份、30 天的冗余直接删（10"
-  ],
-  [
-   "docs/FIX-LEDGER.md",
-   "LINE",
-   "61. **他提的新规则＝「docs 下任一文件超过 500 行就压缩精简一次，结构保持不变」，按实测判＝触发器选错了量"
-  ],
-  [
-   "docs/FIX-LEDGER.md",
-   "LINE",
    "> ① **web 单测**：`npx tsc --noEmit` 0 错 + `npx vitest run` **3"
   ],
   [
@@ -89,11 +54,6 @@
    "docs/FIX-LEDGER.md",
    "LINE",
    "| **八（10-01 全量测试轮的修复顺序）** ✅ **刀 1 已落地（17:1x–17:4x，主人\"按推荐顺序推进"
-  ],
-  [
-   "docs/FIX-LEDGER.md",
-   "SECTION",
-   "⚠️ 待你拍板"
   ],
   [
    "docs/FIX-LEDGER.md",

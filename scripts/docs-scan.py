@@ -770,7 +770,7 @@ def move(root, spec, do_go=False):
               "> **这是什么**：[../%s](../%s) 的以下块整体搬迁（%s 触发，机械，必进）。\n"
               "> **内容逐字保留、未做任何改写**；本文件只作历史对照，不在此维护状态。\n\n---\n\n"
               % (os.path.basename(rel), date, os.path.basename(rel), os.path.basename(rel),
-                 spec.get("reason", "体量治理")))
+                 spec.get("reason") or "体量治理"))
     if os.path.exists(archive_path):
         old = read(archive_path)
         new_archive = old + "\n" + moved_text + "\n"
