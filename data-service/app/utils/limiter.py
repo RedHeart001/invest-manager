@@ -20,6 +20,7 @@
 
 from __future__ import annotations
 
+import atexit
 import json
 import logging
 import os
@@ -321,6 +322,30 @@ def _maybe_dump() -> None:
         flush(force=False)
     except Exception as e:  # noqa: BLE001 观测面：CR9-45 那条口径在这里同样成立
         log.warning("limiter dump failed: %s", e)
+
+
+def _flush_at_exit() -> None:
+    """CR9-99（#69 乙）：进程退出前补一次**不节流**的落盘。
+
+    为什么必须有这一发＝事件路径那两次 `_maybe_dump()` 都会输给 `FLUSH_MIN_INTERVAL_S`：
+    `observe()` 收尾那一次在进程首发时不受节流、当场把 `_last_flush` 推到当下，紧随其后的
+    `acquire()` 收尾那一次就落在 60 秒窗里被跳过。⇒ **活不过 60 秒的进程只把 `seen` 留在盘上，
+    `granted`/`denied` 一个字都没进**（10-14 18:4x 成对实验：同一段子进程不补收尾＝`granted:0`，
+    补一次 `flush()`＝`granted:1`）。而 `akshare-obs` 的 `granted` 恰是 CR9-97 那枚闸唯一能自证
+    "真咬过"的读数面——它恒 0 会让"闸没生效"与"闸生效但没落盘"在一条 curl 里长得一模一样。
+
+    两条形状是刻意的：①**只 force 一次 `flush()`，没有新增逻辑**（游标语义已保证不双计，
+    `flush()` 无增量时连文件都不碰，所以"空退出"不会留下产物、也不会说谎）；②异常只 `warning`
+    ⇒ 观测位不得让退出路径抛（CR9-45 同条纪律）。被 `SIGKILL`／`taskkill /F` 掉的进程仍会丢数，
+    这一枚治的是"正常退出"，不治"被杀"——与 `sync-state.json` 那条"写在起跑前"的分工一致。
+    """
+    try:
+        flush(force=True)
+    except Exception as e:  # noqa: BLE001 退出路径同样不许被观测位绊倒
+        log.warning("limiter atexit flush failed: %s", e)
+
+
+atexit.register(_flush_at_exit)
 
 
 def durable_today() -> dict:

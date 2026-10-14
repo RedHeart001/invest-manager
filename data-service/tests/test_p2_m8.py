@@ -1356,6 +1356,116 @@ def test_fund_holdings_missing_column_and_beijing_dates() -> None:
 # ---------- #42 丙（CR9-70）：读侧的「最近 N 日汇总」 ----------
 
 
+def test_limiter_flushes_pending_deltas_at_exit() -> None:
+    """CR9-99（#69 乙）：**子进程自然退出**这一发，把游标之后那半截增量补落盘。
+
+    上面两组各自证了"`flush()` 写得对"与"事件路径会去叫它"，两组都量不到第三形：
+    `observe()` 收尾那次 `_maybe_dump()` 在进程首发时不受节流、当场把 `_last_flush` 推到当下，
+    紧随其后的 `acquire()` 收尾那次落在 `FLUSH_MIN_INTERVAL_S` 窗里被跳过 ⇒
+    **活不过 60 秒的进程只把 `seen` 留在盘上，`granted`/`denied` 一个字都没进**
+    （10-14 18:4x 在仓库外做成过 A／B 两格：不补收尾＝`granted:0`，补一次 `flush()`＝`granted:1`）。
+    而 `akshare-obs.granted` 恰是 CR9-97 那枚闸唯一能自证「真咬过」的读数面——它恒 0 会让
+    「闸没生效」与「闸生效但没落盘」在一条 curl 里长得一模一样。
+
+    形状只能是"起真子进程、让它自然退出"：atexit 在父进程里永远测不到。零出网——子进程只碰
+    内存桶与临时目录里那份账本，每发各指一个独立 `LIMITER_STATE_FILE`（仓库那份同样不碰，
+    测试产物一次都不许落进别人的读数面）。
+    """
+    import shutil
+    import subprocess
+    import tempfile
+
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # data-service/
+    tmpdir = tempfile.mkdtemp()
+
+    def run(src: str, state_file: str | None) -> subprocess.CompletedProcess:
+        env = dict(os.environ)
+        if state_file is None:
+            env.pop("LIMITER_STATE_FILE", None)
+        else:
+            env["LIMITER_STATE_FILE"] = state_file
+        return subprocess.run([sys.executable, "-c", src], cwd=root, env=env,
+                              capture_output=True, text=True, timeout=90)
+
+    def bucket(path: str, family: str = "cr9-99-child") -> dict:
+        import json
+        if not os.path.exists(path):
+            return {}
+        data = json.load(open(path, encoding="utf-8"))
+        return ((data.get("days") or {}).get(data.get("day"), {}) or {}).get(family, {})
+
+    OBS_ACQ = ("from app.utils import limiter as L; "
+               "f = L.get_limiter('cr9-99-child'); "
+               "f.observe('ak.both'); "
+               "print('inproc=%d' % (1 if f.acquire(timeout=5.0) else 0))")
+    ONLY_IMPORT = "from app.utils import limiter as L; print('inproc=0')"
+    ONLY_OBS = ("from app.utils import limiter as L; "
+                "f = L.get_limiter('cr9-99-child'); "
+                "f.observe('ak.obs-only'); print('inproc=0')")
+
+    try:
+        # ① 主形：observe＋acquire 之后**一次都不 flush**，靠自然退出把两列一起带上盘
+        p1 = os.path.join(tmpdir, "A.json")
+        r = run(OBS_ACQ, p1)
+        b = bucket(p1)
+        check("CR9-99：子进程不手调 flush，退出后 `granted`/`seenTotal` 一起进盘（atexit 那一发接住了）",
+              r.returncode == 0 and "inproc=1" in r.stdout
+              and b.get("granted") == 1 and b.get("denied") == 0
+              and b.get("seenTotal") == 1 and list(b.get("seen", {})) == ["ak.both"],
+              f"rc={r.returncode} stdout={r.stdout.strip()[:60]} err={r.stderr.strip()[:80]} bucket={str(b)[:150]}")
+
+        # ② 🔁 对照：一条都没新增 ⇒ 钩子**不碰文件**（否则 mtime 会谎称「这个进程写过盘」）
+        p2 = os.path.join(tmpdir, "B.json")
+        r2 = run(ONLY_IMPORT, p2)
+        check("CR9-99🔁：只 import 不计数 ⇒ 退出时不创建文件（收尾落盘不是「每条都动一次盘」）",
+              r2.returncode == 0 and not os.path.exists(p2),
+              f"rc={r2.returncode} exists={os.path.exists(p2)} err={r2.stderr.strip()[:80]}")
+
+        # ③ 🔁 只 observe 的那一发：seen 进盘而 granted/denied 恒 0 ⇒ 钩子带着两列走，但不造额度
+        p3 = os.path.join(tmpdir, "C.json")
+        r3 = run(ONLY_OBS, p3)
+        b3 = bucket(p3)
+        check("CR9-99🔁：纯 observe 的子进程落 `seenTotal=1`、`granted=denied=0`（收尾落盘不虚增额度）",
+              r3.returncode == 0 and b3.get("seenTotal") == 1
+              and b3.get("granted") == 0 and b3.get("denied") == 0,
+              f"bucket={str(b3)[:150]} err={r3.stderr.strip()[:80]}")
+
+        # ④ 落点写不进 ⇒ 退出码仍为 0（观测位不得让进程退出路径抛，CR9-45 同条纪律）
+        blocker = os.path.join(tmpdir, "blocker")
+        with open(blocker, "w", encoding="utf-8") as f:
+            f.write("占位：blocker 是文件，它下面的目录建不出来")
+        r4 = run(OBS_ACQ, os.path.join(blocker, "sub", "D.json"))
+        check("CR9-99🔁：落点写不进时子进程**仍以 0 退出**，只留 `flush()` 那行 warning（收尾落盘不绊退出）",
+              r4.returncode == 0 and "inproc=1" in r4.stdout
+              and "could not be written" in (r4.stderr or "").lower(),
+              f"rc={r4.returncode} err={r4.stderr.strip()[:120]}")
+
+        # ⑤ 本刀自己带出来的一条危害：钩子读的是**退出那一刻**的 env ⇒ 任何"先恢复 env 再退出"
+        #   的收尾顺序都会把增量倒进恢复后的那个落点（套件自己的 `finally` 就是这个形状，
+        #   10-14 19:3x 实测一次 run 漏进仓库那本账 +6 granted）。这一枚用两枚临时落点当替身，
+        #   断言"窗口内补一次 flush"这条顺序把增量锁在第一落点、第二落点连文件都不该有。
+        iso = os.path.join(tmpdir, "E-iso.json")
+        decoy = os.path.join(tmpdir, "F-after-restore.json")
+        src5 = ("import os\n"
+                "from app.utils import limiter as L\n"
+                "f = L.get_limiter('cr9-99-seq')\n"
+                "f.observe('ak.seq')\n"
+                "print('acquired=%d' % (1 if f.acquire(timeout=5.0) else 0))\n"
+                "L.flush(force=True)\n"  # CR9-99 ⑤：这一步是被断言的那一步，摘掉它 ⑤ 必红
+                f"os.environ['LIMITER_STATE_FILE'] = {decoy!r}\n")
+        r5 = run(src5, iso)
+        b5 = bucket(iso, family="cr9-99-seq")
+        check("CR9-99🔁：落点在退出前被换走时，**窗口内那次 flush** 才是把增量锁在隔离落点的那一步"
+              "（换走的落点连文件都不许出现——本刀反过来会倒进仓库账本）",
+              r5.returncode == 0 and "acquired=1" in r5.stdout
+              and b5.get("granted") == 1 and b5.get("seenTotal") == 1
+              and not os.path.exists(decoy),
+              f"rc={r5.returncode} iso={str(b5)[:120]} decoy_exists={os.path.exists(decoy)} "
+              f"err={r5.stderr.strip()[:80]}")
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 def test_limiter_window_rolls_up_the_days() -> None:
     """`limitersWindow`＝把盘上最近 N 个日桶相加（主人 10-06 20:3x 的字＝「走丙」）。
 
@@ -1500,6 +1610,7 @@ if __name__ == "__main__":
         test_akshare_family_gate_cr9_97()
         test_limiter_counters_survive_a_restart()
         test_limiter_dumps_from_the_event_path()
+        test_limiter_flushes_pending_deltas_at_exit()
         test_limiter_window_rolls_up_the_days()
         test_list_products_meta()
         test_products_endpoint_passthrough_meta()
@@ -1522,6 +1633,15 @@ if __name__ == "__main__":
             for name, _, detail in fails:
                 print(f"  - {name}: {detail[:160]}")
     finally:
+        # CR9-99（#69 乙）：**顺序是这条的存在理由**——先把游标之后那半截并进临时那份，
+        # 再恢复 env。反过来的话，本进程剩的增量会由 atexit 收尾落盘写进**仓库**那本账
+        # （10-14 19:3x 实测：钩子落下后一次 run 漏进 `runtime/limiter-state.json` +6 granted／
+        # +6 seen，落点正是被恢复成"未设"的 env 所指向的仓库路径）。
+        try:
+            import app.utils.limiter as _lim
+            _lim.flush(force=True)
+        except Exception as _e:  # noqa: BLE001 收尾不该让套件的退出码变红
+            print(f"cleanup flush failed: {_e}")
         if _prev_env is None:
             os.environ.pop("LIMITER_STATE_FILE", None)
         else:
