@@ -140,7 +140,10 @@ def _sync_state_path() -> str:
     env = os.environ.get("SYNC_STATE_FILE", "")
     if env:
         return env
-    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    # CR9-102（#72）：本文件在 `app/` 下（非 `app/utils/`、非 `app/hotspot/`），
+    # dirname×3 会落到**仓库根**、且那份 runtime/ 不在 .gitignore ⇒ 用 ×2 落
+    # `data-service/runtime/`，与 limiter/hotspot 两份状态文件同语义。
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     return os.path.join(root, "runtime", SYNC_STATE_NAME)
 
 

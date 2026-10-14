@@ -2,6 +2,7 @@
 
 import os
 import sys
+import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # CR9-14：用例名含 🔁 等非 GBK 字符，Windows GBK 控制台会 UnicodeEncodeError。
@@ -9,6 +10,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 for _s in (sys.stdout, sys.stderr):
     if hasattr(_s, "reconfigure"):
         _s.reconfigure(encoding="utf-8", errors="replace")
+
+# CR9-100（#70 扩）：先于 app 的任何 import 把 limiter 落盘账本指到临时目录——
+# 本套件真走到 `eastmoney` 族的门（hk 列表腿），退出时 atexit 补落盘，
+# 不指走就把测试计数写进仓库那份 `runtime/limiter-state.json`（与 `test_p2_m8.py` 同一条纪律）。
+os.environ["LIMITER_STATE_FILE"] = os.path.join(
+    tempfile.mkdtemp(prefix="cr9100-limiter-"), "limiter-state.json")
 
 
 from app.providers import get_list_provider, get_provider_chain  # noqa: E402

@@ -1385,7 +1385,11 @@ def test_limiter_flushes_pending_deltas_at_exit() -> None:
         else:
             env["LIMITER_STATE_FILE"] = state_file
         return subprocess.run([sys.executable, "-c", src], cwd=root, env=env,
-                              capture_output=True, text=True, timeout=90)
+                              capture_output=True, text=True, timeout=90,
+                              # CR9-101（#71）：父进程 locale 是 GBK 而子进程可能继承
+                              # `PYTHONIOENCODING=utf-8` ⇒ 不显式给 encoding，reader 线程
+                              # 会 UnicodeDecodeError 死掉、stderr 回 None（闸1 带该变量时自红）。
+                              encoding="utf-8", errors="replace")
 
     def bucket(path: str, family: str = "cr9-99-child") -> dict:
         import json

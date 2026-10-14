@@ -490,6 +490,28 @@ def test_cr9_94_disk_attempt_marker() -> None:
         _clear_marker()
 
 
+def test_cr9_102_state_path_lands_in_data_service() -> None:
+    """CR9-102（#72）：默认落点必须是 `data-service/runtime/`，不是仓库根 `runtime/`。
+
+    钉的是 `_sync_state_path()` 的 dirname 层数——`sync_scheduler.py` 在 `app/` 下
+    （非 `app/utils/`、非 `app/hotspot/`），层数多写一层就会落到仓库根，而那份
+    `runtime/` 不在 `.gitignore`（`?? runtime/` 有被误提交的面）。
+    """
+    prev = os.environ.pop("SYNC_STATE_FILE", None)
+    try:
+        p = ss._sync_state_path()
+    finally:
+        if prev is not None:
+            os.environ["SYNC_STATE_FILE"] = prev
+    ds_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # data-service/
+    check("CR9-102（#72）：默认落点＝data-service/runtime/sync-state.json",
+          os.path.normcase(p) == os.path.normcase(
+              os.path.join(ds_root, "runtime", ss.SYNC_STATE_NAME)), p)
+    check("CR9-102（#72）：落点不在仓库根 runtime/（dirname 层数不许多一层）",
+          os.path.normcase(os.path.dirname(os.path.dirname(p)))
+          == os.path.normcase(ds_root), p)
+
+
 def main() -> int:
     test_yields_while_hotspot_running()
     test_proceeds_when_hotspot_resolved_with_output()
@@ -503,6 +525,7 @@ def main() -> int:
     test_sync_catchup_off_switch()
     test_skip_reason_written_by_each_early_return()
     test_cr9_94_disk_attempt_marker()
+    test_cr9_102_state_path_lands_in_data_service()
     passed = sum(1 for _n, ok, _d in results if ok)
     fails = [x for x in results if not x[1]]
     for name, _ok, detail in fails:

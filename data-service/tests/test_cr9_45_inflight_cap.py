@@ -22,6 +22,7 @@ abandoned 计数 138 条告警、峰值 102）——**观测通道与被观测�
 import asyncio
 import os
 import sys
+import tempfile
 import threading
 import time
 
@@ -30,6 +31,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 for _s in (sys.stdout, sys.stderr):
     if hasattr(_s, "reconfigure"):
         _s.reconfigure(encoding="utf-8", errors="replace")
+
+# CR9-100（#70）：先于 app 的任何 import 把 limiter 落盘账本指到临时目录——
+# 本套件经 `app.utils.timeout` 间接拉起 limiter，退出时 atexit 会补一次落盘，
+# 不指走就把测试计数写进仓库那份 `runtime/limiter-state.json`（与 `test_p2_m8.py` 同一条纪律）。
+os.environ["LIMITER_STATE_FILE"] = os.path.join(
+    tempfile.mkdtemp(prefix="cr9100-limiter-"), "limiter-state.json")
 
 from app.utils import timeout as to  # noqa: E402
 

@@ -32,6 +32,12 @@ for _s in (sys.stdout, sys.stderr):
     if hasattr(_s, "reconfigure"):
         _s.reconfigure(encoding="utf-8", errors="replace")
 
+# CR9-100（#70）：先于 app 的任何 import 把 limiter 落盘账本指到临时目录——
+# `observe()`/`acquire()` 收尾会节流落盘、atexit 还会补一次，不指走就把测试计数写进
+# 仓库那份 `runtime/limiter-state.json`（与 `test_p2_m8.py`／`test_cr9_92_realtime.py` 同一条纪律）。
+os.environ["LIMITER_STATE_FILE"] = os.path.join(
+    tempfile.mkdtemp(prefix="cr9100-limiter-"), "limiter-state.json")
+
 import app.main as m  # noqa: E402
 
 results: list[tuple[str, bool, str]] = []
