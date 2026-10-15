@@ -792,3 +792,21 @@ eastmoney_quote_ctl    ok= 0/10 gap=6s  ERR=['ConnectionError'] x10
 ⑤ **重启与装载**（10-15 09:57）：web **23184**／ds **8316**（wrapper 与日志落各自 `runtime/`；新码已含 #72）。**起 ds 自带的热点补跑真跑了**（过了 08:30 且今日无 digest）＝`runs` 0→1、`tookMs=95984`、ingested 5、`finishedAt=10:01:25`；⚠️ **engine=keyword、degraded=true**——DeepSeek 回了一次 **503**（`llm chat failed: HTTPError: 503 … api.deepseek.com`），流水线按设计降级（降级标注诚实）；该轮买数＝进程内 eastmoney granted **7**（durable 32→39）。**今日 digest 可用但为关键词引擎产物**。
 
 ⑥ **W1.2 的 03:30 备份＝未跑**（机器入睡）⇒ `dbBackup.lastRun` 仍 `10-14T14:16:04`；重启时 age≈19.7h＜26h 门限 ⇒ 没触发补备份 ✓（与预测一致）。
+
+#### 追加七十一 · 10-15 10:0x–11:3x（W2 上午场＋"现在批"：③ 主源档读数／B1 六跑与 `29.push2` 两枚新事实／CR9-96 首读／#65 屏验 ✓／#31 残差结案 ✓／闸1 全绿；同轮搬 7 枚追加节）
+
+① **字**＝「w2 开打」＋「现在就做，做完全量测试，测试完了归档docs和add、commit」。任务书＝[history/2026-10-15-实网窗口任务书.md](history/2026-10-15-实网窗口任务书.md)（执行日志只增在同文件）。生产码零行。
+
+② **第 1–2 步 ✓**：preflight（红线 pass／装载成立／cooldown=0）；**`boardPaths`（10:01 补跑轮）＝`emCodeRows=506`／`byCode=5`／savedRequestsEstimate=40 ⇒ 免费判"通"**；**A3 六类**（10:11:17–10:12:39、≥15s、未触保险丝）＝**主源 4**（stock 600519=1306.05／fund 510300=4.223／hk 00700=418.6／**crypto BTC=81601＝首次主源**）／备源 1（us AAPL，yfinance 429→tencent）／失败 1（bond 110002＝**样本码问题**：两源一致说"不在实时列表"，库内还留着这只退市债；建议换活码，归下一轮）。**③ 格按判据仍空**（us+bond 未齐主源）。回执 `windowA3-1015-1013.out`＋`windowA-a3-1015-1011.jsonl/.summary.out`。
+
+③ **第 3 步 B1＝六跑、本场停手（新钉两枚上游事实，比"再试一次"值钱）**。六跑实录（回执 `windowB3-1015-10{15,21,48,51,54}.out`）＝① 10:13 名单全成（concepts=506／industries=496，与补跑轮 `emCodeRows=506` 一致）＋**`_board_code("人工智能","em-concept")=BK0800` 解出**＋cons 6/7 页后 ProxyError（探针未钉 `NO_PROXY`、被注册表代理劫持）；②③ 直连早期 `RemoteDisconnected`；④ 10:48 冷却 29 分钟后直连仍断；⑤ 10:51 换代理路＝**6/7 页、死在同一 `pn=7`**；⑥ 10:54 两半式（解析对比＋pz=500 手写分页）——名单腿已被加重惩罚拒（5 轮连发后 79/17 轮转主机也拒）。**新事实甲**：akshare 的 cons 主机**硬编码 `29.push2.eastmoney.com`**（源码 `stock_board_concept_em.py:426`；名单等其他腿走 79/17/裸三主机轮转）——**直连即重置、代理可通约 6 页**（本机两条出口对该主机的表现已不同于 10-07 那次"两条都不通"）。**新事实乙**：**该主机分页在第 7 页起必断**（10:13 与 10:51 两度复现、跨路由）⇒ **大板块（>600 成员＝7 页起）的 akshare 默认拉取会中途死**（byCode 路径对大板块的健壮性受此限；小板块 ≤6 页无恙——10:01 补跑轮 byCode=5 全成即此）。⇒ B1 差的两步（akshare 侧解析读数＋全成分拉取）留 13:00 后长冷却再试；再不成即留档待网络态好转。
+
+④ **第 5 步（零东财）✓**：**CR9-96 首次实机读数**＝TTL 5s/60s、hit/miss/age 实测正确（1.6s 命中 age=1.6→6s 未命中→3.1s 再命中）、`inflightMaxSeen=1`、`provisional:true`；BFF `/api/realtime` ✓（sources 逐条带 latency）；**diverged 未见**（蹲点器 11:02–11:34 跑满 **89 发全 agree**、diffPct ≤0.082＝扎实负对照；log＝`runtime/diverged-squat-1015.log`）。
+
+⑤ **#65 屏验 ✓（"现在批"）**：`curl :3000/product/fund/110022` 200（157,943B，回执 `runtime/fund110022-1015.html`）⇒ 屏上「**行业配置截至 2026-06-30 · 来源：akshare-fund-report**」＋「行业／占净值比例」表 ⇒ **CR9-98 的三态函数走 ok 支、首次实机验证通过**（undisclosed/unavailable 两句未触发）。
+
+⑥ **#31 残差结案 ✓（"现在批"）**：36 轮 POST→GET→DELETE 回环（合成码 `zzz-watch-selfcheck`、收尾零残留、基线 0→0）＝**0 异常（无"POST 200 而首读不见"）、0 非 200**；期间的编译只有"首次请求 `/api/watchlist` 路由"的一次性 route compile，**写库本身零触发**（CR9-58 的 `watchOptions.ignored` 生效——那正是 10-03 异常的触发源）。统计口径：若异常频率仍是 10-03 的 ~8%，36 轮全不中概率仅 ~5% ⇒ 证据支持"触发源已除"。回执 `runtime/windowB31-1015-1105.out`。
+
+⑦ **闸1 全绿**（11:06，回执 `gate1-67-1015-1106.out`，抬头 `dev d1311d1 dirty=2`）＝① `tsc` 0 错＋vitest **434/434**｜② ds **23 套 907/907**｜docs **NEW=0／KNOWN 13/13**、断链 0。
+
+⑧ **同轮搬（docs 治理）**：CODE-REVIEW **117,035→93,482**（7 枚已闭环追加节＝五十四~五十九＋六十一 → [history/2026-10-15-code-review-追加节归档.md](history/2026-10-15-code-review-追加节归档.md)，逐块 sha256 与 HEAD 全同、总 sha `078e99a2`）；**六十**（引 #67 待字）与**六十二**（跨度含 63/64 指针）刻意跳过；断链 0、基线 NEW=0。**一处执行件行为记录（用法教训）**：整段多节范围只生成**一枚**指针（标首节名）⇒ 五十五–五十九 的标签无指针、断链扫描当场抓到 2 枚 ⇒ 改成"**一节一块**"（7 范围）后转绿——**多节搬运必须一节一块**。
