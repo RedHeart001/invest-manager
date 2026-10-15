@@ -14,10 +14,10 @@
 > | 项 | 值 |
 > |---|---|
 > | **当前轮次** | CR9（当前开放）；CR8 已收尾 |
-> | **下一可用编号** | **10-15 14:3x（本格现值）**：**下一可用 CR＝CR9-103**（100/101/102＝#70/#71/#72 已落）；追加节次＝**追加七十二**；**#67 待字**、下一空号＝**#73**。两侧服务在跑（ds 4328／web 25960 @13:28，机器 12:51 二次重启后复起）；**W2 上午/午场见 [CODE-REVIEW.md](CODE-REVIEW.md) 追加七十一／七十二**（③ 主源 4/6、B1 卡在 push2 族、#65 ✓、#31 ✓、CR9-96 首读 ✓、bond 腿今日不可达）。push 现查＝`git rev-list --count origin/dev..HEAD`。取号权威＝本格。未闭环现查＝`docs-scan.py --list-closed`（只看首行 ✅） |
+> | **下一可用编号** | **10-15 18:3x（本格现值）**：**下一可用 CR＝CR9-103**（100/101/102＝#70/#71/#72 已落）；追加节次＝**追加七十三**；**#67 待字**、下一空号＝**#73**。**当日状况见 [CODE-REVIEW.md](CODE-REVIEW.md) 追加七十三**（代码/文档干净、ds 挂死待重启、刷新腿卡在 fund、W2 进度与三枚上游事实）。push 现查＝`git rev-list --count origin/dev..HEAD`。取号权威＝本格。未闭环现查＝`docs-scan.py --list-closed`（只看首行 ✅） |
 > | **未闭环看板** | 见下方「🔴 未闭环看板」节（本卡不复述条目） |
 > | **armed 自动化** | 现查 `qoder_cron list`；要新排自动化得主人单给一句字（#52 乙口径） |
-> | **服务监听** | 现查 `Get-NetTCPConnection -State Listen -LocalPort 8000,3000`；**10-15 13:28 现值＝8000→4328／3000→25960**（机器 12:51 二次重启后复起）。若 0 监听，起 ds 带 `SYNC_CATCHUP=off` ＋ `HTTPS_PROXY`（不要手设 `NO_PROXY`）；起 ds 自带的热点补跑只在已过 08:30 且当日无 marker 时真跑 |
+> | **服务监听** | 现查 `Get-NetTCPConnection -State Listen -LocalPort 8000,3000`；**10-15 18:2x 现值＝端口在（8000→4328／3000→25960）但 ds `/health` 已 8s 超时**＝机器反复入睡把 ds 挂死（`watchdog abandoned threads 64+`）⇒ **按响应判活、不是按端口判**；重启 ds 即恢复。若 0 监听，起 ds 带 `SYNC_CATCHUP=off` ＋ `HTTPS_PROXY`（不要手设 `NO_PROXY`） |
 ---
 
 ## 🔴 未闭环看板
