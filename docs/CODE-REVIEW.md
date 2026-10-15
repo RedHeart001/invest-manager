@@ -923,3 +923,17 @@ eastmoney_quote_ctl    ok= 0/10 gap=6s  ERR=['ConnectionError'] x10
 ⑤ **#72＝CR9-102**：`sync_scheduler.py` 的 dirname 层数 ×3→×2（落 `data-service/runtime/`，与 limiter／hotspot 同语义）；`test_c1_catchup_yield.py` 新增 2 枚断言（33→35）。**反向验证 🔁**＝临时回退成 ×3 ⇒ **恰好 2 枚红**、detail 逐字＝`E:\person_projects\invest-manager\runtime\sync-state.json`；恢复后 **35/35**。⚠️ 时效两条：**(a)** 02:00 那轮跑的是**旧进程**（内存里仍是 ×3）⇒ 仓库根那份 `runtime/sync-state.json` 今晚仍会生成一次（`?? runtime/` 属预期、**别提交**），重启装载新码后落点才切走、届时仓库根那份可直接删；**(b)** 我中途有一次恢复命令因 `cd` 相对路径失败而没执行（钻态多留了一跑），已按备份恢复并复跑 35/35——"恢复要验证、别信命令没报错"这一形记在案。
 
 ⑥ **全量闸终态**（10-15 01:48，对着 `dev 711a19a dirty=9`）＝`gate1-66-1015-0148.out`：① `tsc` 0 错＋vitest **434/434（49 文件）**｜② ds 离线 **23 套 907/907**（905→907＝＋2 枚 CR9-102 断言）｜docs **NEW=0／KNOWN 13/13**、断链 **0**、`--selftest` PASS；账本前后 `10a3c81a…` 逐字不变。三枚回执成对＝`gate1-64`（dirty=7，**首跑**、账本 3→6 的见证）／`gate1-65`（dirty=9，补隔离后**不变**）／`gate1-66`（dirty=9，**终态不变**）。
+
+#### 追加七十 · 10-15 09:5x–10:0x（批次②读数轮：三枚落痕取齐——marker ✓／Q2-1 随机器重启丢失（durable 兜底）／Product ✓；链式刷新腿被机器入睡中断在 fund；重启装载新码）
+
+① **本轮性质**＝W1.1 读数轮（主人的字＝「现在继续跑」）。**先记一条环境事实（它解释了全部"死亡"）**：机器 **09:41:52 才重启**（现查 `LastBootUpTime`）⇒ 昨夜进程实际活到 ~02:07 后**随机器入睡一起停**——**不是代码崩溃**；02:00 那轮在入睡前正常跑完了列表腿（web 日志 `POST /api/sync 200 in 112489ms`）。
+
+② **(a) marker＝CR9-94 首次真实判别 ✓**：仓库根那份 `runtime/sync-state.json`（旧进程、×3 落点）＝`{date: 2026-10-15, trigger: daily, outcome: partial_failed, at: 02:01:52}`；重启后按 #72 的新落点**把该文件迁到 `data-service/runtime/sync-state.json`**（保住"今日已试过"记录、并让活进程可读），`GET /sync/status` 现读 `lastAttemptFromDisk: true`、`markerReadError: null` ✓。
+
+③ **(b) Q2-1（进程内 akshare-obs 离 0）＝丢失**：机器入睡/重启把进程内那一列带走了 ⇒ 原判据不可读（**"要赶在没重启时读"那条边界第一次实际踩中**）。**durable 兜底读数**（09:58 现读、重启前快照）：10-15 格＝`akshare-obs granted 15`（seen：`sina.us-list 12`／`ak.fund_open_fund_daily_em 1`／`ak.stock_zh_a_spot 1`／`ak.bond_zh_hs_cov_spot 1`）、`eastmoney granted 32／denied 53`。⚠️ 这本账**混合多源**：00:14 闸②的 11＋我 01:4x 误跑 p0/p1 的 +2/+2＋02:00 链（列表腿＋部分刷新腿）的买数——**分不开**（#69 那条"短命进程/重启丢列"的同族代价）。⇒ CR9-97 的运行时证据**部分到手**：akshare-obs 族在真实同步流量上确实计数（三个 `ak.*_em` 键＝列表腿的买数），但"哪几发是同步的"不可归因。
+
+④ **(c) Product＝Q2-2 ✓（只读 SQL，`file:web/prisma/dev.db?mode=ro`）**：**五类 `max(updatedAt)` 全部动到 10-15 02:01**（stock 02:00:57／fund 02:01:19／bond 02:01:29／crypto 02:01:30／us 02:01:52）＝**列表腿六类全成**（hk 仍 0 行＝上游态）；行数＝bond 1061（+2）／crypto 250（=）／fund 28049（+51）／stock 5573（+2）／us 177（−1），合计 **35,110**（基线 35,056，净 +54）。**链式刷新腿被机器入睡中断在 fund**：stock 5572/5573 刷到（02:01:53–02:07:38）、fund 5730/28049 后断、bond/crypto/us 未刷（`refresh-progress.json` 定格 `current: fund, outcome: running`）⇒ 今日那四类屏上是"快照陈旧"（诚实态）。**补不补这一腿归主人**（现在补＝盘中买 ≈25min 的东财 fund 流量、与 W2 窗口抢桶；盘后补或留给明晨 02:00 都行）。⇒ 批次②**总判＝成立**（marker＋Product 完整、limiter 一项带混账）；"Product 那一枚"的读数已取，**立不立案归主人**。
+
+⑤ **重启与装载**（10-15 09:57）：web **23184**／ds **8316**（wrapper 与日志落各自 `runtime/`；新码已含 #72）。**起 ds 自带的热点补跑真跑了**（过了 08:30 且今日无 digest）＝`runs` 0→1、`tookMs=95984`、ingested 5、`finishedAt=10:01:25`；⚠️ **engine=keyword、degraded=true**——DeepSeek 回了一次 **503**（`llm chat failed: HTTPError: 503 … api.deepseek.com`），流水线按设计降级（降级标注诚实）；该轮买数＝进程内 eastmoney granted **7**（durable 32→39）。**今日 digest 可用但为关键词引擎产物**。
+
+⑥ **W1.2 的 03:30 备份＝未跑**（机器入睡）⇒ `dbBackup.lastRun` 仍 `10-14T14:16:04`；重启时 age≈19.7h＜26h 门限 ⇒ 没触发补备份 ✓（与预测一致）。
