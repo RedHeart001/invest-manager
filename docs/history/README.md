@@ -72,6 +72,7 @@ wc -l docs/history/*.md
 | [2026-10-14-code-review-追加节归档.md](2026-10-14-code-review-追加节归档.md) | CODE-REVIEW.md 的块搬迁（2026-10-14） | 整体搬迁，内容逐字保留 | 见 [../CODE-REVIEW.md](../CODE-REVIEW.md) |
 | [2026-10-15-fix-ledger-待拍板已闭环归档.md](2026-10-15-fix-ledger-待拍板已闭环归档.md) | FIX-LEDGER.md 的块搬迁（2026-10-15） | 整体搬迁，内容逐字保留 | 见 [../FIX-LEDGER.md](../FIX-LEDGER.md) |
 | [2026-10-15-执行顺序任务书.md](2026-10-15-执行顺序任务书.md) | 排给 2026-10-15 起的**执行任务书**（五波：W0 决策批／W1 批次②读数＋便宜修／W2 盘中到场窗口／W3 盘后饱和器＋第二批／W4 持续） | **前向任务书**（非事后归档）：逐波动作＋出网上限＋判据＋等字清单＋41 项盘点快照；**执行前通读**；**执行完本行转标『已执行，勿再执行』**，结论回上层 | 结论落 [../FIX-LEDGER.md](../FIX-LEDGER.md) 与 [../README.md](../README.md)；发现落 [../CODE-REVIEW.md](../CODE-REVIEW.md) |
+| [2026-10-15-code-review-追加节归档.md](2026-10-15-code-review-追加节归档.md) | CODE-REVIEW.md 的块搬迁（2026-10-15） | 整体搬迁，内容逐字保留 | 见 [../CODE-REVIEW.md](../CODE-REVIEW.md) |
 
 > **「同日续 N」的去处（10-08 重组留下的 19 处旧指针）**：上层文件里凡写「PROGRESS 同日续 N」的句子，其原文现在都在
 > [2026-10-08-progress-进度日志归档.md](2026-10-08-progress-进度日志归档.md)（该文件按「同日续 1…75」分节，编号与旧指针一一对得上，已逐号核对齐 75 段）。
