@@ -840,3 +840,40 @@ eastmoney_quote_ctl    ok= 0/10 gap=6s  ERR=['ConnectionError'] x10
 ⑥ **今日钉住的三枚上游事实（跨轮累计，供后续引用）**：**(i)** akshare cons 主机**硬编码 `29.push2.eastmoney.com`**（源码 `stock_board_concept_em.py:426`）且**第 7 页起必断** ⇒ 大板块（>600 成员）默认拉取会中途死；**(ii)** **债券实时行情整条腿今日不可达**（库内活码也 `all sources failed`：akshare 债券 spot 走东财被连坐、sina 备源表不含）；**(iii)** 本机对东财 **push2 族的封锁当日持续加重**（10-07 曾有"两条出口都不通"、10-13 名单腿复活、10-15 又转不可达）。
 
 ⑦ **给后续窗口的两条操作约束（写下来免得重踩）**：**(a)** 长任务（刷新腿/全量同步）**必须在机器保持唤醒的时段跑**——否则入 sleep 即被冻结、上游调用挂死、需重启 ds 才能清；**(b)** 起 ds 前先 `curl :8000/health` 判活，挂死的进程"仍在 listen"≠可用（要按响应判，不是按端口判）。
+
+#### 追加七十四 · 10-15 19:0x–20:2x（「启动ds和web」→「跑一下全量刷新」→「先启动web和ds，然后继续执行没做完的任务」：机器两次入睡带走两侧、ds 重建两棵＋第一次起错的解释器钉住＝venv（#73 已按甲落）＋刷新腿第三次重发收官 626s＋别家 18:3x 稿逐条复核）
+
+① **本轮性质**＝三条动作批：主人的字＝「在你明白理解当前项目的基础上，启动ds和web」→「两个都执行，注意保持机器激活」→「请你先启动web和ds，然后继续执行没做完的任务」。生产码零行；docs 侧＝**#73 登记并已按甲落**（⑯）＋README/状态卡换现值。
+
+② **ds 重建（挂死→活）**：`taskkill //F //T //PID 4328`（GBK 回执经 `iconv` 还原＝"成功: 已终止 PID 4328（属于 PID 12808 子进程）"）⇒ 现查 `:8000` 监听 **0** ⇒ 重起。新 ds＝PID **12884** @**19:04:16**、`:8000` 在听、日志内 `10048` 命中 **0**（CONSTRAINTS `:99` 那两条重启判据都过）。`/health` 现值＝`status:ok`／两族 `limiters[]` 进程内 **granted 0／denied 0／seenTotal 0**＝**启动零出网**／`skippedReason:"catchup: SYNC_CATCHUP=off"`＝没补跑／`jobs.daily-product-sync` nextRun **10-16 02:00**／`ingestTokenConfigured:true`。
+
+②b **同轮否证掉我自己刚写的一句判据**（19:33 现查）：我上一段曾把 `abandonedWatchdogs:0` 当成"这棵是活的、那棵是挂的"的判别——**错**。`timeout.py:127-150` 的 `_abandoned` 是**进程内累计的"被放弃调用数"**，满载刷新下这棵新 ds 也已到 **42**（日志 `watchdog abandoned threads = 42 (>= 20)`，阈值那行字面＝"上游疑似持续挂起，请排查数据源"）而 `/health` **照样 200**（只是慢到 **17.6s**）。⇒ 挂死的判据只有**"按响应判"那一半**成立＝`/health` 零字节超时才算挂，`abandoned` 计数与响应慢都只是**负载症状**；顺带一条新边界：**判活超时要按负载定**（满载时 `-m 8` 会假报挂死，我这轮的轮询器就是这么死的）。
+
+③ **装载态按门槛⑤ 的进程时刻判**＝生产码最后一笔 `347afc5`（CR9-100/101/102）@01:55 ＜ 进程 19:04 ⇒ **成立**。web **未动**（25960 @13:54、`/api/health` 200 `db:ok`）＝它本来就健康，重起要付一次全量重编译并撞 #31 那族 500 风险 ⇒ 只核不杀。CR9-102 的新落点在场：`data-service/runtime/sync-state.json` 139B @02:01、仓库根 `runtime/` **不存在**、`/sync/status` 的 `lastAttemptFromDisk:true`。
+
+④ **第一次起错＝解释器（本轮最值钱的一形，登记 #73）**：照账上字面 `python -m uvicorn …`（全局 `E:\python\python.exe`）起，**直接崩** `ModuleNotFoundError: No module named 'apscheduler'`（回执 `data-service/runtime/ds-1015-1855.log`）。现查两枚解释器＝`.venv/Scripts/python.exe` 有 `apscheduler`、全局没有 ⇒ 可用起法字面＝`cd data-service && SYNC_CATCHUP=off HTTPS_PROXY=http://127.0.0.1:7897 PYTHONPATH=. .venv/Scripts/python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000`（不带 `--reload`、不手设 `NO_PROXY`）。**`docs/CONSTRAINTS.md:99` 与 README「常用命令」那条『起服务』行写的都是裸 `python`＝账上的起服务字面本身是错的**；`CODE-REVIEW:150` 早记过 `E:\python\python.exe` 那一棵，但从未落成"该用哪一棵"。
+
+⑤ **另记一条读数边界**：Windows 下用 venv 起进程后，`Get-Process .Path` **仍显示 `E:\python\python.exe`**（venv 的重定向器）⇒ 别拿它当解释器判据；可用判据＝当场 `"$p" -c "import apscheduler"`。
+
+⑥ **我的 kill 改变了被测读数（自报）**：那轮 17:06 卡在 fund 的刷新腿在 **19:03:08**（＝kill 之后）收官＝`outcome:"completed"` 而**六类 `updated` 全 0**（fund `failedBatches 281`／bond 11／crypto 3／us 2／hk `total 0`）＝在途调用全部撞死。它**没写脏库**＝kill 前后同一把尺（只读 SQL `sum(snapshotAt is not null)`）逐字相同：stock 5572／fund 5730／bond·crypto·us **0**。并且**它没推进 `lastCompleted` 幂等账本**（fund/bond/crypto/us 仍 10-08、stock 仍 10-15 02:07）⇒ 重发**不需要 `?force=1`**。
+
+⑦ **全量刷新重发**：起跑 **19:12:39**、`POST /api/market/refresh?type=all`、`current:fund`，`stock` 被 #23 判"今日已刷新（快照时刻 02:01，整轮跑完 02:07）"而跳过；ds 侧 `inflightWatchdogs 2`、`akshare-obs granted 2`（`ak.fund_open_fund_daily_em`）、`eastmoney granted 0`（场外净值腿不占东财桶）。防睡＝持有者进程 PID **9608** @19:11:52（`SetThreadExecutionState(ES_CONTINUOUS|ES_SYSTEM_REQUIRED|ES_DISPLAY_REQUIRED)`，每 30s 续一次、60 分钟后自释）。⚠️ **判据边界**＝`powercfg /requests` 需管理员、我读不到 ⇒ "系统确实没睡"这一半只能事后由刷新腿跑完反证，不能当场证。
+
+⑧ **别家 18:3x 状况稿的逐条复核**（主人的字＝「这个是另一个项目对目前项目现状的说明，请你看下」）：**事实几乎全对**——push 14／工作树干净／CR9-100·101·102 已落已装载／③ 主源档 4/6／CR9-96 首读／#65 屏验／#31 36 轮零复现／diverged 89 发全 agree／快照覆盖 stock 5572·fund 5730·其余 0／`LastBootUpTime` 12:51:14，我逐条现查对上。**并把我账上那句上游事实钉到源码**＝`akshare/stock/stock_board_concept_em.py:426` 字面 `https://29.push2.eastmoney.com/api/qt/clist/get`；同文件 `:27-29` 的**名单**腿才有 79/17/91 三档轮换、**cons 腿只有一档＝没得换**，`:419-421` 正是 `^BK\d+` 短路（＝CR9-3 要的"传 BK 代码就跳过名单腿"）。
+
+⑨ **那份稿作废两条、口径差一条、漏六条**：**作废**＝「ds 已挂死需重启」（19:04 我已重建）与「刷新腿定格 `current:fund, outcome:running`」（19:03:08 以全失败收官）⇒ **照它结尾的问句再执行一次＝杀一棵健康的 ds 并再打断一次在途调用**。**口径差**＝它写"当日四轮落账已提交"，现查今日 **12 笔＝11 docs＋1 fix**，它只数 10:00 之后那四枚，把 00:15–01:58 六枚（甲档对账／闸1 读数／自纠／起服务轮／任务书／W0 落账）丢了。**漏的六项**＝docs 治理现状（`FIX-LEDGER` 194,186 超 FILE 阈 74,186、报警 13 条全在 KNOWN、`CODE-REVIEW` 距阈 19,702、断链 0）／A 桶等字清单（#67、OPT-3 第二批、bond 那一刀、六串字面、美股乙 913、OPT-2 阈值、`/api/sync` token、C34 两钻、push）／`Product` 基线 35,110 与 **hk 0 行**／夜间件 armed（02:00 同步＋03:30 备份）／热点腿今日 16:31 已产出（`HotspotDigest` 今日 10 行、总 337）／④ 那枚解释器形。
+
+⑩ **第二次入睡把两侧一起带走（19:4x–20:0x，主人 20:05 的字＝「请你先启动web和ds，然后继续执行没做完的任务」）**：20:05:19 现查＝8000／3000 监听**双 0**、`/health` 与 `/api/health` 各 2s 拒连；上面 ⑦ 那轮 19:12:39 起跑的刷新腿**再次半途死**，而且**库内一个字没写**（只读 SQL 复跑＝fund 仍 5730@02:07、bond/crypto/us 仍 0）⇒ 那 21 分钟等于纯消耗、无副作用。**防睡持有者那条要作废**：⑦ 里写的 PID 9608 后来被系统回收给别的进程（20:05 现查 `Get-Process -Id 9608` ＝ `Lenovo.Modern.ImController`）⇒ **持有者只能当场按名字＋时刻数，不许记 PID**（与 ②b 同族：进程态读数不外推）。
+
+⑪ **两侧第二次重建（20:06）**：ds＝**18620 @20:06:02**（venv 解释器＋`SYNC_CATCHUP=off`＋`HTTPS_PROXY`；`/health` 200、两族 `limiters[]` 进程内全 0＝**启动零出网**、`abandoned 0`、`jobs.daily-product-sync` nextRun 10-16 02:00、`ingestTokenConfigured:true`）／web＝**15512**（node @20:06:11，`npm run dev`，`/api/health` 200 `db:ok`）；防睡持有者＝python **17944 @20:05:59**（2 小时窗、每 20s 续一次）。
+
+⑫ **刷新腿第三次重发＝收官**（主人的字＝「跑一下全量刷新」＋本轮「继续执行没做完的任务」）：起跑 **20:07:21**、`finishedAt 20:17:48`、`tookMs 626s`。逐类（回执 `data-service/runtime/refresh-all-1015-2007.out`）＝`stock` 被 #23 跳过（02:01 已刷）／`fund` total 28049、**updated 16275**、281 批、2 批失败、559s／`bond` 1061、**updated 314**、11 批、61s／`crypto` 250、**updated 246**、3 批、2s／`us` 177、**updated 177**、2 批、5s／`hk` total **0**（库里没行）。
+库内 `snapshotAt` 覆盖（只读 SQL 复跑）＝stock 5572@02:01／**fund 18256**@20:07／**bond 314**@20:16／**crypto 246**@20:17／**us 177**@20:17／hk 0 行 ⇒ **追加七十三 ④ 与别家稿都记着的那句"bond/crypto/us 三类今日快照完全没补上"到本轮已解除**；惟 bond 只有 314/1061＝转债实时列表今日只给回这么多条（与 10-13 那次 1059→327 的备源缩水同族，`sina-bond` 表不含 ⇒ 上游态）。
+
+⑬ **一处未归因差额（下一轮要问的第一件）**：回执 `fund updated 16275` ⇔ 库内 priced **5730 → 18256＝净增 12,526**，差 **3,749**。我没去归因这 3,749（不写"应该是同值 no-op"这种话）；候选解释至少两枚（`updated` 计的是"这批里被点到的行"而非"值变了的行"／场外基金无最新净值的那些行写了 `snapshotAt` 但 `lastPrice` 仍空），要分辨得再看一次逐类 `lastPrice is not null` 与 `snapshotAt is not null` 是否等值——本轮两者对每一类都相等（5572=5572、18256=18256、314=314、246=246、177=177），所以第二枚候选**已被本轮读数否掉**，剩下的那一枚要到 `market-snapshot.ts` 的计数口径里读。
+
+⑭ **本窗出网账**＝ds 进程内 `eastmoney granted 9／denied 32`（**桶被这次刷新自己打满**，收尾 `cooldown 39.7s`）＋`akshare-obs granted 1`；durable 今日 `eastmoney granted 65／denied 94`。⇒ **此后东财桶不干净**：⑤ p0/p1（判据要干净桶）与 ④ 七件套（最贵那一行）本轮**不跑**，硬跑只能拿到"降级档"——这正是门槛③ 那句「"档"读不出自连续 burst、采样间隔必须大于被测系统的节流间隔」的另一半。闸1（①②＋docs 三查）读数见 ⑮。
+
+⑮ **收尾闸读数**＝`node scripts/gate.mjs --offline` → 回执 `data-service/runtime/gate1-69-1015-2020.out`，`aggregate.red=[]`、`exit=0`：`tsc` 0 error｜vitest **434/434**（49 文件）｜ds 离线 **23 套 907/907**｜docs 基线 **NEW=0／KNOWN 13/13**、断链 **0**、selftest PASS。⚠️ **这枚抬头对着脏树**（`sha d4cac5e2`／`dirtyPaths 4`＝本轮四个 docs 文件未提交时跑的）⇒ 它只证"改动没退化"，**不证"已提交这棵树"**；提交后的终检另起一枚。⚠️ 出网账要连这条一起写：② 那 23 套里 `test_p6_mcp` 自带**一发真腾讯报价**（既有登记项），所以本轮**不是零出网**；本窗合计＝刷新腿 `eastmoney granted 9／denied 32`＋`akshare-obs granted 1`＋闸1 的 1 发腾讯（跑两次＝2 发）。
+
+⑯ **本轮 #73 已按甲落地**（纯 docs、零生产码、不占 CR 号）＝README「常用命令」那条『起服务』行改成含 `.venv/Scripts/python.exe` 的整行可用字面；`docs/CONSTRAINTS.md:99` 行尾**只增一句**现查更正（原句一字留着）＋把「venv 起的进程 `Get-Process .Path` 仍报全局路径」这条读数边界写进去。⇒ 待拍板区里 **#73 已闭环、下一枚空号＝#74**。

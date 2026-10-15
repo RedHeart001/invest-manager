@@ -15,7 +15,8 @@
 
 - **当前轮次**：CR9（开放）；CR8 已收尾
 - **未闭环项**：CR9-3（BK 成分等价性，只欠实网验收）、CR9-26（hk 列表，上游态）、G7（token 已配置且双侧生效，欠的是"上云前补完整身份鉴权"）、C31（Docker 验证，暂缓）
-- **10-15 18:3x 同步（本行是现值）**：**当日状况总结**（字＝「总结当前项目状况…归档docs…add、commit」）＝代码/文档**干净**（push 欠 13 笔），当日三枚落码 CR9-100/101/102 全绿已装载；**服务问题**＝机器当日反复入睡，**ds 已挂死**（`/health` 8s 超时、`watchdog abandoned threads 64+`）⇒ 重启即恢复；**盘后刷新腿未完成**（卡在 fund；库内快照 stock 5572／fund 5730／bond·crypto·us **0**）⇒ 重启 ds 后重发 `POST /api/market/refresh?type=all` 续跑。明细见 [CODE-REVIEW.md](CODE-REVIEW.md) 追加七十三。
+- **10-15 20:2x 同步（本行是现值）**：**服务重建＋刷新腿收官轮**（字＝「启动ds和web」→「跑一下全量刷新」→「继续执行没做完的任务」）＝机器两次入睡带走两侧，现 **ds 18620／web 15512 @20:06**；起 ds 必须用 `.venv/Scripts/python.exe`（全局 `python` 缺 `apscheduler`）⇒ **#73 已按甲落**；**刷新腿 20:07→20:17 收官（626s）**＝fund 18256／bond 314／crypto 246／us 177 拿到今日快照（stock 被 #23 跳、hk 0 行）⇒ 那句"三类完全没补上"解除；⑤④ 因东财桶被这次刷新打满（denied 32／cooldown 39.7s）**本轮不跑**。闸1 全绿＝434/434｜907/907｜NEW=0。明细＝[CODE-REVIEW.md](CODE-REVIEW.md) 追加七十四。
+- **10-15 18:3x 同步（当时怎么数的，原样不回改）**：**当日状况总结**（字＝「总结当前项目状况…归档docs…add、commit」）＝代码/文档**干净**（push 欠 13 笔），当日三枚落码 CR9-100/101/102 全绿已装载；**服务问题**＝机器当日反复入睡，**ds 已挂死**（`/health` 8s 超时、`watchdog abandoned threads 64+`）⇒ 重启即恢复；**盘后刷新腿未完成**（卡在 fund；库内快照 stock 5572／fund 5730／bond·crypto·us **0**）⇒ 重启 ds 后重发 `POST /api/market/refresh?type=all` 续跑。明细见 [CODE-REVIEW.md](CODE-REVIEW.md) 追加七十三。
 - **10-15 14:3x 同步（当时怎么数的，原样不回改）**：**W2 午场**（字＝「接着跑，先做能做的三件…」）＝**B1 第七跑仍不通**（push2 族本会话判不可达）／**bond 归因更正**（库内活码也失败 ⇒ 债券实时整条腿今日不可达，非样本问题）／**实时条数据路径复核 ✓**（ds＋BFF 均给数；上屏 DOM 属客户端⇒归主人手测）；机器 **12:51 二次重启**、13:28 复起。闸1 全绿（`gate1-68-1015-1426`，`dirty=0`）。明细见 [CODE-REVIEW.md](CODE-REVIEW.md) 追加七十二。
 - **10-15 11:2x 同步（当时怎么数的，原样不回改）**：**W2 上午场**（字＝「w2 开打」→「现在就做…」）＝③ 主源档 **4/6**（crypto BTC **首次主源** ✓；us 备源、bond 样本码问题）；**CR9-3 B1 六跑未闭环**——新钉上游事实：akshare cons 主机**硬编码 `29.push2` 且第 7 页起必断**（大板块拉取会中途死）；**CR9-96 首读 ✓**（TTL 5s/60s 行为对）；**#65 屏验 ✓**（行业配置截至 2026-06-30）；**#31 残差结案 ✓**（36 轮零复现）；**diverged 未见**（89 发全 agree）；闸1 全绿＋CODE-REVIEW 搬 7 节（117,035→93,482）。明细见 [CODE-REVIEW.md](CODE-REVIEW.md) 追加七十一。
 - **10-15 10:0x 同步（当时怎么数的，原样不回改）**：**批次②读数轮**（字＝「现在继续跑」）＝机器 **09:41 重启**（昨夜进程活到 ~02:07 随入睡停、**非崩溃**）；**02:00 那轮列表腿六类全成**（Product 五类全部动到 10-15 02:01，合计 35,110）＋marker `partial_failed` **CR9-94 首次真实判别 ✓**；**Q2-1 进程内列随重启丢失**（durable 兜底：akshare-obs 15／eastmoney 32·53，混我 01:4x 误跑残留、分不开）；**链式刷新腿断在 fund**（5730/28049，补不补归主人）；重启装载新码（ds 8316／web 23184）＋**热点补跑已跑**（engine=keyword、DeepSeek 503 降级，今日 digest 可用）。明细见 [CODE-REVIEW.md](CODE-REVIEW.md) 追加七十。
@@ -54,7 +55,7 @@
 
 ## 常用命令
 
-- **起服务**：ds 带 `SYNC_CATCHUP=off` + `HTTPS_PROXY`；web `npm run dev`
+- **起服务**：ds＝`cd data-service && SYNC_CATCHUP=off HTTPS_PROXY=http://127.0.0.1:7897 PYTHONPATH=. .venv/Scripts/python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000`（**解释器必须是 `.venv/Scripts/python.exe`**——全局 `python` 没有 `apscheduler`，照它起必崩，见 [FIX-LEDGER.md](FIX-LEDGER.md) 待拍板 #73；**不带 `--reload`**、不手设 `NO_PROXY`）／web＝`cd web && npm run dev`
 - **跑测试**：web `npx tsc --noEmit && npx vitest run`；ds 离线套件逐套 `exit=0`；集成 `node web/scripts/verify-all.mjs`。**点名的套件清单与各项现值只读 [FIX-LEDGER.md](FIX-LEDGER.md)「验证门槛（权威现值）」**——本文件不复述计数（计数会随重组漂移）
 - **查状态**：`curl :8000/health`（ds）、`curl :3000/api/health`（web）
 
