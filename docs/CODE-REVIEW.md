@@ -930,4 +930,6 @@ eastmoney_quote_ctl    ok= 0/10 gap=6s  ERR=['ConnectionError'] x10
 
 ⑥ **热点腿的启动补跑＝`SYNC_CATCHUP=off` 管不到它（今天现场兑现的那一形）**：ds @**10:11:45** 那棵起来后（起号时刻见 ③b 的更正），自己在 10:12:05–10:13:26 跑完 10-16 那轮热点，`hotspot-state.json` 字面 `lastAttemptTrigger="startup-catchup"`·`outcome="completed"`·`degraded:false`·`topics 5`·新闻 `attempted 3／arrived 3`（eastmoney-news 25／cls 20／tavily 13）。⇒ `SYNC_CATCHUP=off` 只关**同步**补跑（② 的 `skippedReason` 已证），热点那条照补。这一轮是**今天本该 08:30 跑的日腿**、不是新增消费，但它是我起服务的副作用，落账要写明是谁花的。顺带一枚免费读数＝`lastResult.boardPaths={byCode 3, byName 3, emCodeRows 1001, requestsPerCodePath 1, requestsPerNamePath 9, savedRequestsEstimate 24}` ⇒ **CR9-3 的 B1 那道"emCodeRows=0 就不买"今天不为 0**；⚠️ 它与 10-15 记的 `emCodeRows=5` 差两个量级，把 B1 摆上批字桌前要先弄清这两枚的口径差，别拿它当"今天该买"。
 
+⑥b **上一段那句「与 10-15 的 `emCodeRows=5` 差两个量级、先对口径」当场作废（10:4x 只读复核）**：那个"5"＝我把自己 grep 输出的**截断**当成了读数，`:800` 的字面是 `emCodeRows=506`／`byCode=5` ⇒ 真值 506→1001 是**同量级**。方向也讲反了：`FIX-LEDGER.md:27` 末段早在 **10-07** 就写着「12 发探针取消、映射落盘无源可落 ⇒ 不立项；`boardPaths.emCodeRows==0` 继续当免费监测，出口环境哪天变了它自己翻 nonzero」⇒ 今天这枚 1001 不是"闸门开着等我去买"，而是**那枚免费监测自己翻了**＝10-07 判"本机两条出口都不通"的前提已被否证 ⇒ **CR9-3 的 BK 成分等价性验收重新可跑**（1–9 发，等"跑"字）。**规矩：引用别处的一个数，必须读它自己那行的完整字面，grep 截断不算读数。**
+
 ⑦ **闸与提交**：生产码零行 ⇒ 未复跑 ①②；docs 三查现值＝见本轮提交后的门槛区与 [README.md](README.md)「当前状态」行。push 现查 **22** 笔。armed 现值＝`qoder_cron list` 只剩 15:05 那枚 D2（④ 七件套）一枚。
