@@ -154,11 +154,16 @@ def summarize(rows: list[dict]) -> dict:
     }
 
 
+def build_plan(types: str, code: str) -> list[tuple[str, str]]:
+    # #76：老写法只有 DEFAULT_PLAN 里不存在的类型才用得上 --code，给了 --types＋--code 时码被静默吞
+    if not types:
+        return list(DEFAULT_PLAN)
+    table = dict(DEFAULT_PLAN)
+    return [(t, (code or table.get(t, ""))) for t in types.split(",")]
+
+
 def run(a) -> int:
-    plan = DEFAULT_PLAN if not a.types else [
-        (t, dict(DEFAULT_PLAN).get(t, a.code or "")) for t in a.types.split(",")
-    ]
-    plan = [(t, c) for t, c in plan if c][:CAP_REQUESTS]
+    plan = [(t, c) for t, c in build_plan(a.types, a.code) if c][:CAP_REQUESTS]
     print(f"A3 计划：逐类各 1 发＝{len(plan)} 发，同发间隔下界 {MIN_SPACING_S}s（> 族闸 min_interval 5s）")
     opener = NoProxyOpener()
     receipt = Receipt("windowA-a3", dry=a.dry_run)
@@ -218,6 +223,14 @@ def selftest() -> int:
     ck("计划条数不超逐类各 1 发的上限", len(DEFAULT_PLAN) == CAP_REQUESTS)
     ck("hk 那一发在计划里被显式标注不在库（0 行）",
        any(t == "hk" for t, _ in DEFAULT_PLAN) and "00700" in [c for _, c in DEFAULT_PLAN])
+    # #76 的牙齿＝两半样本：摘掉 --code 必须翻回旧行为，否则这条断言恒真
+    ck("#76·甲：给了 --types 又给 --code ⇒ 码用 --code（不再被 DEFAULT_PLAN 顶掉）",
+       build_plan("bond", "127116") == [("bond", "127116")])
+    ck("#76·乙：只给 --types ⇒ 仍取 DEFAULT_PLAN 那只码",
+       build_plan("bond", "") == [("bond", dict(DEFAULT_PLAN)["bond"])] and
+       build_plan("bond", "") != [("bond", "127116")])
+    ck("#76·丙：不给 --types ⇒ --code 不参与，整张默认计划原样",
+       build_plan("", "127116") == list(DEFAULT_PLAN))
     print(f"\nselftest {sum(checks)}/{len(checks)} PASS")
     return 0 if all(checks) else 1
 
