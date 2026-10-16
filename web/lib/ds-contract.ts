@@ -208,36 +208,15 @@ export function builderMsFor(committedMs: number, isDirty: boolean, nowMs: numbe
   return Math.max(committedMs, isDirty ? nowMs : 0);
 }
 
-/** 一批"同一枚提交把构造面改新"的过期条目共用同一句来路。
- *  写成函数不是省字：`ds-contract.test.ts:231` 要求每条理由 ≥20 字符，逐条手抄十遍早晚出现
- *  "有一枚的理由被改短/改歪"那一形；共用一份句子，重采之后也整块摘。 */
-function staleBatch(paths: string[], why: string): Record<string, string> {
-  return Object.fromEntries(paths.map((p) => [p, why]));
-}
-
-/** 已知陈旧清单自证用：这些条目的来路（谁把构造面改新的、什么时候重采） */
+/** 已知陈旧清单自证用：这些条目的来路（谁把构造面改新的、什么时候重采）。
+ *  登记表为空＝L3 两条牙齿都在跑：清单外的过期当场红，清单里的不再过期也红（逼着摘）。
+ *  每条的 `why` 有 ≥20 字符的下限（`ds-contract.test.ts:231`），且要写清"谁把构造面改新的＋哪一轮重采"。 */
 export const KNOWN_STALE_SNAPSHOTS: Record<string, string> = {
   // 10-13 13:47 `window_contract.py --live --write` 重采后销账（原两条＝`/quote`／`/kline`，
-  // 由 CR9-92 落码判过期）。这一格只在"有人把构造面改新、快照还没重采"时才有内容。
-  ...staleBatch(
-    [
-      "/quote",
-      "/kline",
-      "/quote/verified",
-      "/quote/realtime",
-      "/news",
-      "/quotes",
-      "/fund/holdings",
-      "/fund/report",
-      "/bond/yieldcurve",
-      "/hotspots/status",
-    ],
-    "10-16 CR9-108（#75 只读映射腿）改了新笔端点之外的构造面两枚文件＝`main.py`＋" +
-      "`providers/akshare_provider.py`；这十枚的键面一处没变（新路由没进 `DS_CONTRACT`＝web 尚无调用点，" +
-      "分母仍 11），过期只来自构造面时间戳前进。处置归 #77 的甲（同轮 `window_contract.py --live --write` 重采，" +
-      "要那 11 枚分母档的额度，只能人工到场）；**重采完必须把这一整块摘掉**——" +
-      "`obsoleteKnownStale` 就是为这件事留的牙齿（清单比现实长＝红）。",
-  ),
+  // 由 CR9-92 落码判过期）。
+  // 10-16 19:0x 重采后销账（原十条＝`/quote`…`/hotspots/status` 整块，由 CR9-108 把 `main.py`＋
+  // `providers/akshare_provider.py` 改新而判过期；键面一处没变，新路由不进 `DS_CONTRACT`＝分母仍 11）。
+  // 这一格只在"有人把构造面改新、快照还没重采"时才有内容。
 };
 
 /** L3 的"新增"那一半：不在已知清单里的过期才该红 */

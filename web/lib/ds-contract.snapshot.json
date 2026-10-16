@@ -4,7 +4,7 @@
   "note": "只记键面（结构契约），不记数值 ⇒ 本文件永不含标的价格之外的业务数据，也不含任何凭据。回执文件本身在 .gitignore 内，所以键面必须抄到这里才跨机可读。",
   "endpoints": {
     "/quote": {
-      "capturedAt": "2026-10-13",
+      "capturedAt": "2026-10-16",
       "provenance": "test-script/window_contract.py --live --write（现场腿，真响应键面）",
       "topLevel": [
         "amount",
@@ -31,7 +31,7 @@
       "rows": null
     },
     "/kline": {
-      "capturedAt": "2026-10-13",
+      "capturedAt": "2026-10-16",
       "provenance": "test-script/window_contract.py --live --write（现场腿，真响应键面）",
       "topLevel": [
         "candles",
@@ -53,7 +53,7 @@
       }
     },
     "/quote/verified": {
-      "capturedAt": "2026-10-13",
+      "capturedAt": "2026-10-16",
       "provenance": "test-script/window_contract.py --live --write（现场腿，真响应键面）",
       "topLevel": [
         "amount",
@@ -83,9 +83,10 @@
       "rows": null
     },
     "/quote/realtime": {
-      "capturedAt": "2026-10-13",
+      "capturedAt": "2026-10-16",
       "provenance": "test-script/window_contract.py --live --write（现场腿，真响应键面）",
       "topLevel": [
+        "cache",
         "code",
         "consensus",
         "crossChecked",
@@ -105,6 +106,7 @@
       "rows": {
         "sources": [
           "detail",
+          "fromCache",
           "kind",
           "latencyMs",
           "ok",
@@ -113,7 +115,7 @@
       }
     },
     "/news": {
-      "capturedAt": "2026-10-13",
+      "capturedAt": "2026-10-16",
       "provenance": "test-script/window_contract.py --live --write（现场腿，真响应键面）",
       "topLevel": [
         "code",
@@ -132,7 +134,7 @@
       }
     },
     "/quotes": {
-      "capturedAt": "2026-10-13",
+      "capturedAt": "2026-10-16",
       "provenance": "test-script/window_contract.py --live --write（现场腿，真响应键面）",
       "topLevel": [
         "note",
@@ -143,7 +145,7 @@
       "rows": null
     },
     "/fund/holdings": {
-      "capturedAt": "2026-10-13",
+      "capturedAt": "2026-10-16",
       "provenance": "test-script/window_contract.py --live --write（现场腿，真响应键面）",
       "topLevel": [
         "code",
@@ -162,7 +164,7 @@
       }
     },
     "/fund/report": {
-      "capturedAt": "2026-10-13",
+      "capturedAt": "2026-10-16",
       "provenance": "test-script/window_contract.py --live --write（现场腿，真响应键面）",
       "topLevel": [
         "code",
@@ -181,7 +183,7 @@
       }
     },
     "/bond/yieldcurve": {
-      "capturedAt": "2026-10-13",
+      "capturedAt": "2026-10-16",
       "provenance": "test-script/window_contract.py --live --write（现场腿，真响应键面）",
       "topLevel": [
         "curve",
@@ -191,15 +193,19 @@
       "rows": null
     },
     "/hotspots/status": {
-      "capturedAt": "2026-10-13",
+      "capturedAt": "2026-10-16",
       "provenance": "test-script/window_contract.py --live --write（现场腿，真响应键面）",
       "topLevel": [
+        "catchUpSkipReason",
         "fromDisk",
         "jobs",
+        "lastAttempt",
+        "lastAttemptFromDisk",
         "lastResult",
         "lastRun",
         "running",
         "runs",
+        "stateWriteFailed",
         "timezone"
       ],
       "rows": {
