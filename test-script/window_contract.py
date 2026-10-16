@@ -245,7 +245,9 @@ def selftest() -> int:
     # 这一枚是真牙齿：清单加了端点而现场腿没加探针／或探针偷偷多采一枚被排除的 ⇒ 自测红
     ck("探针集合 == 分母（分母现查 NO_LIVE_PROBE，不抄第二份）",
        sorted(p["path"] for p in PROBES) == sorted(denominator()))
-    ck("分母＝11（13 登记 − 2 枚各有理由的排除；10-13 CR9-92 加了 `/quote/realtime`）", len(denominator()) == len(declared) - 2 == 11)
+    ck("分母＝11（登记 14 − 排除 3；10-16 CR9-111 把 `/bond/underlying` 登记后同时排除，"
+       "排除数不抄第二份——原来写死的 `- 2` 一加第三条排除就会假红）",
+       len(denominator()) == len(declared) - len(no_live_probe()) == 11)
     ck("/hotspots/status 已挪进探针清单且零上游（0 发＝不动桶）",
        any(p["path"] == "/hotspots/status" and p["egress"].startswith("0") for p in PROBES))
     ck("有副作用的 POST 永不自动采（run 触发抓取／start 起研报）",

@@ -145,6 +145,15 @@ export const DS_CONTRACT: readonly EndpointContract[] = [
     note: "`source` **不在 requiredTop**：它只在成功分支有（`akshare_provider.py:888`），降级分支只回 `{degraded,note,curve}`（`main.py:323`）——声明成必需要求降级响应也带它。消费侧本来就按可选处理（`page.tsx:55` `source?: string`、`:454` 空则不渲染「· 来源：」）。10-13 现场腿采到的正是降级态（note＝`yield curve no valid rows`）。",
   },
   {
+    path: "/bond/underlying",
+    method: "GET",
+    requiredTop: ["code", "degraded", "note", "stockCode", "stockName"],
+    readBy: ["web/lib/events.ts"],
+    note: "#75 的 web 那一半（CR9-111）：转债详情页的事件区先问这一枚拿正股，再拿正股代码去 `/news`。"
+      + "两态都带这五枚键（降级＝`main.py:342` 显式写 null，成功＝`main.py:349` 整份展开），"
+      + "所以 `stockCode`/`stockName` 可以一起进 required——不像 `/bond/yieldcurve` 的 `source` 只在成功分支有。",
+  },
+  {
     path: "/hotspots/status",
     method: "GET",
     requiredTop: ["running", "lastResult"],
@@ -175,6 +184,8 @@ export const DS_CONTRACT: readonly EndpointContract[] = [
 export const NO_LIVE_PROBE: Record<string, string> = {
   "/hotspots/run": "L2 是空集（`requiredTop: []`，整份透传）⇒ 键面快照对它没有判据",
   "/research/start": "POST 有副作用（真起一次研报任务）⇒ 永不自动采，要它的人自己点名",
+  "/bond/underlying":
+    "键面由 ds 侧离线套件 test_cr9_108_bond_map.py（18/18，akshare 全程替身）钉住成功与降级两臂，而现场腿每采一次都要为整张映射表花一枚东财令牌（件内约 4 个 HTTP）、这张表 24 小时才值得变一次 ⇒ 排除；要点名采它就给 window_contract 的 PROBES 加一枚探针",
 };
 
 /** ds 侧「谁把响应拼出来」的那几枚文件——L3 拿它们的最后提交时间和快照比 */

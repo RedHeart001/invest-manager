@@ -4,6 +4,7 @@ const dsGet = vi.fn();
 vi.mock("@/lib/data-service", () => ({ dsGet: (...a: unknown[]) => dsGet(...a) }));
 
 import {
+  bondEventsFrom,
   DEGRADE_NOTES,
   fetchEvents,
   groupByDate,
@@ -112,6 +113,106 @@ describe("降级文案（E-3 刀 A 改准）", () => {
 
   it("三句都承认「仅展示阶段划分」（R16：缺口要说出口）", () => {
     for (const t of ["fund", "bond", "crypto"]) expect(DEGRADE_NOTES[t]).toContain("仅展示阶段划分");
+  });
+});
+
+// #75 的 web 那一半（CR9-111）：转债那一臂从"一次都不发"变成"先映射、再拿正股问新闻"。
+// 替身按**请求里的那个路径**分流——写死一个响应会把"第二发用的是正股代码"这一枚判别力抹掉。
+describe("fetchEvents 转债那一臂（#75 web 半）", () => {
+  beforeEach(() => {
+    dsGet.mockReset();
+  });
+
+  const mapOk = {
+    code: "110002",
+    degraded: false,
+    note: null,
+    stockCode: "600519",
+    stockName: "贵州茅台",
+  };
+  const newsOk = {
+    code: "600519",
+    degraded: false,
+    note: null,
+    items: [{ date: "2026-03-04", title: "正股公告A" }],
+  };
+
+  it("先问映射、再拿**正股代码**去问 /news（判别力在第二发的参数上）", async () => {
+    dsGet.mockImplementation(async (p: string) => (p === "/bond/underlying" ? mapOk : newsOk));
+    const r = await fetchEvents("bond", "B75-1");
+    expect(dsGet.mock.calls.map((c) => c[0])).toEqual(["/bond/underlying", "/news"]);
+    expect(dsGet.mock.calls[1][1]).toEqual({ code: "600519" });
+    expect(r.degraded).toBe(false);
+    expect(Object.keys(r.byDate)).toEqual(["2026-03-04"]);
+    expect(r.fromStock).toEqual({ code: "600519", name: "贵州茅台" });
+    expect(r.mapStatus).toBe("ok");
+  });
+
+  it("来路那句字面钉住（屏上只有这一处出口），正股简称读不出时退回代码", () => {
+    expect(bondEventsFrom({ code: "600519", name: "贵州茅台" })).toBe(
+      "事件区取的是正股「贵州茅台」的新闻，转债公告源仍未接入",
+    );
+    expect(bondEventsFrom({ code: "600519", name: null })).toBe(
+      "事件区取的是正股「600519」的新闻，转债公告源仍未接入",
+    );
+  });
+
+  it("🔁 来路句不许长成『转债公告已接入』（那条通道本轮没做）", () => {
+    expect(bondEventsFrom({ code: "1", name: null })).not.toContain("已接入");
+  });
+
+  it("映射答不出＝不追问新闻、维持接之前那句缺口说明", async () => {
+    dsGet.mockResolvedValue({
+      code: "110002",
+      degraded: true,
+      note: "bond code not in convertible map: 110002（映射共 1060 只）",
+      stockCode: null,
+      stockName: null,
+    });
+    const r = await fetchEvents("bond", "B75-2");
+    expect(dsGet).toHaveBeenCalledTimes(1);
+    expect(r).toEqual({
+      degraded: true,
+      note: DEGRADE_NOTES.bond,
+      byDate: {},
+      mapStatus: "no-underlying",
+    });
+  });
+
+  it("在册但那一行的正股代码为空＝同样不发第二发（不许把 null 当代码去打 /news）", async () => {
+    dsGet.mockResolvedValue({ ...mapOk, stockCode: null });
+    const r = await fetchEvents("bond", "B75-3");
+    expect(dsGet).toHaveBeenCalledTimes(1);
+    expect(r.mapStatus).toBe("no-underlying");
+    expect(r.degraded).toBe(true);
+  });
+
+  it("路由不可用（未装载／404／连不上）＝屏上仍是那句缺口说明，成因只落机器可读位", async () => {
+    dsGet.mockImplementation(async () => {
+      throw new Error("data-service timeout after 30000ms（服务在跑但未及时响应）");
+    });
+    const r = await fetchEvents("bond", "B75-4");
+    expect(r.degraded).toBe(true);
+    expect(r.note).toBe(DEGRADE_NOTES.bond);
+    expect(r.note).not.toContain("timeout");
+    expect(r.mapStatus).toBe("route-failed");
+  });
+
+  it("映射通了但新闻降级＝沿用新闻那条 note，不假装成功", async () => {
+    dsGet.mockImplementation(async (p: string) =>
+      p === "/bond/underlying" ? mapOk : { code: "600519", degraded: true, note: "新闻源暂不可用（东财冷却）", items: [] },
+    );
+    const r = await fetchEvents("bond", "B75-5");
+    expect(r.degraded).toBe(true);
+    expect(r.note).toBe("新闻源暂不可用（东财冷却）");
+    expect(r.fromStock).toBeUndefined();
+  });
+
+  it("🔁 其余类型照旧一次都不发（这一轮只放开 bond）", async () => {
+    const r = await fetchEvents("fund", "B75-6");
+    expect(dsGet).not.toHaveBeenCalled();
+    expect(r.degraded).toBe(true);
+    expect(r.mapStatus).toBeUndefined();
   });
 });
 

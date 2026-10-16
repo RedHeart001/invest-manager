@@ -9,7 +9,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import type { EventsResult } from "@/lib/events";
+import { bondEventsFrom, type EventsResult } from "@/lib/events";
 import { klineEmptyCause, klineEmptyText } from "@/lib/kline-empty-reason";
 import type { KlineResult } from "@/lib/kline";
 import { detectPhases, phaseAttributionText, phaseColor, type Phase } from "@/lib/phases";
@@ -560,7 +560,18 @@ export default function ProductCharts({
           变化解读（所选区间 {phases.length} 个阶段）
         </h2>
         {events.degraded && (
-          <p className="mt-1 text-xs text-amber-600">事件标注不可用：{events.note}</p>
+          <p
+            className="mt-1 text-xs text-amber-600"
+            data-map-status={events.mapStatus ?? "none"}
+          >
+            事件标注不可用：{events.note}
+          </p>
+        )}
+        {/* #75 的 web 那一半（CR9-111）：转债的事件区来自正股——来路要一句，否则会被读成转债公告 */}
+        {!events.degraded && events.fromStock && (
+          <p className="mt-1 text-xs text-zinc-500" data-testid="events-from">
+            {bondEventsFrom(events.fromStock)}
+          </p>
         )}
         {kline.interval === "1m" ? (
           <p className="mt-2 text-xs text-zinc-400">当日分钟线不参与阶段划分。</p>
