@@ -84,15 +84,18 @@ const failedSuites = [];
 
 // #78（10-16）：回执要自带"对着哪一棵树跑的"。此前 ③④ 的回执只有数字，事后无法证明
 // 它对应已提交的那一棵，还是改到一半的脏树（脏改动也算"现在"＝#77 同一族）。
+// ③ 那半落地时把判据收进了 data-service/tests/_live_stamp.py，这里 spawn 同一份——
+// node 侧再实现一遍"哪一棵码"就是第二把尺，而它会漂（漂的那一形是静默的：dirty 恒 0、装载恒成立）。
 const REPO_DIR = join(WEB_DIR, "..");
+const VENV_PY = join(REPO_DIR, "data-service", ".venv", "Scripts", "python.exe");
+const STAMP_PY = join(REPO_DIR, "data-service", "tests", "_live_stamp.py");
 function treeStamp() {
-  const sha = (spawnSync("git", ["rev-parse", "--short", "HEAD"], { cwd: REPO_DIR, encoding: "utf8" }).stdout || "?").trim();
-  const st = spawnSync("git", ["status", "--porcelain"], { cwd: REPO_DIR, encoding: "utf8" });
-  const dirty = st.status === 0 ? st.stdout.split("\n").filter(Boolean).length : -1;
-  return `HEAD=${sha} dirty=${dirty}`;
+  const r = spawnSync(VENV_PY, [STAMP_PY], { cwd: REPO_DIR, encoding: "utf8", timeout: 30_000 });
+  const line = (r.stdout || "").split("\n").filter(Boolean).pop();
+  return line || `树戳：读不出（python 或助手不在，status=${r.status ?? "?"}）`;
 }
 const TREE = treeStamp();
-console.log(`树戳（#78）：${TREE}`);
+console.log(`（#78 起跑前）${TREE}`);
 lines.push(`########## 树戳（#78，起跑前）##########\n${TREE}`);
 for (const s of suites) {
   const started = Date.now();
