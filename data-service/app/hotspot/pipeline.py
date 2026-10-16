@@ -816,11 +816,29 @@ def _sina_hot_topics(limit: int = 3) -> list[dict]:
     return out
 
 
+# 甲′（#79／CR9-110，2026-10-16）：`_ak_guarded` 交回的是 `RuntimeError(...) from 原异常`，
+# 而"这一腿答不出"与"上游真挂了"的判据一直住在 `__cause__` 里没被读过。旧写法在 `except` 里
+# 无条件 `break`（注释写的是"熔断已触发"，可额度被拒根本不走异常），于是 em-industry 那一腿
+# 在任何概念板异常之后**结构上永远试不到**——拿着 BK1031 的那一条就是这么落进新浪的。
+# 白名单只放数据形态类（板块名在这一族里不存在／列名对不上）＝换下一腿；
+# TimeoutError／WatchdogOpenError（看门狗超时、在飞达上限、一个请求都没发）＝维持今天的语义，
+# 整族转新浪。没见过的形态一律按"上游不可信"处理，不猜。
+_BOARD_DATA_SHAPE_ERRORS = (IndexError, KeyError)
+
+
+def _board_leg_is_data_shape(exc: BaseException) -> bool:
+    """这条腿是"答不出"（可换下一腿）还是"发不出去"（该整族降级）。"""
+    return isinstance(getattr(exc, "__cause__", None) or exc, _BOARD_DATA_SHAPE_ERRORS)
+
+
 def map_board_products(board: str, limit: int = BOARD_STOCKS_PER_TOPIC) -> dict:
     """板块成分映射：东财概念板 → 东财行业板 → 新浪行业/概念板（R15 多源降级）。
 
     #44（CR9-72）新增返回键 `pathForms`＝本板块真发出去的每一次东财成分请求的形态
     （`"code"`|`"name"`，概念/行业各计一发；没走到东财就是空列表）。调用方见 `_board_path_stats`。
+
+    甲′（#79／CR9-110）：概念腿抛**数据形态类**异常（板块名不存在／列名对不上）时**继续试行业腿**，
+    所以 `pathForms` 可以有两枚；抛超时／看门狗那一形时仍直接跳出整族走新浪（与改动前同）。
     """
     import akshare as ak
 
@@ -849,8 +867,13 @@ def map_board_products(board: str, limit: int = BOARD_STOCKS_PER_TOPIC) -> dict:
                     return {"stocks": stocks, "source": tag, "note": None, "pathForms": forms}
             except Exception as e:  # noqa: BLE001
                 _EM.on_failure()
-                log.warning("board cons failed (%s %s→%s): %s", tag, board, sym, e)
-                break  # 熔断已触发，转新浪备源
+                next_leg = _board_leg_is_data_shape(e)
+                log.warning(
+                    "board cons failed (%s %s→%s): %s ⇒ %s",
+                    tag, board, sym, e, "换下一腿" if next_leg else "整族转新浪",
+                )
+                if not next_leg:
+                    break  # 超时／看门狗／未知形态：这一族此刻不可信
 
     sina = _sina_board_products(board, limit)
     if sina["stocks"]:

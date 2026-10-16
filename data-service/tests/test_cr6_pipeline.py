@@ -333,6 +333,109 @@ def test_board_code_shortcut() -> None:
         pl._board_cache.clear()
 
 
+def test_board_leg_exception_split() -> None:
+    """#79 甲′（CR9-110）：概念腿抛**哪一类**异常，决定行业腿试不试得到。
+
+    旧写法在 `except` 里无条件 `break`（注释写"熔断已触发"，可额度被拒根本不走异常），
+    于是 em-industry 那一腿在任何概念板异常之后**结构上永远试不到**——实测样本＝拿着
+    `BK1033` 的「电源设备」整块落新浪（今日读数 `byCode=0／byName=2` 就是这个形状）。
+    判据取 `_ak_guarded` 早就保下来的 `__cause__`（`raise ... from 原异常`），不改中间层。
+    """
+    import akshare as ak
+    import pandas as pd
+
+    from app.utils.timeout import WatchdogOpenError
+
+    ak_names = ("stock_board_concept_cons_em", "stock_board_industry_cons_em")
+    orig_ak = {n: getattr(ak, n) for n in ak_names}
+    orig_sina = pl._sina_board_products
+    orig_em = (pl._EM.acquire, pl._EM.on_success, pl._EM.on_failure)
+    orig_bc = pl._board_code
+    orig_wl = pl._BOARD_DATA_SHAPE_ERRORS
+
+    seen: list[tuple[str, str]] = []
+    fails: list[str] = []
+    oks: list[str] = []
+
+    def _cons(tag: str, err: Exception | None = None):
+        def _f(symbol: str):
+            seen.append((tag, symbol))
+            if err is not None:
+                raise err
+            return pd.DataFrame({"代码": ["300750", "601012"], "名称": ["宁德时代", "隆基绿能"]})
+        return _f
+
+    try:
+        pl._EM.acquire = lambda *a, **k: True
+        pl._EM.on_success = lambda: oks.append("ok")
+        pl._EM.on_failure = lambda: fails.append("fail")
+        pl._sina_board_products = lambda board, limit=6: {
+            "stocks": [{"code": "300750", "name": "宁德时代"}], "source": "sina-test", "note": None,
+        }
+        # 真形状：概念板名单里没有这一只（返回 None），行业板有 BK 代码 ⇒ 第一腿按名称、第二腿按代码
+        codes = {("电源设备", "em-concept"): None, ("电源设备", "em-industry"): "BK1033"}
+        pl._board_code = lambda board, tag: codes.get((board, tag))
+
+        ak.stock_board_concept_cons_em = _cons("em-concept", IndexError("单测桩：这一族没有这个板块"))
+        ak.stock_board_industry_cons_em = _cons("em-industry")
+        seen.clear(); fails.clear(); oks.clear()
+        r = pl.map_board_products("电源设备")
+        check("甲′：概念腿抛 IndexError ⇒ 行业腿真发出去（旧写法到这里就 break）",
+              seen == [("em-concept", "电源设备"), ("em-industry", "BK1033")], str(seen))
+        check("甲′：第二腿命中时 `source` 换成 `em-industry`（不再白落新浪）",
+              r["source"] == "em-industry" and len(r["stocks"]) == 2, str(r)[:140])
+        check("甲′：`pathForms` 记两枚＝名称腿＋代码腿（一枚板块两格读数，别当成两次抓取）",
+              r["pathForms"] == ["name", "code"], str(r.get("pathForms")))
+        check("甲′：失败计数只涨在第一腿上（第二腿成功 ⇒ `on_success` 归零连败）",
+              len(fails) == 1 and len(oks) == 1, f"fails={len(fails)} oks={len(oks)}")
+
+        # 🔁 两半样本：把白名单清空＝模拟"改回无条件 break"，同一输入必须翻回旧文案
+        pl._BOARD_DATA_SHAPE_ERRORS = ()
+        ak.stock_board_concept_cons_em = _cons("em-concept", IndexError("单测桩：同上"))
+        seen.clear(); fails.clear(); oks.clear()
+        r2 = pl.map_board_products("电源设备")
+        check("甲′🔁：摘掉白名单＝第二腿又试不到、落回新浪（证差异出自那枚判据，不是别的）",
+              seen == [("em-concept", "电源设备")] and r2["source"] == "sina-test",
+              f"{seen} / {r2['source']}")
+        pl._BOARD_DATA_SHAPE_ERRORS = orig_wl
+
+        # 超时那一形（看门狗真构造的就是 TimeoutError）＝维持今天的语义：整族降级，不多打一腿
+        ak.stock_board_concept_cons_em = _cons("em-concept", TimeoutError("单测桩：>45s 已放弃"))
+        seen.clear(); fails.clear(); oks.clear()
+        r3 = pl.map_board_products("电源设备")
+        check("甲′：概念腿抛 TimeoutError ⇒ 仍不试第二腿、直接转新浪（上游不可信时不追加扇出）",
+              seen == [("em-concept", "电源设备")] and r3["source"] == "sina-test", str(seen))
+        ak.stock_board_concept_cons_em = _cons(
+            "em-concept", WatchdogOpenError("单测桩：在飞达上限，一个请求都没发")
+        )
+        seen.clear()
+        r4 = pl.map_board_products("电源设备")
+        check("甲′：WatchdogOpenError 是 TimeoutError 子类 ⇒ 白名单不认它，同样不追加那一腿",
+              seen == [("em-concept", "电源设备")] and r4["source"] == "sina-test", str(seen))
+
+        # 判据函数逐形点名（`_pick_col` 那一形是**裸异常、没有 `__cause__`**，也要认得）
+        def _wrapped(err: Exception) -> RuntimeError:
+            e = RuntimeError("board-constituents failed")
+            e.__cause__ = err
+            return e
+
+        check("甲′ 判据：RuntimeError from IndexError ⇒ 可换下一腿",
+              pl._board_leg_is_data_shape(_wrapped(IndexError())) is True)
+        check("甲′ 判据：裸 KeyError（列名对不上那一形，没有 __cause__）⇒ 同样可换下一腿",
+              pl._board_leg_is_data_shape(KeyError("板块名称")) is True)
+        check("甲′ 判据：RuntimeError from TimeoutError ⇒ 不换（默认按上游不可信）",
+              pl._board_leg_is_data_shape(_wrapped(TimeoutError())) is False)
+        check("甲′ 判据：没见过的形态（ValueError）⇒ 不猜，按不换处理",
+              pl._board_leg_is_data_shape(ValueError()) is False)
+    finally:
+        for n, v in orig_ak.items():
+            setattr(ak, n, v)
+        pl._sina_board_products = orig_sina
+        pl._EM.acquire, pl._EM.on_success, pl._EM.on_failure = orig_em
+        pl._board_code = orig_bc
+        pl._BOARD_DATA_SHAPE_ERRORS = orig_wl
+
+
 def test_board_path_stats_two_gates_and_free_signal() -> None:
     """#44（CR9-72）：`_board_path_stats` 那六格各自咬得住什么。
 
@@ -442,6 +545,7 @@ if __name__ == "__main__":
     test_topic_urls_title_passthrough()
     test_run_pipeline_reasons_split()
     test_board_code_shortcut()
+    test_board_leg_exception_split()
     test_run_pipeline_deadline_env()
     test_board_path_stats_two_gates_and_free_signal()
     test_board_paths_reach_state_file_from_the_event_path()
