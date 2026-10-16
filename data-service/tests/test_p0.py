@@ -11,6 +11,8 @@ import json
 import sys
 
 import requests
+
+from _live_stamp import stamp_line  # #78：③ 回执自带"这一跑对着哪一棵码"；本模块被 import 时对 stdout 无副作用
 # CR9-14：用例名含 🔁 等非 GBK 字符，Windows GBK 控制台会 UnicodeEncodeError。
 # 自带 UTF-8 输出后，跑本脚本不再需要 PYTHONIOENCODING（errors=replace 兜极端情况）。
 for _s in (sys.stdout, sys.stderr):
@@ -32,6 +34,10 @@ def check(name: str, cond, detail: str = "") -> None:
 
 def get(path: str, **params) -> requests.Response:
     return requests.get(f"{BASE}{path}", params=params, timeout=TIMEOUT)
+
+
+# ---------- 0. 树戳（#78）：打在第一条请求之前——这一跑中途挂了它也在回执里 ----------
+print(stamp_line())
 
 
 # ---------- 1. health ----------
@@ -129,6 +135,7 @@ else:
 # ---------- 汇总 ----------
 fails = [x for x in results if not x[1]]
 print(f"\n===== {len(results) - len(fails)}/{len(results)} 通过 =====")
+print(stamp_line())  # 与抬头那行不一致＝这一跑的过程中树动过（差额本身就是要读的数）
 if fails:
     print("失败项：")
     for name, _, detail in fails:
