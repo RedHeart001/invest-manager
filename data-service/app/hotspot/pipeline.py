@@ -831,6 +831,34 @@ def _board_leg_is_data_shape(exc: BaseException) -> bool:
     return isinstance(getattr(exc, "__cause__", None) or exc, _BOARD_DATA_SHAPE_ERRORS)
 
 
+def _board_note_outcome(rep: list, ok: bool) -> None:
+    """记下这一枚逻辑请求的结果——**不回报**，回报统一交给 `_board_flush`。
+
+    成功压过中途的失败：第一腿抛、第二腿取回成分 ⇒ 这一枚映射是成了的，不能把取到数据的
+    那次记成失败去推进熔断。
+    """
+    if ok:
+        rep.clear()
+        rep.append("ok")
+    elif not rep:
+        rep.append("fail")
+
+
+def _board_flush(rep: list) -> None:
+    """C29：一次映射＝一枚逻辑请求 ⇒ 只回报一次（先 acquire 在循环外，只此一处）。
+
+    甲′ 加宽换腿之后一条映射可能撞两枚 `except`；逐腿回报时一枚坏板块就能连报两枚失败，
+    达到 `failure_threshold=2` 就把**整个东财族**锁 180s（`limiter.py:185-193`），而个股新闻
+    与转债→正股映射共用这一族（`akshare_provider.py:76`）。同文件 `_board_names()` 早就是
+    "循环外 acquire、整段一次回报"的形状。
+    acquire 被拒的出口走不到这里＝一枚都不报（额度没给，`_denied` 已计）。
+    """
+    if not rep:
+        return
+    (_EM.on_success if rep[0] == "ok" else _EM.on_failure)()
+    rep.clear()
+
+
 def map_board_products(board: str, limit: int = BOARD_STOCKS_PER_TOPIC) -> dict:
     """板块成分映射：东财概念板 → 东财行业板 → 新浪行业/概念板（R15 多源降级）。
 
@@ -839,10 +867,15 @@ def map_board_products(board: str, limit: int = BOARD_STOCKS_PER_TOPIC) -> dict:
 
     甲′（#79／CR9-110）：概念腿抛**数据形态类**异常（板块名不存在／列名对不上）时**继续试行业腿**，
     所以 `pathForms` 可以有两枚；抛超时／看门狗那一形时仍直接跳出整族走新浪（与改动前同）。
+
+    CR9-112：换腿之后一次映射可能撞两枚 `except`，回报改由 `_board_note_outcome` 记、
+    `_board_flush` 在出口落＝**这一枚逻辑请求只回报一次**（C29，成功压过中途的失败）。
+    acquire 被拒的出口走不到回报，仍是一枚都不报。
     """
     import akshare as ak
 
     forms: list[str] = []
+    rep: list[str] = []  # 这一枚逻辑请求的最终回报（至多一枚），由 `_board_flush` 在出口落
     if _EM.acquire(timeout=15):
         for fn, tag in (
             (ak.stock_board_concept_cons_em, "em-concept"),
@@ -862,11 +895,13 @@ def map_board_products(board: str, limit: int = BOARD_STOCKS_PER_TOPIC) -> dict:
                     {"code": str(c).strip(), "name": str(n).strip()}
                     for c, n in zip(code_series.head(limit), name_series.head(limit))
                 ]
-                _EM.on_success()
+                # 上游答得出数据就算这一枚逻辑请求成了（哪怕这一族筛不出成分）
+                _board_note_outcome(rep, True)
                 if stocks:
+                    _board_flush(rep)
                     return {"stocks": stocks, "source": tag, "note": None, "pathForms": forms}
             except Exception as e:  # noqa: BLE001
-                _EM.on_failure()
+                _board_note_outcome(rep, False)
                 next_leg = _board_leg_is_data_shape(e)
                 log.warning(
                     "board cons failed (%s %s→%s): %s ⇒ %s",
@@ -874,6 +909,8 @@ def map_board_products(board: str, limit: int = BOARD_STOCKS_PER_TOPIC) -> dict:
                 )
                 if not next_leg:
                     break  # 超时／看门狗／未知形态：这一族此刻不可信
+
+        _board_flush(rep)  # 两腿都试完（或中途 break）＝这一枚逻辑请求唯一的回报点
 
     sina = _sina_board_products(board, limit)
     if sina["stocks"]:

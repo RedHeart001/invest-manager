@@ -386,8 +386,8 @@ def test_board_leg_exception_split() -> None:
               r["source"] == "em-industry" and len(r["stocks"]) == 2, str(r)[:140])
         check("甲′：`pathForms` 记两枚＝名称腿＋代码腿（一枚板块两格读数，别当成两次抓取）",
               r["pathForms"] == ["name", "code"], str(r.get("pathForms")))
-        check("甲′：失败计数只涨在第一腿上（第二腿成功 ⇒ `on_success` 归零连败）",
-              len(fails) == 1 and len(oks) == 1, f"fails={len(fails)} oks={len(oks)}")
+        check("CR9-112（改口）：一腿抛、一腿取回成分＝整枚映射只回报一次，且按最终结果报（成功压过中途的失败）",
+              len(fails) == 0 and len(oks) == 1, f"fails={len(fails)} oks={len(oks)}")
 
         # 🔁 两半样本：把白名单清空＝模拟"改回无条件 break"，同一输入必须翻回旧文案
         pl._BOARD_DATA_SHAPE_ERRORS = ()
@@ -434,6 +434,101 @@ def test_board_leg_exception_split() -> None:
         pl._EM.acquire, pl._EM.on_success, pl._EM.on_failure = orig_em
         pl._board_code = orig_bc
         pl._BOARD_DATA_SHAPE_ERRORS = orig_wl
+
+
+def test_board_leg_reports_once() -> None:
+    """CR9-112（#79 后续 P1）：一次映射＝一枚逻辑请求 ⇒ 只回报一次（C29，`docs/CONSTRAINTS.md:63`）。
+
+    为什么这是缺陷不是口径之争：`acquire()` 在两条腿的循环**外**（`pipeline.py:878`），而甲′
+    加宽换腿之后 `except` 在循环**内** ⇒ 一枚坏板块能连报两枚失败，达到 `failure_threshold=2`
+    当场把整个东财族锁 180s（`limiter.py:185-193`），而个股新闻与转债→正股映射共用这一族
+    （`akshare_provider.py:76`）。旧写法因为无条件 `break` 恰好只报一枚，所以这条违例是加宽之后才有的。
+    这里一枚都不出网，只数回报次数。
+    """
+    import akshare as ak
+    import pandas as pd
+
+    ak_names = ("stock_board_concept_cons_em", "stock_board_industry_cons_em")
+    orig_ak = {n: getattr(ak, n) for n in ak_names}
+    orig_sina = pl._sina_board_products
+    orig_em = (pl._EM.acquire, pl._EM.on_success, pl._EM.on_failure)
+    orig_bc = pl._board_code
+    orig_note = pl._board_note_outcome
+    orig_flush = pl._board_flush
+
+    seen: list[tuple[str, str]] = []
+    fails: list[str] = []
+    oks: list[str] = []
+
+    def _cons(tag: str, err: Exception | None = None, empty: bool = False):
+        def _f(symbol: str):
+            seen.append((tag, symbol))
+            if err is not None:
+                raise err
+            if empty:
+                return pd.DataFrame()
+            return pd.DataFrame({"代码": ["300750"], "名称": ["宁德时代"]})
+        return _f
+
+    try:
+        pl._EM.acquire = lambda *a, **k: True
+        pl._EM.on_success = lambda: oks.append("ok")
+        pl._EM.on_failure = lambda: fails.append("fail")
+        pl._sina_board_products = lambda board, limit=6: {
+            "stocks": [{"code": "300750", "name": "宁德时代"}], "source": "sina-test", "note": None,
+        }
+        codes = {("电源设备", "em-concept"): None, ("电源设备", "em-industry"): "BK1033"}
+        pl._board_code = lambda board, tag: codes.get((board, tag))
+
+        err = IndexError("单测桩：这一族没有这个板块")
+        ak.stock_board_concept_cons_em = _cons("em-concept", err)
+        ak.stock_board_industry_cons_em = _cons("em-industry", err)
+        seen.clear(); fails.clear(); oks.clear()
+        r = pl.map_board_products("电源设备")
+        check("CR9-112：两腿背靠背失败 ⇒ 东财族只收到**一枚**失败（旧形两枚＝一枚坏板块直接熔断）",
+              len(fails) == 1 and len(oks) == 0, f"fails={len(fails)} oks={len(oks)}")
+        check("CR9-112：回报口径收口没把换腿语义带跑（第二腿照样发出去、仍落新浪）",
+              seen == [("em-concept", "电源设备"), ("em-industry", "BK1033")] and r["source"] == "sina-test",
+              str(seen))
+
+        # 🔁 摘刀＝改回逐腿即报（CR9-110 那一版的形状），同一输入必须数到两枚失败
+        pl._board_note_outcome = lambda rep, ok: (
+            pl._EM.on_success() if ok else pl._EM.on_failure()
+        )
+        pl._board_flush = lambda rep: None
+        seen.clear(); fails.clear(); oks.clear()
+        pl.map_board_products("电源设备")
+        check("CR9-112🔁：摘掉那枚收口＝同一输入两枚失败 ⇒ 熔断被一枚坏板块推进（证差异出自收口）",
+              len(fails) == 2 and len(oks) == 0, f"fails={len(fails)} oks={len(oks)}")
+        pl._board_note_outcome = orig_note
+        pl._board_flush = orig_flush
+
+        # 空表那一档：一枚都不报，且 `df` 为空时必须 continue 而不是落到 _pick_col
+        ak.stock_board_concept_cons_em = _cons("em-concept", empty=True)
+        ak.stock_board_industry_cons_em = _cons("em-industry", empty=True)
+        seen.clear(); fails.clear(); oks.clear()
+        pl.map_board_products("电源设备")
+        check("CR9-112：空表不记成功也不记失败（删掉那句 continue 会让空表抛 IndexError＝多报一枚失败）",
+              seen == [("em-concept", "电源设备"), ("em-industry", "BK1033")]
+              and len(fails) == 0 and len(oks) == 0,
+              f"{seen} fails={len(fails)} oks={len(oks)}")
+
+        # 首腿就命中：出口只报一次（多报会在这里数出 2）
+        ak.stock_board_concept_cons_em = _cons("em-concept")
+        ak.stock_board_industry_cons_em = _cons("em-industry")
+        seen.clear(); fails.clear(); oks.clear()
+        pl.map_board_products("电源设备")
+        check("CR9-112：首腿命中 ⇒ 一枚 ok、第二腿不再发（成功出口也只有一个回报点）",
+              len(oks) == 1 and len(fails) == 0 and seen == [("em-concept", "电源设备")],
+              f"{seen} fails={len(fails)} oks={len(oks)}")
+    finally:
+        for n, v in orig_ak.items():
+            setattr(ak, n, v)
+        pl._sina_board_products = orig_sina
+        pl._EM.acquire, pl._EM.on_success, pl._EM.on_failure = orig_em
+        pl._board_code = orig_bc
+        pl._board_note_outcome = orig_note
+        pl._board_flush = orig_flush
 
 
 def test_board_path_stats_two_gates_and_free_signal() -> None:
@@ -546,6 +641,7 @@ if __name__ == "__main__":
     test_run_pipeline_reasons_split()
     test_board_code_shortcut()
     test_board_leg_exception_split()
+    test_board_leg_reports_once()
     test_run_pipeline_deadline_env()
     test_board_path_stats_two_gates_and_free_signal()
     test_board_paths_reach_state_file_from_the_event_path()
