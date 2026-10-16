@@ -7,6 +7,7 @@ import { ResultListSkeleton } from "@/app/components/Skeleton";
 import { getCachedSearch, getLastSearch, setCachedSearch } from "@/lib/search-cache";
 import { priceWithCurrency } from "@/lib/currency";
 import type { StaleNote } from "@/lib/freshness";
+import { beijingStamp } from "@/lib/time";
 import type { SearchResult } from "@/lib/search";
 
 const TABS = [
@@ -73,6 +74,10 @@ export default function SearchClient() {
   // #22(b)／#25：陈旧说明——后端只在"早于昨日"时给，正常态这里是空数组（不出字）
   const [stale, setStale] = useState<StaleNote[]>([]);
   const [staleMore, setStaleMore] = useState(0);
+  // #22(b) 乙：这一屏的**出处**（这批数最近一次落快照是什么时候、覆盖多少行）——
+  // 它与上面那句"有些日子没刷新了"答的不是同一个问题，所以正常态也出字；
+  // `null`＝这一类在库里没有行（hk 那一形），没有分母就不说话。
+  const [snapshot, setSnapshot] = useState<{ asOf: string | null; covered: number; total: number } | null>(null);
 
   const [pendingKey, setPendingKey] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -122,6 +127,7 @@ export default function SearchClient() {
           setBrowsePages(body.pages ?? 1);
           setStale(Array.isArray(body.stale) ? (body.stale as StaleNote[]) : []);
           setStaleMore(Number(body.staleMore) || 0);
+          setSnapshot(body.snapshot ?? null);
           router.replace(
             `/search?type=${type}&sort=${sortSel}&page=${page}`,
           );
@@ -295,6 +301,17 @@ export default function SearchClient() {
           {staleMore > 0 && (
             <span className="text-[11px] text-amber-700">还有 {staleMore} 条提醒没显示</span>
           )}
+        </div>
+      )}
+
+      {/* #22(b) 乙＝这批数的**出处**（主人 10-16 定档乙）。与上面那句的分工：那句答"旧不旧"、
+          只在有问题时出；这句答"截至什么时候、覆盖多少条"，正常态也出——10-16 的实测形态就是
+          库里全是昨天的快照而屏上一句出处都没有。`null`＝该类在库里没有行（hk）＝没有分母，不说话。 */}
+      {browseMode && snapshot && (
+        <div className="mt-1 text-[11px] text-zinc-500" data-testid="snapshot-asof">
+          这批数据的快照截至{" "}
+          {snapshot.asOf ? beijingStamp(new Date(snapshot.asOf)).slice(5) : "还没有过一次"}
+          （覆盖 {snapshot.covered.toLocaleString()}／{snapshot.total.toLocaleString()} 条）
         </div>
       )}
 

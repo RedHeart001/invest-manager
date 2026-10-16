@@ -41,18 +41,31 @@ export type Freshness = {
   maxPrice: number | null;
 };
 
+/** #22(b) 乙：同一次 `groupBy` 顺带取到的**分母与分子**（零额外查询）。
+ *  拆成独立类型而不是塞进 `Freshness`，是因为 `staleNotes` 那三条规则不读它们，
+ *  而既有 12 枚用例的输入对象也不该因为我加了一维就被迫改形。 */
+export type FreshnessRow = Freshness & {
+  /** 该类行数（＝"覆盖 N/M"的 M） */
+  total: number;
+  /** 该类有快照的行数（＝N） */
+  snapCount: number;
+};
+
 /** 逐类的新鲜度面（一次 `groupBy` 取齐三列，比多次全表扫省一半以上） */
-export async function freshnessOfTypes(where: { type?: string } = {}): Promise<Freshness[]> {
+export async function freshnessOfTypes(where: { type?: string } = {}): Promise<FreshnessRow[]> {
   const rows = await prisma.product.groupBy({
     by: ["type"],
     where,
     _max: { updatedAt: true, snapshotAt: true, lastPrice: true },
+    _count: { _all: true, snapshotAt: true },
   });
   return rows.map((r) => ({
     type: r.type,
     listAt: r._max.updatedAt ?? null,
     snapAt: r._max.snapshotAt ?? null,
     maxPrice: r._max.lastPrice ?? null,
+    total: r._count._all,
+    snapCount: r._count.snapshotAt ?? 0,
   }));
 }
 
@@ -129,4 +142,22 @@ export function staleNotes(rows: Freshness[], today: string = beijingToday()): S
     }
   }
   return notes;
+}
+
+/** #22(b) 乙＝「快照截至 X（覆盖 N/M）」的数据层出口（机器可读位；屏上那句住在
+ *  `app/search/search-client.tsx`，与 `STALE_PHRASE` 同一层——文案归主人定）。
+ *
+ * 三条判据都是"不许谎报"那一族：
+ *  · 总行数 0（hk 在库里根本没有那一类）⇒ **返回 null**，不许写成 `0/0`；
+ *  · 有行但**一行快照都没有** ⇒ `asOf` 留 null，只报覆盖、不报一个不存在的时刻；
+ *  · `asOf` 取的是各类 `snapshotAt` 的**最大值**（"这批数里最近的那一次落快照"），
+ *    不是"最早"——报最早会把 10-15 说成 10-09 那种更旧的形态，反向误导。 */
+export type SnapshotBadge = { asOf: Date | null; covered: number; total: number };
+
+export function snapshotBadge(rows: FreshnessRow[]): SnapshotBadge | null {
+  const total = rows.reduce((a, r) => a + (r.total ?? 0), 0);
+  if (total === 0) return null;
+  const covered = rows.reduce((a, r) => a + (r.snapCount ?? 0), 0);
+  const times = rows.map((r) => r.snapAt).filter((d): d is Date => !!d).map((d) => d.getTime());
+  return { asOf: times.length ? new Date(Math.max(...times)) : null, covered, total };
 }

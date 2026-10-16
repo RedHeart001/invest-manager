@@ -6,7 +6,7 @@
 //   没有时，随结果给一句说明；正常态一条都不出（那时这句话零信息量）
 
 import { type Quote } from "./data-service";
-import { type StaleNote, freshnessOfTypes, staleNotes } from "./freshness";
+import { type SnapshotBadge, type StaleNote, freshnessOfTypes, snapshotBadge, staleNotes } from "./freshness";
 import { fetchQuotesByType } from "./quote-enrich";
 import { prisma } from "./prisma";
 import { parseTags } from "./score";
@@ -37,6 +37,9 @@ export type BrowseResult = {
   stale: StaleNote[];
   /** 超出展示上限而被收起的条数（不静默丢弃——被藏掉的那一类正是这句话要防的） */
   staleMore: number;
+  /** #22(b) 乙＝这一屏底下的数**最近一次落快照是什么时候、覆盖了多少行**（机器可读位；
+   *  取的是本次查询范围内的行＝选了 tab 就是那一类，`all` 就是全表）。null＝无分母可报 */
+  snapshot: SnapshotBadge | null;
 };
 
 const MAX_PAGE_SIZE = 50;
@@ -137,5 +140,6 @@ export async function browseProducts(opts: {
     pages: Math.max(1, Math.ceil(total / opts.pageSize)),
     stale: stale.slice(0, 2),
     staleMore: Math.max(0, stale.length - 2),
+    snapshot: snapshotBadge(freshness),
   };
 }

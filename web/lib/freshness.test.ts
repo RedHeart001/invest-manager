@@ -15,7 +15,7 @@ vi.mock("@/lib/prisma", () => ({
   prisma: { product: { groupBy: (...a: unknown[]) => groupBy(...a), findFirst: (...a: unknown[]) => findFirst(...a) } },
 }));
 
-import { BROWSE_TYPES, listSyncedToday, snapshotRefreshedToday, staleNotes } from "./freshness";
+import { BROWSE_TYPES, freshnessOfTypes, listSyncedToday, snapshotBadge, snapshotRefreshedToday, staleNotes } from "./freshness";
 import { beijingDateOf, beijingToday } from "./time";
 
 /** 北京某个"月-日 时:分"对应的 UTC 瞬间（写用例时用可读的形式，不手算偏移） */
@@ -206,5 +206,74 @@ describe("分类浏览的类型集合（CR9-75：从「锁住不开」换成「�
   it("美股进 BROWSE_TYPES（有 tab；两件连带义务都在上面答了）", () => {
     expect(BROWSE_TYPES).toContain("us");
     expect([...BROWSE_TYPES]).toEqual(["stock", "fund", "bond", "crypto", "hk", "us"]);
+  });
+});
+
+// #22(b) 乙（主人 10-16 定档）＝「快照截至 X（覆盖 N/M）」的数据层出口。
+// 这一枚要钉的不是文案（文案住在 `app/search/search-client.tsx`，归主人改），而是三个
+// 「不许」：不许谎报时刻、不许在没有分母时编一个 0/0、不许把分子当总行数。
+describe("快照出处 snapshotBadge（#22(b) 乙）", () => {
+  const row = (type: string, total: number, snapCount: number, snapAt: Date | null) => ({
+    type,
+    listAt: snapAt,
+    snapAt,
+    maxPrice: 1,
+    total,
+    snapCount,
+  });
+
+  it("覆盖数与总行数逐类相加，asOf 取各类快照里**最近**的那一枚", () => {
+    const b = snapshotBadge([
+      row("stock", 5573, 5572, bj("2026-10-01", "20:17")),
+      row("bond", 1061, 314, bj("2026-10-02", "02:40")),
+    ]);
+    expect(b).toEqual({
+      asOf: bj("2026-10-02", "02:40"),
+      covered: 5886,
+      total: 6634,
+    });
+  });
+
+  it("🔁 反向：asOf 不得取最早那一枚（把昨天说成更旧＝反向误导）", () => {
+    const b = snapshotBadge([
+      row("stock", 10, 5, bj("2026-09-20", "09:00")),
+      row("fund", 10, 5, bj("2026-10-02", "09:00")),
+    ]);
+    expect(b?.asOf).toEqual(bj("2026-10-02", "09:00"));
+  });
+
+  it("没有行 ⇒ null（hk 那一形：没有分母就不说话，不许写 0/0）", () => {
+    expect(snapshotBadge([])).toBeNull();
+    expect(snapshotBadge([row("hk", 0, 0, null)])).toBeNull();
+  });
+
+  it("🔁 半样本：同一类只要有一行，就必须给出数而不是 null", () => {
+    expect(snapshotBadge([row("hk", 1, 0, null)])).not.toBeNull();
+  });
+
+  it("有行但一行快照都没落过 ⇒ 不谎报时刻（asOf 为 null），覆盖仍照实说", () => {
+    expect(snapshotBadge([row("crypto", 250, 0, null)])).toEqual({
+      asOf: null,
+      covered: 0,
+      total: 250,
+    });
+  });
+
+  it("groupBy 的那一列分子读的是 `_count.snapshotAt`（字段名改错就要红，不是静默变 0）", async () => {
+    groupBy.mockResolvedValue([
+      { type: "stock", _max: { updatedAt: null, snapshotAt: null, lastPrice: null }, _count: { _all: 7, snapshotAt: 3 } },
+    ]);
+    const rows = await freshnessOfTypes({ type: "stock" });
+    expect(rows[0]).toMatchObject({ total: 7, snapCount: 3 });
+    expect(snapshotBadge(rows)).toEqual({ asOf: null, covered: 3, total: 7 });
+  });
+
+  it("🔁 反向：Prisma 没给 `_count.snapshotAt` 时按 0 计，不得把 undefined 加进分母", async () => {
+    groupBy.mockResolvedValue([
+      { type: "stock", _max: { updatedAt: null, snapshotAt: null, lastPrice: null }, _count: { _all: 7 } },
+    ]);
+    const rows = await freshnessOfTypes({ type: "stock" });
+    expect(rows[0].snapCount).toBe(0);
+    expect(snapshotBadge(rows)?.covered).toBe(0);
   });
 });
