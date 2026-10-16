@@ -81,6 +81,19 @@ function executedCount(out) {
 const lines = [];
 const gaps = [];
 const failedSuites = [];
+
+// #78（10-16）：回执要自带"对着哪一棵树跑的"。此前 ③④ 的回执只有数字，事后无法证明
+// 它对应已提交的那一棵，还是改到一半的脏树（脏改动也算"现在"＝#77 同一族）。
+const REPO_DIR = join(WEB_DIR, "..");
+function treeStamp() {
+  const sha = (spawnSync("git", ["rev-parse", "--short", "HEAD"], { cwd: REPO_DIR, encoding: "utf8" }).stdout || "?").trim();
+  const st = spawnSync("git", ["status", "--porcelain"], { cwd: REPO_DIR, encoding: "utf8" });
+  const dirty = st.status === 0 ? st.stdout.split("\n").filter(Boolean).length : -1;
+  return `HEAD=${sha} dirty=${dirty}`;
+}
+const TREE = treeStamp();
+console.log(`树戳（#78）：${TREE}`);
+lines.push(`########## 树戳（#78，起跑前）##########\n${TREE}`);
 for (const s of suites) {
   const started = Date.now();
   const r = spawnSync(process.execPath, [join(WEB_DIR, "scripts", s)], {
