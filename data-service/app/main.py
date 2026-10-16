@@ -324,6 +324,31 @@ def bond_yieldcurve(
     return {**data, "degraded": False, "note": None}
 
 
+@app.get("/bond/underlying")
+def bond_underlying(
+    code: str = Query(..., description="可转债代码，如 110002"),
+):
+    """转债→正股映射（#75 的只读腿，整张表内存缓存 24 小时）。
+
+    **屏上此刻没有读者**：`web/lib/events.ts` 那一元硬判还没放开 ⇒ 这一枚只在有人点名时
+    才打上游（东财桶 1 枚令牌 ⇔ akshare 内部逐页 ≈4 个 HTTP，见 provider 的成本口径）。
+    答不出＝200＋`degraded`＋`note`（R10），不返 404：代码不在册与这一行缺列是两种事实，
+    都要说得出，但不能让它长得像"这只转债没有正股"。
+    """
+    try:
+        provider = _primary("bond")
+        data = provider.get_bond_underlying(code)
+    except ProviderError as e:
+        return {
+            "code": code,
+            "degraded": True,
+            "note": str(e),
+            "stockCode": None,
+            "stockName": None,
+        }
+    return {**data, "degraded": False, "note": None}
+
+
 # ---------- P6 新增：基金定期报告（技能 fund-report-analysis 数据源） ----------
 
 

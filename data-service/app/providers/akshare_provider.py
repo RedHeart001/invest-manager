@@ -360,6 +360,9 @@ class AkshareProvider(BaseProvider):
         )
         self._yield_curve = None
         self._yield_curve_ts = 0.0
+        # #75（10-16）：转债→正股整张映射，单键缓存（一张表，不按代码分键 ⇒ 容量不是问题）
+        self._bond_map: dict[str, dict] | None = None
+        self._bond_map_ts = 0.0
 
     # ---------- 实时行情 ----------
 
@@ -910,6 +913,83 @@ class AkshareProvider(BaseProvider):
         if not curve:
             raise ProviderError("yield curve no valid rows")
         return {"source": f"{self.source}-bond-zh-us", "curve": curve}
+
+    # ---------- 转债 → 正股映射（#75 的只读腿，2026-10-16） ----------
+
+    BOND_MAP_TTL = 86400  # 24 小时：这一张表只在转债上市/摘牌时变
+
+    def _bond_cov_map(self) -> dict[str, dict]:
+        """`ak.bond_zh_cov`（转债在册表）→ `{转债代码: {bondName, stockCode, stockName}}`。
+
+        #75 的前置读数（10-13 刀 C，`test-script/window_bond_map.py`）＝1,060 行／`正股代码`
+        非空 1,060／去重正股 959 ⇒ `usable: true`。同一张表 `_list_convertible_bonds` 早在
+        生产里拉（`:1132`），但 `:1134` 只留了债券代码/简称，把这两列丢了——**这一枚不是
+        新增源族**，是把已经买来的那两列读出来。
+
+        ⚠️ 成本口径别按"一次调用"读：`_em_ak_request` 只占东财桶 **1 枚令牌**，而 akshare
+        自己按 `pageSize=500` 逐页循环 ⇒ 真出网 ≈4 个 HTTP（那枚探针"打满件内硬闸"数的
+        就是这 4 发）。TTL 是这条成本唯一的闸，摘掉它＝每个转债代码一跳 4 发。
+        """
+        import akshare as ak
+
+        now = time.time()
+        if self._bond_map is not None and now - self._bond_map_ts < self.BOND_MAP_TTL:
+            return self._bond_map
+
+        try:
+            df = _em_ak_request(ak.bond_zh_cov, 90.0, "ak.bond_zh_cov")
+        except Exception as e:  # noqa: BLE001 失败要说出来，不能返空表冒充"没有转债在册"（R16）
+            raise ProviderError(f"convertible bond map failed: {e}") from e
+
+        def _cell(value) -> str | None:
+            s = str(value).strip()
+            return None if s in ("", "-", "nan", "None") else s
+
+        def _code6(value) -> str | None:
+            # 代码只认 6 位数字：pandas 把带 NaN 的数字列升成 float 时会**连前导零一起丢**
+            # （"001380" → 1380.0 → "1380"），那种短码宁可口径一致地答"读不出"，也不能当作
+            # 一枚真代码交给下游（10-13 那枚探针实测到的是零保住的字符串，这一枚是防它换形）。
+            s = _cell(value)
+            if s and s.endswith(".0") and s[:-2].isdigit():
+                s = s[:-2]
+            return s if s and re.fullmatch(r"\d{6}", s) else None
+
+        rows: dict[str, dict] = {}
+        for _, r in df.iterrows():
+            bond_code = _code6(r.get("债券代码", ""))
+            if not bond_code:
+                continue
+            rows[bond_code] = {
+                "bondName": _cell(r.get("债券简称", "")),
+                "stockCode": _code6(r.get("正股代码", "")),
+                "stockName": _cell(r.get("正股简称", "")),
+            }
+        if not rows:
+            raise ProviderError("convertible bond map empty")
+        self._bond_map = rows
+        self._bond_map_ts = now
+        return rows
+
+    def get_bond_underlying(self, code: str) -> dict:
+        """转债代码 → 正股代码/简称（#75）。
+
+        两种"答不出"都抛 `ProviderError`（路由按 R10 转成 200＋degraded＋note）：代码不在册，
+        与在册但上游那一行的「正股代码」空/不成 6 位形状——后者不能被读成"这只转债没有正股"。
+        """
+        rows = self._bond_cov_map()
+        hit = rows.get(str(code).strip())
+        if hit is None:
+            raise ProviderError(f"bond code not in convertible map: {code}（映射共 {len(rows)} 只）")
+        if not hit["stockCode"]:
+            raise ProviderError(f"上游这一行的「正股代码」读不出（空或不成 6 位）: {code}（映射共 {len(rows)} 只）")
+        return {
+            "code": str(code).strip(),
+            "bondName": hit["bondName"],
+            "stockCode": hit["stockCode"],
+            "stockName": hit["stockName"],
+            "mapSize": len(rows),
+            "source": f"{self.source}-bond-zh-cov",
+        }
 
     # ---------- 产品列表（P1 同步） ----------
 
