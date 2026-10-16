@@ -52,6 +52,8 @@ STUB_PATHS = {
     "byCode": 0, "byName": 0,
     "requestsPerCodePath": 1, "requestsPerNamePath": 9,
     "savedRequestsEstimate": 0, "emCodeRows": 0,
+    # CR9-112 刀 2：`build_items` 的第三枚返回值多带一格每腿种类（形状照真函数）
+    "legs": {"attempts": 0, "byClass": {}},
 }
 
 
@@ -64,7 +66,8 @@ def test_build_items_deadline_expired() -> None:
         calls["n"] += 1
         # #44（CR9-72）：`build_items` 现在按键取 `pathForms`，桩件少这个契约就是 KeyError——
         # 与 CR9-62 那条"桩件比真函数少一个契约"同形，超时这一支本来也不该发过成分请求。
-        return {"stocks": [], "note": None, "pathForms": []}
+        # CR9-112 刀 2 同形再加一枚：`legOutcomes` 少了一样当场崩。
+        return {"stocks": [], "note": None, "pathForms": [], "legOutcomes": []}
 
     pl.map_board_products = _boom
     try:
@@ -89,7 +92,8 @@ def test_build_items_within_deadline() -> None:
 
     def _ok(board):
         calls["n"] += 1
-        return {"stocks": [{"code": "000001", "name": "x"}], "note": None, "pathForms": ["code"]}
+        return {"stocks": [{"code": "000001", "name": "x"}], "note": None, "pathForms": ["code"],
+                "legOutcomes": ["em-concept:ok"]}
 
     pl.map_board_products = _ok
     try:
@@ -490,6 +494,9 @@ def test_board_leg_reports_once() -> None:
         check("CR9-112：回报口径收口没把换腿语义带跑（第二腿照样发出去、仍落新浪）",
               seen == [("em-concept", "电源设备"), ("em-industry", "BK1033")] and r["source"] == "sina-test",
               str(seen))
+        check("刀2：两枚失败在 `legOutcomes` 里各留一种类名（种类＝异常类名本身，没被折成 other）",
+              r["legOutcomes"] == ["em-concept:IndexError", "em-industry:IndexError"],
+              str(r.get("legOutcomes")))
 
         # 🔁 摘刀＝改回逐腿即报（CR9-110 那一版的形状），同一输入必须数到两枚失败
         pl._board_note_outcome = lambda rep, ok: (
@@ -507,11 +514,14 @@ def test_board_leg_reports_once() -> None:
         ak.stock_board_concept_cons_em = _cons("em-concept", empty=True)
         ak.stock_board_industry_cons_em = _cons("em-industry", empty=True)
         seen.clear(); fails.clear(); oks.clear()
-        pl.map_board_products("电源设备")
+        r_empty = pl.map_board_products("电源设备")
         check("CR9-112：空表不记成功也不记失败（删掉那句 continue 会让空表抛 IndexError＝多报一枚失败）",
               seen == [("em-concept", "电源设备"), ("em-industry", "BK1033")]
               and len(fails) == 0 and len(oks) == 0,
               f"{seen} fails={len(fails)} oks={len(oks)}")
+        check("刀2：空表那一档的种类名＝`empty`（它与 `norows` 是两格，别并成一格）",
+              r_empty["legOutcomes"] == ["em-concept:empty", "em-industry:empty"],
+              str(r_empty.get("legOutcomes")))
 
         # 首腿就命中：出口只报一次（多报会在这里数出 2）
         ak.stock_board_concept_cons_em = _cons("em-concept")
@@ -606,7 +616,7 @@ def test_board_paths_reach_state_file_from_the_event_path() -> None:
             "topics": [{"title": "甲", "boards": ["B1", "B2"]}], "engine": "llm", "note": None}
         pl.map_board_products = lambda board, limit=6: {
             "stocks": [{"code": "601012", "name": "x"}], "source": "em-concept",
-            "note": None, "pathForms": ["code"]}
+            "note": None, "pathForms": ["code"], "legOutcomes": ["em-concept:ok"]}
         pl.emit_ingest = lambda payload: (sent.update(payload), {"inserted": 1})[1]
         res = hs._execute("unit-test-paths")
         disk = (hs.read_state() or {}).get("lastResult") or {}
@@ -617,11 +627,19 @@ def test_board_paths_reach_state_file_from_the_event_path() -> None:
               p.get("byCode") == 2 and p.get("byName") == 0, str(p)[:200])
         check("#44：扇出常数与读数出自**同一份载荷**（读它不用去 import 私有常量）",
               p.get("requestsPerNamePath") == 9 and p.get("savedRequestsEstimate") == 16, str(p)[:200])
+        # 刀 2（CR9-112）：每腿种类读数同处落盘——它回答的是"真上游这一轮到底抛了什么"
+        check("刀2：盘上读得到 `boardPaths[\"legs\"]`，两个板块各一枚 `em-concept:ok` 是被真 `build_items` 累加进来的",
+              p.get("legs", {}).get("attempts") == 2
+              and p.get("legs", {}).get("byClass", {}).get("em-concept:ok") == 2,
+              str(p.get("legs"))[:200])
+        check("刀2：`legOutcomes` 没漏进落库 payload（读的是真 emit 拿到的那一份）",
+              "legOutcomes" not in sent and "legOutcomes" not in str(sent),
+              str(sorted(sent.keys()))[:200])
         check("落库 payload 里没有这份读数（读的是真 emit 拿到的那一份，不是手搭的）",
               "boardPaths" not in sent and "pathForms" not in str(sent),
               str(sorted(sent.keys()))[:200])
-        check("🔁 上屏那层没被它带跑：`note` 里不含 `boardPaths`／`pathForms` 的字面",
-              "boardPaths" not in str(res.get("note")) and "pathForms" not in str(res.get("note")),
+        check("🔁 上屏那层没被它带跑：`note` 里不含 `boardPaths`／`pathForms`／`legOutcomes` 的字面",
+              all(k not in str(res.get("note")) for k in ("boardPaths", "pathForms", "legOutcomes", "legs")),
               str(res.get("note"))[:160])
     finally:
         pl.fetch_news, pl.structure_topics, pl.map_board_products, pl.emit_ingest = orig

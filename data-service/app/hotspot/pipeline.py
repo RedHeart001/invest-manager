@@ -859,6 +859,35 @@ def _board_flush(rep: list) -> None:
     rep.clear()
 
 
+def _board_leg_stats(legs: list[str]) -> dict:
+    """CR9-112（刀 2）：这一轮每条东财腿**实际落了什么**，按种类计数。
+
+    为什么要有它＝#79 那条"真上游到底抛哪一类"的决定一直只能靠手工现场腿赌一发；这一格
+    住进 `boardPaths` 同一条链（`result` → `runtime/hotspot-state.json` → `GET /hotspots/status`），
+    每轮实网自己把读数带回来。**不上屏**：web 侧对 `boardPaths` 引用数现查＝0，落库 payload
+    也从不带它（`build_items` 只回给调用方）。未知异常种类折成 `other`，挡住高基数。
+    """
+    out: dict[str, int] = {}
+    for item in legs:
+        out[item] = out.get(item, 0) + 1
+    return {"attempts": len(legs), "byClass": out}
+
+
+# 腿的种类只认这几枚名字（`WatchdogOpenError` 单独留一格：它一个请求都没发）
+_LEG_KINDS = ("ok", "norows", "empty", "IndexError", "KeyError", "ZeroDivisionError",
+              "TimeoutError", "WatchdogOpenError")
+
+
+def _board_leg_kind(exc: BaseException) -> str:
+    """把腿的失败折成低基数种类名（判据对象与 `_board_leg_is_data_shape` 同一个：`__cause__` 优先）。"""
+    real = getattr(exc, "__cause__", None) or exc
+    name = type(real).__name__
+    if name not in _LEG_KINDS:
+        # 超时那一族的父类是 TimeoutError——子类名没在册时也归到它，别让种类表偷偷长大。
+        return "TimeoutError" if isinstance(real, TimeoutError) else "other"
+    return name
+
+
 def map_board_products(board: str, limit: int = BOARD_STOCKS_PER_TOPIC) -> dict:
     """板块成分映射：东财概念板 → 东财行业板 → 新浪行业/概念板（R15 多源降级）。
 
@@ -871,11 +900,15 @@ def map_board_products(board: str, limit: int = BOARD_STOCKS_PER_TOPIC) -> dict:
     CR9-112：换腿之后一次映射可能撞两枚 `except`，回报改由 `_board_note_outcome` 记、
     `_board_flush` 在出口落＝**这一枚逻辑请求只回报一次**（C29，成功压过中途的失败）。
     acquire 被拒的出口走不到回报，仍是一枚都不报。
+
+    刀 2（同笔）：新增返回键 `legOutcomes`＝每条东财腿实际落了什么（`"<tag>:<种类>"`，
+    种类＝`ok`/`norows`/`empty`/异常类名折成低基数），由 `build_items` 汇进 `boardPaths["legs"]`。
     """
     import akshare as ak
 
     forms: list[str] = []
     rep: list[str] = []  # 这一枚逻辑请求的最终回报（至多一枚），由 `_board_flush` 在出口落
+    legs: list[str] = []  # 刀 2（CR9-112）：每条腿实际落了什么，见 `_board_leg_stats`
     if _EM.acquire(timeout=15):
         for fn, tag in (
             (ak.stock_board_concept_cons_em, "em-concept"),
@@ -888,6 +921,7 @@ def map_board_products(board: str, limit: int = BOARD_STOCKS_PER_TOPIC) -> dict:
             try:
                 df = _ak_guarded(lambda: fn(symbol=sym), 45.0, "board-constituents")
                 if df is None or len(df) == 0:
+                    legs.append(f"{tag}:empty")
                     continue
                 code_series = _pick_col(df, "代码", "code")
                 name_series = _pick_col(df, "名称", "name")
@@ -897,10 +931,15 @@ def map_board_products(board: str, limit: int = BOARD_STOCKS_PER_TOPIC) -> dict:
                 ]
                 # 上游答得出数据就算这一枚逻辑请求成了（哪怕这一族筛不出成分）
                 _board_note_outcome(rep, True)
+                legs.append(f"{tag}:{'ok' if stocks else 'norows'}")
                 if stocks:
                     _board_flush(rep)
-                    return {"stocks": stocks, "source": tag, "note": None, "pathForms": forms}
+                    return {
+                        "stocks": stocks, "source": tag, "note": None,
+                        "pathForms": forms, "legOutcomes": legs,
+                    }
             except Exception as e:  # noqa: BLE001
+                legs.append(f"{tag}:{_board_leg_kind(e)}")
                 _board_note_outcome(rep, False)
                 next_leg = _board_leg_is_data_shape(e)
                 log.warning(
@@ -914,12 +953,13 @@ def map_board_products(board: str, limit: int = BOARD_STOCKS_PER_TOPIC) -> dict:
 
     sina = _sina_board_products(board, limit)
     if sina["stocks"]:
-        return {**sina, "pathForms": forms}
+        return {**sina, "pathForms": forms, "legOutcomes": legs}
     return {
         "stocks": [],
         "source": "none",
         "note": sina.get("note") or f"板块「{board}」成分全源不可用",
         "pathForms": forms,
+        "legOutcomes": legs,
     }
 
 
@@ -969,6 +1009,7 @@ def build_items(
     notes: list[str] = []
     items: list[dict] = []
     forms: list[str] = []
+    legs: list[str] = []
     timed_out = False
     for t in topics:
         related: list[dict] = []
@@ -980,6 +1021,7 @@ def build_items(
                 break
             mapped = map_board_products(board)
             forms.extend(mapped["pathForms"])
+            legs.extend(mapped["legOutcomes"])
             if mapped["note"]:
                 board_notes.append(mapped["note"])
             related.extend(
@@ -999,7 +1041,8 @@ def build_items(
         )
     if timed_out:
         notes.append("pipeline 超时，部分 topic 未完成成分映射")
-    return items, notes, _board_path_stats(forms)
+    # 刀 2（CR9-112）：每腿种类读数与 `boardPaths` 同处落——它只到 `result`，不进落库 payload。
+    return items, notes, {**_board_path_stats(forms), "legs": _board_leg_stats(legs)}
 
 
 def emit_ingest(payload: dict) -> dict:
