@@ -423,6 +423,26 @@ def test_board_leg_exception_split() -> None:
             e.__cause__ = err
             return e
 
+        # 刀 3（CR9-112）：这一族**有**这块板、只是零成分 ⇒ akshare 在 utils/func.py:38 除零抛
+        ak.stock_board_concept_cons_em = _cons("em-concept", ZeroDivisionError("division by zero"))
+        ak.stock_board_industry_cons_em = _cons("em-industry")
+        seen.clear(); fails.clear(); oks.clear()
+        r5 = pl.map_board_products("电源设备")
+        check("刀3：概念腿抛 ZeroDivisionError（＝`total=0` 那一形）⇒ 换下一腿、行业腿把成分取回来",
+              seen == [("em-concept", "电源设备"), ("em-industry", "BK1033")]
+              and r5["source"] == "em-industry" and r5["legOutcomes"] == ["em-concept:ZeroDivisionError", "em-industry:ok"],
+              f"{seen} / {r5.get('legOutcomes')}")
+        check("刀3：零成分那一腿的失败被第二腿的成功压掉 ⇒ 东财族只收到一枚 `ok`（刀 1 那枚收口在此生效）",
+              len(fails) == 0 and len(oks) == 1, f"fails={len(fails)} oks={len(oks)}")
+        orig_wl_now = pl._BOARD_DATA_SHAPE_ERRORS
+        pl._BOARD_DATA_SHAPE_ERRORS = ()
+        ak.stock_board_concept_cons_em = _cons("em-concept", ZeroDivisionError("division by zero"))
+        seen.clear(); fails.clear(); oks.clear()
+        r6 = pl.map_board_products("电源设备")
+        check("刀3🔁：清空白名单＝零成分那一形又判成『上游不可信』⇒ 一腿都不追加（证种类名不是白拿的）",
+              seen == [("em-concept", "电源设备")] and r6["source"] == "sina-test", str(seen))
+        pl._BOARD_DATA_SHAPE_ERRORS = orig_wl_now
+
         check("甲′ 判据：RuntimeError from IndexError ⇒ 可换下一腿",
               pl._board_leg_is_data_shape(_wrapped(IndexError())) is True)
         check("甲′ 判据：裸 KeyError（列名对不上那一形，没有 __cause__）⇒ 同样可换下一腿",
@@ -431,6 +451,11 @@ def test_board_leg_exception_split() -> None:
               pl._board_leg_is_data_shape(_wrapped(TimeoutError())) is False)
         check("甲′ 判据：没见过的形态（ValueError）⇒ 不猜，按不换处理",
               pl._board_leg_is_data_shape(ValueError()) is False)
+        check("刀3 判据：RuntimeError from ZeroDivisionError ⇒ 换（payload 结构完整＝数据形态）",
+              pl._board_leg_is_data_shape(_wrapped(ZeroDivisionError())) is True)
+        check("刀3 判据钉『不动』：RuntimeError from TypeError ⇒ 不换——`func.py:37` 让『这个 BK 没数据』"
+              "与『东财软拒（200 空 body）』同一句，源码层不可分辨；放宽这一条必须先改这枚绿字",
+              pl._board_leg_is_data_shape(_wrapped(TypeError("NoneType object is not subscriptable"))) is False)
     finally:
         for n, v in orig_ak.items():
             setattr(ak, n, v)

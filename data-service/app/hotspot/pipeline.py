@@ -820,10 +820,14 @@ def _sina_hot_topics(limit: int = 3) -> list[dict]:
 # 而"这一腿答不出"与"上游真挂了"的判据一直住在 `__cause__` 里没被读过。旧写法在 `except` 里
 # 无条件 `break`（注释写的是"熔断已触发"，可额度被拒根本不走异常），于是 em-industry 那一腿
 # 在任何概念板异常之后**结构上永远试不到**——拿着 BK1031 的那一条就是这么落进新浪的。
-# 白名单只放数据形态类（板块名在这一族里不存在／列名对不上）＝换下一腿；
+# 白名单只放数据形态类＝换下一腿；
 # TimeoutError／WatchdogOpenError（看门狗超时、在飞达上限、一个请求都没发）＝维持今天的语义，
 # 整族转新浪。没见过的形态一律按"上游不可信"处理，不猜。
-_BOARD_DATA_SHAPE_ERRORS = (IndexError, KeyError)
+# 刀 3（CR9-112）补 `ZeroDivisionError`：`akshare/utils/func.py:38` 在 `data.diff` 为空／`total=0`
+# （＝这一族**有**这块板、只是零成分）时正是从这里除零抛出——payload 结构完整，不是链路那一侧。
+# 仍**不放** `TypeError`：`func.py:37` 让"这个 BK 代码没数据"与"东财软拒（200 空 body）"长成同一句，
+# 源码层不可分辨；把它当数据形态＝真挂了也要多烧一腿＋一枚 `on_failure`。这一条由用例钉住（改它必须改那枚绿字）。
+_BOARD_DATA_SHAPE_ERRORS = (IndexError, KeyError, ZeroDivisionError)
 
 
 def _board_leg_is_data_shape(exc: BaseException) -> bool:
@@ -920,6 +924,10 @@ def map_board_products(board: str, limit: int = BOARD_STOCKS_PER_TOPIC) -> dict:
             forms.append("code" if _BK_RE.fullmatch(sym) else "name")
             try:
                 df = _ak_guarded(lambda: fn(symbol=sym), 45.0, "board-constituents")
+                # 这一档对 `*_cons_em` 在生产里**走不到**：`akshare/utils/func.py:37-38` 只会
+                # "给出非空表"或"抛"（零成分抛 ZeroDivisionError、空 body 抛 TypeError）。留着它＝
+                # 挡住"空表落进 `_pick_col` 的 `df.iloc[:, 0]` ⇒ 抛 IndexError＝误记成数据形态"，
+                # 也正好是 akshare 升级后的哨位（别删）。
                 if df is None or len(df) == 0:
                     legs.append(f"{tag}:empty")
                     continue
