@@ -75,12 +75,14 @@ export const REALTIME_BUDGET_MS = 12_000;
 export const REALTIME_TEXT = {
   heading: "当日实时",
   lastUpdate: (hhmmss: string) => `最后更新 ${hhmmss}（北京）`,
-  stale: (hhmmss: string) => `已停在 ${hhmmss} 的最后已知值（最近一次刷新没成功）`,
-  agree: "双源一致",
-  noSecondSource: "无双源可比对",
+  stale: (hhmmss: string) => `刷新没成功，仍显示 ${hhmmss} 那一次的价`,
+  agree: "两家报价一致",
+  noSecondSource: "只有一家报价，未做比对",
   /** 这句此前住在组件里（`RealtimeStrip.tsx:109` 的 `??` 右半）＝这张表的第二处硬编码文案。
-   *  搬进来不是新字面——它是 note 缺失时的兜底，字面一字未改（10-13 下午复核）。 */
-  diverged: "双源偏差超阈值",
+   *  搬进来不是新字面——它是 note 缺失时的兜底（10-13 下午复核）。
+   *  10-17 主人的字＝「句 B 六串要改字面」⇒ 这句与上面三串一起换成说人话的字面，
+   *  `heading`／`lastUpdate` 两串**没动**＝PLAN `:170`／`:181` 的需求原文逐字引用着它们。 */
+  diverged: "两家报价有出入",
 };
 
 /** 第 N 跳该问哪几条腿（tick 从 0 起，0 是进页面的那一次）。 */
