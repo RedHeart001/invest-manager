@@ -57,7 +57,8 @@ EXPENSIVE = {"/products"}  # 整张列表分页多发 ⇒ 不进默认计划
 PROBES: list[dict[str, Any]] = [
     {"path": "/quote", "params": {"type": "stock", "code": "600519"}, "egress": "1 发（TTL 命中则 0）"},
     {"path": "/kline", "params": {"type": "stock", "code": "600519", "interval": "1d"}, "egress": "1 发"},
-    {"path": "/quote/verified", "params": {"type": "stock", "code": "600519", "field": "price"}, "egress": "≈3 发（主源＋备源比对）"},
+    # `/quote/verified` 那条探针随 10-17 CR9-115 一起摘：它的调用方（详情页按钮与 BFF 路由）已删，
+    # 端点本身仍在 ds 里，但闸2 的清单不再登记它 ⇒ 留着探针会让下面"探针集合 == 分母"那枚自测红。
     # CR9-92（10-13）新增的这一枚是**第一次对着真响应核实时区的键面**：它同时是 1a 的验收腿
     # （`sources`／`hasTodayData` 这些键在真响应里到底有没有），也是闸2 L3 那条"已知陈旧"清单的销账动作。
     {"path": "/quote/realtime", "params": {"type": "stock", "code": "600519"},
@@ -241,13 +242,14 @@ def selftest() -> int:
 
     declared = declared_paths()
     ck("清单的单一来源在 ts 里，件内不抄第二份（现查 ≥10 条）", len(declared) >= 10)
-    ck("/quote/verified 在登记之列（10-08 那一枚读错键的端点）", "/quote/verified" in declared)
+    ck("/quote/realtime 在登记之列（`verifyVerdict` 三态现在只有这一条消费方，10-08 读错键那一枚的家）",
+       "/quote/realtime" in declared)
     # 这一枚是真牙齿：清单加了端点而现场腿没加探针／或探针偷偷多采一枚被排除的 ⇒ 自测红
     ck("探针集合 == 分母（分母现查 NO_LIVE_PROBE，不抄第二份）",
        sorted(p["path"] for p in PROBES) == sorted(denominator()))
-    ck("分母＝11（登记 14 − 排除 3；10-16 CR9-111 把 `/bond/underlying` 登记后同时排除，"
-       "排除数不抄第二份——原来写死的 `- 2` 一加第三条排除就会假红）",
-       len(denominator()) == len(declared) - len(no_live_probe()) == 11)
+    ck("分母＝10（登记 13 − 排除 3；10-17 CR9-115 撤掉 `/quote/verified` 那条登记与探针，"
+       "10-16 CR9-111 那轮曾到 11；排除数不抄第二份——原来写死的 `- 2` 一加第三条排除就会假红）",
+       len(denominator()) == len(declared) - len(no_live_probe()) == 10)
     ck("/hotspots/status 已挪进探针清单且零上游（0 发＝不动桶）",
        any(p["path"] == "/hotspots/status" and p["egress"].startswith("0") for p in PROBES))
     ck("有副作用的 POST 永不自动采（run 触发抓取／start 起研报）",

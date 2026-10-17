@@ -1,7 +1,7 @@
 "use client";
 
 // 主图区 + 变化解读区（PLAN M3 六区结构 ③④，客户端交互）
-// - 时间档位 1D/1W/1M/3M/6M/1Y + 自定义起止（1D 走分钟线透传，不落库）
+// - 时间档位 1W/1M/3M/6M/1Y + 自定义起止（分钟线 1m 通道仍在 BFF 白名单里，本页不再走它＝OPT-3 第二批）
 // - 阶段背景带（ZigZag 客户端重算，与解读区联动）
 // - 事件标记（转折点/大波动日 → "可能相关"新闻）
 // - 多标的归一化收益率对比
@@ -24,19 +24,15 @@ type Props = {
   valueLabel: string; // 价格 / 单位净值
 };
 
-// key 是与数据档/回落状态比较的内部标识，label 才是界面文案
-const PRESETS: { key: string; label: string; days: number; interval: "1m" | "1d" }[] = [
-  { key: "1D", label: "当日", days: 1, interval: "1m" },
+// key 是数据档的内部标识，label 才是界面文案
+// （OPT-3 第二批＝CR9-115 撤掉 1D 档：这一族里 `interval` 只剩日线，分钟线透传与它的回落构件一起删）
+const PRESETS: { key: string; label: string; days: number; interval: "1d" }[] = [
   { key: "1W", label: "近1周", days: 7, interval: "1d" },
   { key: "1M", label: "近1月", days: 30, interval: "1d" },
   { key: "3M", label: "近3月", days: 90, interval: "1d" },
   { key: "6M", label: "近6月", days: 182, interval: "1d" },
   { key: "1Y", label: "近1年", days: 365, interval: "1d" },
 ];
-
-function presetLabel(key: string): string {
-  return PRESETS.find((p) => p.key === key)?.label ?? key;
-}
 
 // B4：beijingToday 已抽公共 util（lib/time.ts）
 import { beijingToday } from "@/lib/time";
@@ -67,11 +63,6 @@ export default function ProductCharts({
   const [custom, setCustom] = useState({ start: "", end: "" });
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // C6b（2026-09-25）：分钟线失败回落 3M 时的降级标注（R16：降级必须显式）
-  const [fallbackNote, setFallbackNote] = useState<string | null>(null);
-  // CR9-43：回落发生时高亮留在**用户按下的那一档**（`rangeKey` 继续记数据档，
-  // 供对比窗口等数据语义用），否则点 1D 会"闪一下跳回 3M"、被读成没反应。
-  const [fallbackFrom, setFallbackFrom] = useState<string | null>(null);
   const [compareInput, setCompareInput] = useState("");
   const [compare, setCompare] = useState<{ code: string; candles: Candle[] } | null>(null);
   const [chartReady, setChartReady] = useState(false);
@@ -86,15 +77,7 @@ export default function ProductCharts({
   useEffect(() => () => abortRef.current?.abort(), []);
 
   const load = useCallback(
-    async (params: {
-      start: string;
-      end: string;
-      interval: "1m" | "1d";
-      compareCode?: string;
-      rangeKey?: string;
-      fallbackNote?: string | null;
-      fallbackFrom?: string | null;
-    }) => {
+    async (params: { start: string; end: string; compareCode?: string; rangeKey?: string }) => {
       // 新请求 aborts 旧请求；序号守卫丢弃过期响应
       abortRef.current?.abort();
       const controller = new AbortController();
@@ -104,53 +87,25 @@ export default function ProductCharts({
 
       setPending(true);
       setError(null);
-      // C6b：新一次**用户主动**加载（rangeKey 非 fallback 触发）清掉上一轮的回落标注；
-      // 回落调用自身传入 fallbackNote，不会被这里清掉（清完再设）。
-      if (params.fallbackNote === undefined) setFallbackNote(null);
-      // CR9-43：只有回落调用会带 fallbackFrom；正常加载一律清空
-      setFallbackFrom(params.fallbackFrom ?? null);
-      // C6b 的回落动作（抛错与"200 空序列"两种成因共用，见 CR9-13）
-      const fallbackToDaily3M = () => {
-        void load({
-          start: shiftDays(beijingToday(), -90),
-          end: beijingToday(),
-          interval: "1d",
-          rangeKey: "3M",
-          // CR9-43：数据档是 3M，高亮留在用户按下的那一档
-          fallbackFrom: params.rangeKey ?? "1D",
-          fallbackNote: "分钟线暂不可用，已显示近 3 个月日线",
-        });
-      };
       try {
-        const q = new URLSearchParams({ type, code, interval: params.interval });
-        if (params.interval === "1d") {
-          q.set("start", params.start);
-          q.set("end", params.end);
-        }
+        const q = new URLSearchParams({
+          type,
+          code,
+          interval: "1d",
+          start: params.start,
+          end: params.end,
+        });
         const res = await fetch(`/api/kline?${q.toString()}`, { signal: controller.signal });
         const data = (await res.json()) as KlineResult & { error?: string };
         if (isStale()) return;
         if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
-        // CR9-13：东财抖动/熔断时 1m 是**软失败**——HTTP 200 + 0 根，根本不抛错，
-        // 于是 C6b 的回落只在 catch 里的那条路走不到，页面渲染成一张无说明的空白图。
-        if (params.interval === "1m" && !params.fallbackNote && !data.candles?.length) {
-          fallbackToDaily3M();
-          return;
-        }
         setKline(data);
         // 代码审查修复：调用方显式传入预设 key（此前按 start 日期反推，
-        // 只有 1D/3M 能命中，1W/1M/6M/1Y 点击后高亮丢失）
+        // 只有 3M 能命中，1W/1M/6M/1Y 点击后高亮丢失）
         setRangeKey(
-          params.rangeKey ??
-            (params.interval === "1m"
-              ? "1D"
-              : params.start === shiftDays(beijingToday(), -90)
-                ? "3M"
-                : "custom"),
+          params.rangeKey ?? (params.start === shiftDays(beijingToday(), -90) ? "3M" : "custom"),
         );
-        // C6b：回落成功后设置标注（先于 pending 收尾，避免闪空）
-        if (params.fallbackNote) setFallbackNote(params.fallbackNote);
-        setPhases(data.interval === "1d" ? detectPhases(data.candles) : []);
+        setPhases(detectPhases(data.candles));
         if (params.compareCode) {
           const cq = new URLSearchParams({
             type,
@@ -173,14 +128,6 @@ export default function ProductCharts({
         }
       } catch (e) {
         if (controller.signal.aborted || isStale()) return; // abort 不算错误
-        // C6b（2026-09-25）：分钟线单源无备源（东财抖动/熔断即挂）——1D 档失败时
-        // 自动回落 3M 日 K 并显式标注（R15 用户侧永不空白 + R16 降级可感知）。
-        // 回落调用 interval 已是 "1d"，不会再进本分支，无循环风险。
-        // CR9-13：动作已提为 fallbackToDaily3M()，与"200 空序列"那条成因共用。
-        if (params.interval === "1m" && !params.fallbackNote) {
-          fallbackToDaily3M();
-          return;
-        }
         setError(e instanceof Error ? e.message : "加载失败");
       } finally {
         if (!isStale()) setPending(false);
@@ -192,9 +139,8 @@ export default function ProductCharts({
   const applyPreset = useCallback(
     (p: (typeof PRESETS)[number]) => {
       const today = beijingToday();
-      const start = p.interval === "1m" ? today : shiftDays(today, -p.days);
       setRangeKey(p.key);
-      void load({ start, end: today, interval: p.interval, rangeKey: p.key });
+      void load({ start: shiftDays(today, -p.days), end: today, rangeKey: p.key });
     },
     [load],
   );
@@ -202,7 +148,7 @@ export default function ProductCharts({
   const applyCustom = useCallback(() => {
     if (!custom.start || !custom.end) return;
     setRangeKey("custom");
-    void load({ start: custom.start, end: custom.end, interval: "1d", rangeKey: "custom" });
+    void load({ start: custom.start, end: custom.end, rangeKey: "custom" });
   }, [custom, load]);
 
   const addCompare = useCallback(() => {
@@ -212,7 +158,7 @@ export default function ProductCharts({
     const days = PRESETS.find((p) => p.key === rangeKey)?.days ?? 90;
     const start =
       rangeKey === "custom" && custom.start ? custom.start : shiftDays(today, -days);
-    void load({ start, end: today, interval: "1d", compareCode: target, rangeKey });
+    void load({ start, end: today, compareCode: target, rangeKey });
   }, [compareInput, code, rangeKey, custom, load]);
 
   // ---------- ECharts option ----------
@@ -220,21 +166,18 @@ export default function ProductCharts({
     const candles = kline.candles;
     if (candles.length === 0) return null;
     const dates = candles.map((c) => c.date);
-    const isMinute = kline.interval === "1m";
     const showCompare = Boolean(compare && compare.candles.length > 1);
 
-    // 事件标记（仅日线）：日期落在区间内的"可能相关"新闻
-    const eventPoints = isMinute
-      ? []
-      : Object.entries(events.byDate)
-          .filter(([d]) => dates.includes(d))
-          .map(([d, items]) => {
-            const bar = candles.find((c) => c.date === d);
-            return {
-              coord: [d, bar?.close ?? 0] as [string, number],
-              value: items.map((x) => x.title).slice(0, 2).join("\n"),
-            };
-          });
+    // 事件标记：日期落在区间内的"可能相关"新闻
+    const eventPoints = Object.entries(events.byDate)
+      .filter(([d]) => dates.includes(d))
+      .map(([d, items]) => {
+        const bar = candles.find((c) => c.date === d);
+        return {
+          coord: [d, bar?.close ?? 0] as [string, number],
+          value: items.map((x) => x.title).slice(0, 2).join("\n"),
+        };
+      });
 
     const norm = (arr: Candle[]) => {
       const base = arr[0]?.close || 1;
@@ -283,7 +226,7 @@ export default function ProductCharts({
         lineStyle: { color: "#BA7517", width: 1.5 },
       });
     } else {
-      const hasVolume = !isMinute && !kline.valueOnly;
+      const hasVolume = !kline.valueOnly;
       grid = hasVolume
         ? [
             { left: 60, right: 20, top: 30, height: 250 },
@@ -303,7 +246,7 @@ export default function ProductCharts({
           ]
         : [{ type: "value", scale: true }];
 
-      const markArea = !isMinute && phases.length > 0
+      const markArea = phases.length > 0
         ? {
             silent: true,
             data: phases.map((p) => [
@@ -444,8 +387,7 @@ export default function ProductCharts({
               onClick={() => applyPreset(p)}
               disabled={pending}
               className={`rounded px-2.5 py-1 text-xs font-medium transition-colors disabled:opacity-50 ${
-                // CR9-43：回落态下高亮跟随"用户按下的那一档"，不是数据档
-                (fallbackFrom ?? rangeKey) === p.key
+                rangeKey === p.key
                   ? "bg-blue-600 text-white"
                   : "bg-zinc-100 text-zinc-600 hover:bg-zinc-200"
               }`}
@@ -453,14 +395,6 @@ export default function ProductCharts({
               {p.label}
             </button>
           ))}
-          {fallbackFrom && (
-            <span
-              data-testid="fallback-chip"
-              className="rounded bg-amber-50 px-2 py-1 text-xs text-amber-700"
-            >
-              {presetLabel(fallbackFrom)}无分钟数据，已改显示近3月日线
-            </span>
-          )}
           <span className="ml-2 flex items-center gap-1 text-xs text-zinc-500">
             <input
               type="date"
@@ -530,13 +464,7 @@ export default function ProductCharts({
         </div>
 
         <div className="mt-2 flex flex-wrap items-center justify-between gap-1 text-xs text-zinc-400">
-          <span>
-            {fallbackNote && (
-              <span className="mr-2 text-amber-600" data-testid="fallback-note">
-                {fallbackNote}
-              </span>
-            )}
-            数据来源：{kline.source}
+          <span>数据来源：{kline.source}
             {kline.valueOnly
               ? "（该品种仅收盘值序列）"
               : kline.flatOhlc
@@ -573,9 +501,7 @@ export default function ProductCharts({
             {bondEventsFrom(events.fromStock)}
           </p>
         )}
-        {kline.interval === "1m" ? (
-          <p className="mt-2 text-xs text-zinc-400">当日分钟线不参与阶段划分。</p>
-        ) : phases.length === 0 ? (
+        {phases.length === 0 ? (
           <p className="mt-2 text-xs text-zinc-400">暂无阶段数据。</p>
         ) : (
           <div className="mt-3 overflow-x-auto">

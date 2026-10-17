@@ -12,7 +12,7 @@ export async function GET(req: NextRequest) {
   const interval = req.nextUrl.searchParams.get("interval") ?? "1d";
   // CR7-6/C5（2026-09-25）：code/type 白名单前移——此前只判非空，任意串都会
   // 直传 ds 消耗一发东财令牌（rate_per_min=12），页面内 <img>/no-cors GET 即可
-  // 被利用刷额度（R15）。与 research/start、watchlist、quote/verify 同口径。
+  // 被利用刷额度（R15）。与 research/start、watchlist 同口径。
   if (!QUOTE_TYPES.includes(type as (typeof QUOTE_TYPES)[number])) {
     return NextResponse.json({ error: `unsupported type: ${type}` }, { status: 400 });
   }

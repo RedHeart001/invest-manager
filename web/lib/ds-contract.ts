@@ -66,13 +66,6 @@ export const DS_CONTRACT: readonly EndpointContract[] = [
     note: "`usesEastmoney` 三态（true/false/null）是 CR9-67 丙的契约，缺键＝null 而不是 false",
   },
   {
-    path: "/quote/verified",
-    method: "GET",
-    requiredTop: ["type", "code", "price", "source", "verifyVerdict", "crossChecked"],
-    readBy: ["web/app/api/quote/verify/route.ts", "web/app/components/VerifyQuoteButton.tsx"],
-    note: "10-08 那一枚读错键的就是这一条：`verifyVerdict` 三态才是分歧率的分子分母",
-  },
-  {
     path: "/quote/realtime",
     method: "GET",
     requiredTop: [

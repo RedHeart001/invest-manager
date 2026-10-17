@@ -537,60 +537,6 @@ async function main() {
     }
   }
 
-  // ---------- [12] 双源核对 BFF（#22(d) 的最后一条：`/api/quote/verify` 此前零集成断言） ----------
-  // CR7-3/B1 交付的这个 BFF 入口唯一的消费者是详情页那个按钮，HTTP 层从没被断过。
-  // 出网代价＝**一次 BFF 请求**（链层里主源＋备源各一次 ⇒ 约 2 次上游），守卫两条零出网。
-  // 口径沿第 [7] 段那条"可达或显式降级"⇒ 三条主断言都写成**蕴含式**：上游全挂时落在
-  // "显式 error"那一支，不会因为外部态假红；而"200 却无声"这种形态一定红。
-  console.log("\n[12] 双源核对 /api/quote/verify（真出网一次：主源＋备源）");
-  {
-    const v = await retry500(() => getJson(`${BASE}/api/quote/verify?type=stock&code=600519`));
-    const verdict = v.body?.verifyVerdict;
-    const compared = verdict === "agree" || verdict === "diverged";
-    const threeValued = ["agree", "diverged", "no_second_source"].includes(verdict);
-    const explicitFail =
-      [400, 502, 503].includes(v.status) && String(v.body?.error ?? "").length > 0;
-    ok(
-      "#22(d)：合法请求不得静默成功——200 必带机器可读三态，非 200 必带显式 error",
-      (v.status === 200 && threeValued) || explicitFail,
-      `status=${v.status} verdict=${JSON.stringify(verdict)} error=${JSON.stringify(v.body?.error ?? "")}`,
-    );
-    ok(
-      "#22(d)：三态与 `crossChecked` 两个方向都不自相矛盾（CR9-11：agree/diverged ⇒ 真试过；没试过 ⇒ 不许称比过）",
-      v.status !== 200 ||
-        ((!compared || v.body?.crossChecked === true) &&
-          (v.body?.crossChecked !== false || verdict === "no_second_source")),
-      `verdict=${JSON.stringify(verdict)} crossChecked=${JSON.stringify(v.body?.crossChecked)}`,
-    );
-    ok(
-      "#22(d)：没有第二源时必须说话（note 或「没试过比对」二者有一，不许 200＋无声）",
-      v.status !== 200 ||
-        verdict !== "no_second_source" ||
-        String(v.body?.note ?? "").length > 0 ||
-        v.body?.crossChecked === false,
-      `note=${JSON.stringify(v.body?.note ?? "")} crossChecked=${JSON.stringify(v.body?.crossChecked)}`,
-    );
-    // 守卫两条：零出网。400 的**措辞**能区分是谁拒的（BFF 的白名单在 fetch 之前，
-    // ds 拒的话 BFF 会转成 502/400 且 error 里带 ds 的 detail）⇒ 断字面才算"没打到上游"。
-    const badType = await getJson(`${BASE}/api/quote/verify?type=zzz&code=600519`);
-    ok(
-      "#22(d)🔁：非法 type 在进 ds 之前 400（error 字面是 BFF 自己的 `unsupported type:`）",
-      badType.status === 400 &&
-        String(badType.body?.error ?? "").startsWith("unsupported type"),
-      `status=${badType.status} error=${JSON.stringify(badType.body?.error ?? "")}`,
-    );
-    const badCode = await getJson(`${BASE}/api/quote/verify?type=stock&code=${encodeURIComponent("600519;drop table")}`);
-    const noCode = await getJson(`${BASE}/api/quote/verify?type=stock`);
-    ok(
-      "#22(d)🔁：非法 code 与缺 code 都 400 `invalid code`（CODE_SET 守卫，未打到上游）",
-      badCode.status === 400 &&
-        noCode.status === 400 &&
-        badCode.body?.error === "invalid code" &&
-        noCode.body?.error === "invalid code",
-      `bad=${badCode.status}/${JSON.stringify(badCode.body?.error ?? "")} missing=${noCode.status}/${JSON.stringify(noCode.body?.error ?? "")}`,
-    );
-  }
-
   // ---------- 结果 ----------
   console.log(`\n== 结果：${passed} 通过 / ${failed} 失败 ==`);
   if (failures.length) {

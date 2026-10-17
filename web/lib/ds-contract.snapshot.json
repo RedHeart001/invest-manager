@@ -52,36 +52,6 @@
         ]
       }
     },
-    "/quote/verified": {
-      "capturedAt": "2026-10-16",
-      "provenance": "test-script/window_contract.py --live --write（现场腿，真响应键面）",
-      "topLevel": [
-        "amount",
-        "change",
-        "changePct",
-        "code",
-        "crossChecked",
-        "floatCap",
-        "high",
-        "low",
-        "marketCap",
-        "name",
-        "note",
-        "open",
-        "pb",
-        "peDyn",
-        "peTtm",
-        "prevClose",
-        "price",
-        "source",
-        "timestamp",
-        "turnover",
-        "type",
-        "verifyVerdict",
-        "volume"
-      ],
-      "rows": null
-    },
     "/quote/realtime": {
       "capturedAt": "2026-10-16",
       "provenance": "test-script/window_contract.py --live --write（现场腿，真响应键面）",

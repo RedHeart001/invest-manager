@@ -3,7 +3,6 @@ import type { EChartsOption } from "echarts";
 
 import EChart from "@/app/components/EChart";
 import PageBack from "@/app/components/PageBack";
-import VerifyQuoteButton from "@/app/components/VerifyQuoteButton";
 import WatchButton from "@/app/components/WatchButton";
 import ProductCharts from "./ProductCharts";
 import RealtimeStrip from "./RealtimeStrip";
@@ -324,10 +323,6 @@ export default async function ProductPage({
                 来源：{quote.source}
                 {quoteClock ? ` · ${quoteClock}` : ""}
               </span>
-            </div>
-            {/* CR7-3/B1：R13 双源交叉验证的按需入口（方案 ①，2026-09-24 拍板） */}
-            <div className="mt-3">
-              <VerifyQuoteButton type={type} code={code} />
             </div>
             {stats.length > 0 && (
               <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-6">

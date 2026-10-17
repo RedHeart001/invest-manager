@@ -4,7 +4,7 @@ const DATA_SERVICE_URL = process.env.DATA_SERVICE_URL ?? "http://localhost:8000"
 
 /**
  * #63（2026-10-12）：BFF 侧 `/quote` 的预算（ms）＝30s，全站既有口径
- * （本文件 `dsGet` 默认、`app/api/quote/verify/route.ts`）。此前 `/api/quote`
+ * （本文件 `dsGet` 默认；另一处 `app/api/quote/verify/route.ts` 已随 10-17 CR9-115 删）。此前 `/api/quote`
  * 与详情页 SSR 各写死 15s，与 ds 侧一条 stock `get_quote` 的最坏路径差一个量级：
  * `_em_request` 的 `acquire()` 默认 **20s**（`data-service/app/utils/limiter.py:136`）
  * ＋ 多 host 两轮 × 每发 15s（`data-service/app/providers/akshare_provider.py:303-309`）。

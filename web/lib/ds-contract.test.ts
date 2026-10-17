@@ -146,7 +146,7 @@ describe("闸2 L1 完整性：web 里每处 ds 调用点都得登记", () => {
       "/quote/verified",
     ]);
     // 注释里出现的路径不算调用点（10-12 第一版用正则时就把它读成了端点）
-    expect(callSitesIn(`// 见 dsGet("/api/quote/verify/route.ts")\nconst a = 1;`, "fixture.ts")).toEqual([]);
+    expect(callSitesIn(`// 见 dsGet("/api/quote/route.ts")\nconst a = 1;`, "fixture.ts")).toEqual([]);
   });
 });
 
@@ -169,10 +169,10 @@ describe("闸2 L2 键名：清单要的键，快照与 ds 源码都得承认", (
   });
 
   it("覆盖面读数（不许把「没采到」读成「没问题」）", () => {
-    expect(coverage(snap)).toMatchObject({ declared: DS_CONTRACT.length, 分母: 11 });
+    expect(coverage(snap)).toMatchObject({ declared: DS_CONTRACT.length, 分母: 10 });
   });
 
-  it("分母口径（10-12 主人的字＝10；10-13 CR9-92 落 `/quote/realtime` ⇒ 现值 11）：排除表自证，跑满＝100%", () => {
+  it("分母口径（10-12 主人的字＝10；10-13 CR9-92 落 `/quote/realtime` 曾到 11；10-17 CR9-115 撤掉 `/quote/verified` ⇒ 回到 10）：排除表自证，跑满＝100%", () => {
     const paths = DS_CONTRACT.map((c) => c.path);
     // 排除表里写错一个路径名＝那条排除静默失效、分母悄悄变化 ⇒ 必须逐条点名
     const ghost = Object.keys(NO_LIVE_PROBE).filter((p) => !paths.includes(p));
