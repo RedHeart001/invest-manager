@@ -31,6 +31,7 @@ MAX_LLM_CALLS = int(os.environ.get("RESEARCH_MAX_LLM_CALLS", "12"))
 TASK_TIMEOUT_S = int(os.environ.get("RESEARCH_TASK_TIMEOUT_S", "480"))
 
 RATING_ENUM = ("乐观", "中性", "谨慎", "悲观")
+ANALYST_ROLES = ("技术分析师", "基本面分析师", "新闻情绪分析师")
 
 
 class _Budget:
@@ -192,6 +193,12 @@ def run_research(type_: str, code: str, name: str, on_progress=None) -> dict:
             "llmCalls": budget.calls,
         }
 
+    # 缺席＝这一轮少说了话的角色。`_ask` 把「预算被拒／LLM 调用失败／模型没交出 view」压成同一个
+    # None，到这一层只剩「谁没在 analysts 里」这一枚可读事实；名单进机器可读位，屏上只说谁缺席
+    # （比率与分母不上屏＝10-05 那条口径）。少角色是**这一轮**真出的事，所以进 degraded，
+    # 不是 `realtime.py:431` 那条"结构性缺口不进这一位"要防的常真形。
+    missing_roles = [role for role in ANALYST_ROLES if role not in {a["role"] for a in analysts}]
+
     # ---- 角色 4：多空辩论（仅采信有真实数据支撑的观点——P0 话语约束） ----
     progress("多空辩论中")
     data_based = [a for a in analysts if a.get("dataBased")]
@@ -235,8 +242,10 @@ def run_research(type_: str, code: str, name: str, on_progress=None) -> dict:
     else:
         summary = "研究经理汇总未能产出（LLM 熔断），以下为各角色原始观点。"
 
-    degraded = bool(gaps) or any(not a.get("points") for a in analysts)
+    degraded = bool(gaps) or bool(missing_roles) or any(not a.get("points") for a in analysts)
     note_bits = [f"数据缺口：{g}" for g in gaps]
+    if missing_roles:
+        note_bits.append(f"分析师缺席：{'、'.join(missing_roles)}")
     if budget.calls >= MAX_LLM_CALLS:
         note_bits.append("触发 LLM 调用上限熔断")
 
@@ -290,6 +299,9 @@ def run_research(type_: str, code: str, name: str, on_progress=None) -> dict:
             "dimensions": [
                 dim for dim in ("market", "kline", "news") if payload[dim].get("ok")
             ],
+            # 缺席角色名（#80 乙）：与 `note` 里那句"分析师缺席"同源，供验收与统计读取。
+            # 空表＝这一轮三角色都说了话；`note` 为 null 而这里是空表才是自洽的正常态。
+            "missingAnalysts": missing_roles,
             "degraded": degraded,
             "note": "；".join(note_bits)[:400] or None,
             "phasesSource": "P2 同源阶段算法",

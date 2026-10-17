@@ -81,13 +81,18 @@ def _payload(kline_ok: bool, fund_ok: bool = True, news_ok: bool = True) -> dict
 class _LlmStub:
     """按角色 system prompt 分派假回复，并记录发给辩论的输入。"""
 
-    def __init__(self, tech_reply: dict | None = None) -> None:
+    def __init__(self, tech_reply: dict | None = None, absent: tuple[str, ...] = ()) -> None:
         self.calls: list[tuple[str, str]] = []
         self.debate_input: dict | None = None
         self._tech_reply = tech_reply
+        # absent 用 system prompt 里的关键词点名（新闻那位的 prompt 写的是「新闻/公告情绪分析师」，
+        # 与落库的 role 名不同字面）——命中即回 None＝与"LLM 调用失败／熔断／没交出 view"同形。
+        self._absent = absent
 
     def chat_json(self, system: str, user: str, timeout: int = 120):
         self.calls.append((system, user))
+        if any(k in system for k in self._absent):
+            return None
         if "技术分析师" in system:
             return self._tech_reply or {"view": "看多", "points": ["近 20 日涨 12%"]}
         if "基本面分析师" in system:
@@ -106,7 +111,7 @@ class _LlmStub:
         return None
 
 
-def _run_with(payload: dict, tech_reply: dict | None = None) -> tuple[dict, _LlmStub]:
+def _run_with(payload: dict, tech_reply: dict | None = None, absent: tuple[str, ...] = ()) -> tuple[dict, _LlmStub]:
     orig_collect = ad.collect_all
     orig_chat = en.llm_client.chat_json
 
@@ -114,7 +119,7 @@ def _run_with(payload: dict, tech_reply: dict | None = None) -> tuple[dict, _Llm
         gaps = [f"{d}：模拟不可用" for d, r in payload.items() if not r.get("ok")]
         return payload, gaps
 
-    stub = _LlmStub(tech_reply)
+    stub = _LlmStub(tech_reply, absent)
     ad.collect_all = _collect
     en.llm_client.chat_json = stub.chat_json
     try:
@@ -335,12 +340,52 @@ def test_akshare_side_keeps_compact_dates() -> None:
     check("CR7-2🔁：cninfo 侧不含连字符", "-" not in sd and "-" not in ed, f"{sd}/{ed}")
 
 
+# ---------------- #80 乙：少一位分析师必须说出来（缺席名单进机器可读位，屏上只说谁缺席） ----------------
+
+
+def test_missing_analyst_is_declared() -> None:
+    report, _ = _run_with(_payload(True), absent=("基本面",))
+    missing = report["meta"]["missingAnalysts"]
+    check(
+        "#80：缺席名单点名那一位",
+        missing == ["基本面分析师"],
+        json.dumps(missing, ensure_ascii=False),
+    )
+    check("#80：少一位时 ok 仍为 True（报告可用，不整份作废）", report.get("ok") is True, json.dumps(report)[:160])
+    check("#80：缺席算进 degraded（这是这一轮真出的事）", report["meta"]["degraded"] is True, str(report["meta"]["degraded"]))
+    check(
+        "#80：note 点名缺席者",
+        "分析师缺席：基本面分析师" in (report["meta"]["note"] or ""),
+        str(report["meta"]["note"]),
+    )
+    check(
+        "#80：缺席名单与已发言者不重叠",
+        not ({a["role"] for a in report["analysts"]} & set(missing)),
+        str([a["role"] for a in report["analysts"]]),
+    )
+    two, _ = _run_with(_payload(True), absent=("基本面", "新闻"))
+    check(
+        "#80：缺席两位时按角色表顺序点名（新闻那位落库名≠prompt 关键词）",
+        two["meta"]["missingAnalysts"] == ["基本面分析师", "新闻情绪分析师"],
+        json.dumps(two["meta"]["missingAnalysts"], ensure_ascii=False),
+    )
+
+
+def test_all_three_analysts_present_is_clean() -> None:
+    report, _ = _run_with(_payload(True))
+    check("🔁 三角色齐⇒缺席名单为空", report["meta"]["missingAnalysts"] == [], json.dumps(report["meta"]["missingAnalysts"]))
+    check("🔁 三角色齐⇒不因缺席而 degraded", report["meta"]["degraded"] is False, str(report["meta"]["degraded"]))
+    check("🔁 三角色齐⇒note 里没有缺席字样", "分析师缺席" not in (report["meta"]["note"] or ""), str(report["meta"]["note"]))
+
+
 if __name__ == "__main__":
     test_technical_not_data_based_without_kline()
     test_technical_data_based_with_kline()
     test_all_dims_missing_no_analyst_claims_data()
     test_llm_dataBased_field_cannot_override_missing_data()
     test_model_false_is_not_flipped_to_true()
+    test_missing_analyst_is_declared()
+    test_all_three_analysts_present_is_clean()
     test_kline_read_back_uses_iso_hyphen_dates()
     test_kline_days_window_actually_applied()
     test_kline_default_window_is_182_days()

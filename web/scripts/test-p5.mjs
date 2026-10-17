@@ -66,6 +66,14 @@ async function main() {
           (fr.analysts ?? []).every((a) => a.role && a.view && a.points),
         `analysts=${(fr.analysts ?? []).length}`,
       );
+      // #80 乙：少一位角色必须在这一行里说出来。历史行（旧码产物）三位齐时走前半支＝绿，
+      // 摘掉 engine 的缺席计数就会让"两位却仍 done 且不标注"翻红——这条才是牙齿。
+      ok(
+        "角色数与缺席标注对称：三位齐 或 degraded＋note 点名缺席",
+        (fr.analysts ?? []).length >= 3 ||
+          (fr.meta?.degraded === true && /分析师缺席/.test(fr.meta?.note ?? "")),
+        `analysts=${(fr.analysts ?? []).length} degraded=${fr.meta?.degraded} note=${String(fr.meta?.note ?? "").slice(0, 40)}`,
+      );
       ok("多空辩论结构存在", fr.debate && Array.isArray(fr.debate.bull) && Array.isArray(fr.debate.bear));
       ok("风控结论存在", (fr.risk ?? []).length > 0);
       ok("meta.llmCalls ≤ 12（熔断上限）", (fr.meta?.llmCalls ?? 99) <= 12, String(fr.meta?.llmCalls));
