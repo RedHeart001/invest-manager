@@ -19,6 +19,7 @@
     PYTHONPATH=. .venv/Scripts/python tests/test_cr9_sync_status.py
 """
 
+import json
 import os
 import sys
 import tempfile
@@ -645,6 +646,60 @@ def test_gate_lastdate_untouched_by_skip() -> None:
           "already-synced-today" in str(st.get("skippedReason")), str(st.get("skippedReason")))
 
 
+def test_sync_last_result_persists_across_restart() -> None:
+    """刀 C（10-18）：同步腿的逐类 `note` 必须能在重启之后被读到——此前它只住在内存里。
+
+    形状照热点腿那份（`hotspot-state.json` 自 CR9-62 起就带 `lastResult`）：写点唯一＝
+    `_mark_outcome` 收尾那一次覆写，读点＝`status()` 的回落。四条判据各管一形，其中
+    ③④ 是这把尺自己的牙齿（缺任何一条，"落了盘但落错东西"都能蒙过去）。
+    """
+    note = "美股主数据按甲方案只取前排 50 页（甲+）"
+    body = {
+        "ok": True,
+        "tookMs": 1200,
+        "results": [{"type": "us", "count": 495, "note": note, "tookMs": 30}],
+    }
+    saved = dict(ss._state)
+    try:
+        _run_with(body)
+        disk = ss.read_sync_state() or {}
+        dr = disk.get("lastResult") or {}
+        check("刀 C①：收尾那一轮把 lastResult 一起覆写进 sync-state.json（含逐类 note）",
+              any((r or {}).get("note") == note for r in (dr.get("results") or [])),
+              json.dumps(disk, ensure_ascii=False)[:200])
+        check("刀 C①b：落盘的那份带 outcome（结局与结果同源，不许一个落一个不落）",
+              dr.get("outcome") == disk.get("lastAttemptOutcome"),
+              f"result.outcome={dr.get('outcome')} marker={disk.get('lastAttemptOutcome')}")
+        # 模拟"新进程"：内存里没有，只有盘上有
+        ss._state["lastResult"] = None
+        st = ss.status()
+        carried = ((st.get("lastResult") or {}).get("results") or [{}])[0].get("note")
+        check("刀 C②：重启后 status() 从盘上顶回同一枚 note（验收对象不再只住内存）",
+              carried == note, str(carried)[:160])
+        check("刀 C②b：顶上那份必须标明它来自盘（照 hotspot `fromDisk` 口径，不冒充本进程跑的）",
+              st.get("lastResultFromDisk") is True, str(st.get("lastResultFromDisk")))
+        # ③ 牙齿：旧格式那份文件（压根没有这个键）⇒ 读回 None＋标志 False，不许谎报"落过"
+        ss._write_marker({"lastAttemptDate": ss.beijing_today(), "lastAttemptTrigger": "unit-test",
+                          "lastAttemptOutcome": "completed", "at": "2026-10-18T00:00:00+08:00"})
+        st_old = ss.status()
+        check("刀 C③（牙齿）：旧格式文件没这个键 ⇒ None＋fromDisk=False（读不出就说读不出）",
+              st_old.get("lastResult") is None and st_old.get("lastResultFromDisk") is False,
+              str(st_old.get("lastResult"))[:160])
+        # ④ 牙齿：本进程真跑过一轮 ⇒ 内存那份优先，不许被盘上旧的顶掉（同 hotspot runs 的纪律）
+        ss._write_marker({"lastAttemptDate": ss.beijing_today(), "lastAttemptTrigger": "unit-test",
+                          "lastAttemptOutcome": "completed", "at": "x",
+                          "lastResult": {"outcome": "completed", "results": [{"type": "us", "note": "盘上旧的"}]}})
+        ss._state["lastResult"] = {"outcome": "completed", "results": [{"type": "us", "note": note}]}
+        st_new = ss.status()
+        check("刀 C④（牙齿）：内存有就用内存的，盘上那份只在本进程没跑过时顶上",
+              ((st_new.get("lastResult") or {}).get("results") or [{}])[0].get("note") == note
+              and st_new.get("lastResultFromDisk") is False,
+              str(st_new.get("lastResult"))[:160])
+    finally:
+        ss._state.clear()
+        ss._state.update(saved)
+
+
 def main() -> int:
     test_partial_failure_is_not_ok()
     test_full_success_is_ok()
@@ -664,6 +719,7 @@ def main() -> int:
     test_gate_refresh_leg_reports_its_own_skip()
     test_gate_force_reaches_both_legs()
     test_gate_lastdate_untouched_by_skip()
+    test_sync_last_result_persists_across_restart()
     passed = sum(1 for _n, ok, _d in results if ok)
     for name, ok, detail in results:
         if not ok:

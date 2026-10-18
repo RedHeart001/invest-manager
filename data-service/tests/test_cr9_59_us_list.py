@@ -51,6 +51,19 @@ for _s in (sys.stdout, sys.stderr):
 os.environ["LIMITER_STATE_FILE"] = os.path.join(
     tempfile.mkdtemp(prefix="cr9100-limiter-"), "limiter-state.json")
 
+# CR9-119（10-18 18:1x）：**操作者那份 `data-service/.env` 也不许进离线单测**。
+# 今天 16:3x 之前该文件不存在，本套的"默认页数＝15"是绿的；文件一建（`US_LIST_PAGES=50`）
+# 它就 73/74 红在那一条＝`with_pages(None)` 只 pop 了进程环境变量，挡不住
+# `_us_list_pages()` 里那次**懒加载**（`load_env()` 首次执行才读盘、用 setdefault 灌回 50）。
+# 这是上面 `#33 甲` 那句"不许把本机 env 当常数读"的另一半：文件层也属于"本机"。
+# 隔离做法＝把 `app.config._ENV_FILES` 指到临时目录里一份**不存在**的文件（`load_env()`
+# 对不存在的路径直接跳过）。生产那条路没被弄坏，由 `test_env_file_layer_still_works` 成对证明。
+import app.config as _cfg  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+_REAL_ENV_FILES = list(_cfg._ENV_FILES)
+_cfg._ENV_FILES[:] = [Path(tempfile.mkdtemp(prefix="cr9119-env-")) / "absent.env"]
+
 from app.providers import akshare_provider as akp  # noqa: E402
 from app.providers.base import get_list_provider, list_products_with_meta  # noqa: E402
 from app.utils.limiter import get_limiter  # noqa: E402
@@ -224,6 +237,9 @@ def test_us_product_mapping() -> None:
 
 
 def test_page_env() -> None:
+    check("CR9-119 隔离自证：文件层已不在仓库真路径上（操作者的 .env 进不了本套）",
+          all(str(p) not in {str(x) for x in _REAL_ENV_FILES} for p in _cfg._ENV_FILES),
+          str(_cfg._ENV_FILES)[:120])
     with with_pages(None):
         check("默认页数＝15（≈300 只，甲的盘子）", akp._us_list_pages() == 15, str(akp._us_list_pages()))
     with with_pages(3):
@@ -237,6 +253,37 @@ def test_page_env() -> None:
     check("默认值不许超过硬上限（两个常数不许互相矛盾）",
           akp.US_LIST_DEFAULT_PAGES <= akp.US_LIST_PAGE_CEILING)
     check("跑完不污染环境", "US_LIST_PAGES" not in os.environ)
+
+
+def test_env_file_layer_still_works() -> None:
+    """C34 成对的另一半：本套把文件层隔离掉了 ⇒ 必须当场证明**生产那条路照旧通**。
+
+    演法＝临时造一份写着 `US_LIST_PAGES=7` 的假 env 文件、把 `_LOADED` 一次性守卫解冻，
+    让 `_us_list_pages()` 走一次真加载；跑完把守卫与 `_ENV_FILES` 原样恢复（不许留下
+    "测试进程从此读不到盘上配置"这种副作用）。判别力＝若哪天有人把 `load_env()` 从
+    `_us_list_pages()` 里摘掉、或把守卫改成每次重读，这一条与上面那枚隔离自证会分别红。
+    """
+    d = tempfile.mkdtemp(prefix="cr9119-layer-")
+    f = os.path.join(d, ".env")
+    with open(f, "w", encoding="utf-8") as fh:
+        fh.write("US_LIST_PAGES=7\n")
+    saved_files = list(_cfg._ENV_FILES)
+    saved_loaded = _cfg._LOADED
+    os.environ.pop("US_LIST_PAGES", None)
+    try:
+        _cfg._ENV_FILES[:] = [Path(f)]
+        _cfg._LOADED = False
+        got = akp._us_list_pages()
+        check("🔁 生产路径没被本套的隔离弄坏：盘上那份 .env 照样被读（7 页）", got == 7, str(got))
+    finally:
+        _cfg._LOADED = saved_loaded
+        _cfg._ENV_FILES[:] = saved_files
+        os.environ.pop("US_LIST_PAGES", None)
+    check("🔁 跑完恢复隔离态（守卫冻回原值、文件层指回临时不存在的那份）",
+          _cfg._LOADED == saved_loaded
+          and all(str(p) not in {str(x) for x in _REAL_ENV_FILES} for p in _cfg._ENV_FILES)
+          and "US_LIST_PAGES" not in os.environ,
+          str(_cfg._ENV_FILES)[:120])
 
 
 # ---------- 4. 整条列表：声明 / 翻页 / 早停 / 部分失败 ----------
@@ -411,6 +458,7 @@ if __name__ == "__main__":
     test_jsonp_payload()
     test_us_product_mapping()
     test_page_env()
+    test_env_file_layer_still_works()
     test_list_us_stocks_declaration()
     test_list_us_stocks_paging()
     test_list_us_stocks_early_stop()

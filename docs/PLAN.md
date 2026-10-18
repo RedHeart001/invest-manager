@@ -201,6 +201,7 @@
 - **vendor_adapter**（本模块主要开发量，约 150~250 行）：实现 TradingAgents 的 data-access contract（行情、基本面、新闻、指标四类接口），内部全部回读 data-service 统一行情 API → A股/美股/加密一套代码全覆盖
 - 新闻/情绪类接口：A股接东财/新浪新闻源（AkShare），美股接其原生 vendor（Alpha Vantage，无 key 降级 yfinance）
 - **异步任务队列**：FastAPI BackgroundTasks + 内存任务注册表（task_id → status/result，单机够用，不上 Celery/Redis）；BFF 提交任务时先建 `ResearchReport(status=running)`，轮询 data-service `/tasks/{id}` 完成后取回结果落库
+- **10-18 18:0x 现值更正（只增这一行，上面那句原样不回改）**＝**落库实装是反向回调、不是轮询**：ds 收尾时 `_emit_ingest()` POST web 的 `/api/research/ingest` 落库（`data-service/app/research/tasks.py:117-148`，带 `x-ingest-token`），而 `web/lib/research.ts:156` 只 POST `/research/start`；`grep /tasks/ web/lib web/app web/scripts`＝**零命中** ⇒ 「BFF 轮询 `/tasks/{id}`」这一半从未实现。`GET /tasks/{task_id}`（`app/main.py:433`）＝零调用方查询面，与 `/research/latest`·`/research/status`（`:442`／`:454`，只被**未启用**的 MCP server 读＝`mcp_server.py:178,186`）同形＝R13 型"端点在、调用方没"的既有取舍，保留不删；`main.py` 那句自称「PLAN：BFF 轮询」的 docstring 本轮改成字面描述（净零行）。**这条不是缺陷**，是需求语句写的取回方式与实装不同、而没人回来更正——现值以本行为准。
 - **成本管控**：单次分析十几次 LLM 调用、分钟级耗时 → code+date 去重，每日每标的限 1 次，前端展示进度
 - LLM 配置复用全局 `LLM_*`（TradingAgents 原生支持 DeepSeek/Qwen/GLM 及任意 OpenAI 兼容端点）
 
@@ -383,6 +384,8 @@ US_LIST_PAGES=15                 # 美股名单每次取几页（CR9-59／甲）
 ```
 
 > 完整模板见 `web/.env.example`（P6 已补全为全量清单）。
+>
+> **10-18 18:1x 现值更正（只增这一段，上面那句原样不回改）**＝那句「全量清单」此前不成立：同一把尺（模板里 `^\s*#?\s*KEY=` 才算一条，分子分母都由脚本逐根扫代码）量出来 **码里读到 52 枚 env 键、模板补前只有 20 枚有条目**。本轮已把 **25 枚**补成注释态条目（`load_env()` 用 `setdefault`，写出空值＝真的把变量设成空串，比不设更糟，所以一律注释＋默认值抄自代码常数）⇒ 覆盖 20→**45**。余下 7 枚＝测试脚手架（`DS_URL`／`BASE`／`PY`／`SMOKE_TIMEOUT_MS`／`TEST_MCP_KEY`）＋`NODE_ENV`＋`SEARCH_API_KEY`（模板只写了"TAVILY_API_KEY 的别名"那句说明、没有独立条目）。⚠️ 顺带记一把尺自己的错：中途那版判据把"键名在模板里出现过"当覆盖，于是我自己写的那句"这两枚不在本块"注释**把它点名的两枚读成了已覆盖**⇒ 判据换成"必须是 `KEY=` 形状的条目"。另＝上面 `:383` 那行 `US_LIST_PAGES=15` 是**甲**当时的默认，主人 10-18 13:3x 定档 **甲+**（50 页）并已于 16:3x 落进 `data-service/.env`＋16:42:36 重启装载；那行的"盘子/913 页"口径同日作废（真实两道夹＝`US_LIST_PAGE_CEILING=50` 与 `US_LIST_WHOLE_TIMEOUT_S=150.0`，整条名单＝**一枚** `_ak_request`）。逐数见 [FIX-LEDGER.md](FIX-LEDGER.md) 门槛区「10-18 16:3x–16:5x」与「10-18 17:5x–18:3x」两行。
 
 ## 验证方式
 

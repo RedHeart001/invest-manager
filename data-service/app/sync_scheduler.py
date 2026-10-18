@@ -222,7 +222,7 @@ def _unmark_attempt(prev: dict | None, wrote: bool) -> None:
     _write_marker(prev)
 
 
-def _mark_outcome(trigger: str, outcome: object) -> None:
+def _mark_outcome(trigger: str, outcome: object, result: dict | None = None) -> None:
     """收尾覆写真结局（成功与失败两条出口都要写，照 hotspot `_execute` 的 `finally` 口径）。
 
     为什么要 outcome 而不只是一个日期：它把"今天试过"分成两种——「试过且结局是
@@ -230,6 +230,12 @@ def _mark_outcome(trigger: str, outcome: object) -> None:
     `Product.updatedAt` 还是旧的」。后者才是更该 alarm 的那一形，而这一枚是它唯一
     零出网可读的仪器（#69 那枚账缺的就是这个）。日期沿用**起跑时**那一份：跨午夜的轮
     不该把昨天的起跑记成今天。
+
+    10-18（追加九十二 刀 C）再多带一份 `lastResult`：热点腿那份状态文件自 CR9-62 起就把
+    `lastResult` 一起落盘，同步腿只落 marker ⇒ 逐类 `note`（例：`sina.us-list` 那句
+    「只取前排 N 页」）**只住在内存**、重启即失（现存三枚 `/sync/status` 回执逐枚
+    `lastResult=null` 实证）。字段名跟着写点的语义走＝"那一轮的结果快照"，与
+    `_state["lastResult"]`／`status()` 同名同形；旧格式那份文件没有这个键 ⇒ 读侧回落 None。
     """
     prev, _ = _read_marker()
     ok = _write_marker(
@@ -238,6 +244,7 @@ def _mark_outcome(trigger: str, outcome: object) -> None:
             "lastAttemptTrigger": (prev or {}).get("lastAttemptTrigger") or trigger,
             "lastAttemptOutcome": outcome,
             "at": datetime.now(TZ).isoformat(timespec="seconds"),
+            "lastResult": result,
         }
     )
     with _lock:
@@ -522,13 +529,15 @@ def _execute(trigger: str, force: bool = False) -> dict:
         # 整轮被 web 的当日幂等闸门挡下 ⇒ 把那条原因挂到同一个状态位上，
         # `GET /sync/status` 一条 curl 就分得清"没到点／已经跑过／被闸门跳过"。
         _state["skippedReason"] = result.get("skippedReason")
-    # CR9-94：同步腿的真结局覆写进 marker。放在这里而不是整轮收尾——刷新腿还要 ≈40min，
-    # 而"钱已经花完"这件事在同步腿收尾这一刻就成立了（被 kill 的轮也要留下结局）。
-    _mark_outcome(trigger, result.get("outcome"))
     result["tookMsTotal"] = int((time.time() - started) * 1000)
     # CR9-33：把本次实际生效的预算回写进状态，`GET /sync/status` 才说得出
     # "这轮用的是哪个形态的预算"（否则超时说明只能靠读代码对）。
     result["callbackTimeoutS"] = int(timeout_s)
+    # CR9-94：同步腿的真结局覆写进 marker。放在这里而不是整轮收尾——刷新腿还要 ≈40min，
+    # 而"钱已经花完"这件事在同步腿收尾这一刻就成立了（被 kill 的轮也要留下结局）。
+    # 10-18 刀 C：往下挪两行＝等 `tookMsTotal`／`callbackTimeoutS` 都写完再落盘，
+    # 否则落进盘上的那份 `lastResult` 会比内存那份少两个键（同一个名字两种形状）。
+    _mark_outcome(trigger, result.get("outcome"), result)
 
     # 刀 3/甲-1：**同步腿收尾后链式触发刷新腿**。放在状态写入之后、`running` 放开之前
     # ⇒ 单飞（`run_now` 只看 `running`）自动覆盖整轮两条腿，刷新还在跑时再点同步会被挡。
@@ -737,12 +746,17 @@ def status() -> dict:
         for j in _scheduler.get_jobs():
             jobs.append({"id": j.id, "nextRun": str(j.next_run_time)})
     disk_marker = read_sync_state()
+    # 10-18 刀 C：本进程没跑过 ⇒ 用盘上那一份结果快照顶上（照 hotspot `status()` 的
+    # `fromDisk` 先例）。没有这层回落时，逐类 `note` 在重启后永久读不到＝验收对象住在内存里。
+    disk_result = (disk_marker or {}).get("lastResult")
+    in_proc_result = _state["lastResult"]
     return {
         "running": _state["running"],
         "runs": _state["runs"],
         "lastRun": _state["lastRun"],
         "lastDate": _state["lastDate"],
-        "lastResult": _state["lastResult"],
+        "lastResult": in_proc_result if in_proc_result is not None else disk_result,
+        "lastResultFromDisk": in_proc_result is None and disk_result is not None,
         # #21：一条 curl 就能读出"上一轮为什么没跑"（off／未到点／当日已同步／当日已试过／
         # 让位热点超时），这些原因此前只存在于 `log.info` 里，而 uvicorn 默认配置根本不打 info。
         "skippedReason": _state.get("skippedReason"),

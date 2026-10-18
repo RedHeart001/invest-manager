@@ -8,6 +8,8 @@
  *  - L1 完整性：web 源码里每一处 ds 调用点都得在这里登记（新端点没登记 ⇒ 红）。
  *  - L2 键名：这里声明要读的键 ⊆ 快照键面（只查有快照的那些），并且每个键都得在 ds
  *    源码里以同名字面量存在（任何一侧改名 ⇒ 红）。快照那一半的分母＝登记项减 `NO_LIVE_PROBE`。
+ *    行面整块没采到的另有一半（10-18 补）＝`unverifiedRowFields` 点名＋`UNVERIFIED_ROWS` 逐枚登记
+ *    理由；此前 `missingContractKeys` 遇到 `rows:null` 直接 `continue`＝声明过的行键没检查也不响。
  *  - L3 陈旧：快照采集时刻不得早于 ds 响应构造面（`DS_RESPONSE_FILES`）的最后一次提交。
  *
  * 拦不住的那一半（明说，不是留白）：
@@ -284,6 +286,51 @@ export function missingContractKeys(c: EndpointContract, snap: SnapshotEntry | n
     out.push(...keys.filter((k) => !surface.includes(k)));
   }
   return out;
+}
+
+/**
+ * L2 的另外一半：`missingContractKeys` 只能比"快照里有的那一半"，行面整块没采到时它 `continue`
+ * ⇒ 声明的 `requiredRows` 一条都没检查、闸却全绿（10-18 实测：`/bond/yieldcurve` 的快照
+ * `rows:null`，那次现场腿采到的是降级态）。这里把它点出来，交给 `UNVERIFIED_ROWS` 逐枚登记理由。
+ */
+export function unverifiedRowFields(c: EndpointContract, snap: SnapshotEntry | null): string[] {
+  if (!snap) return [];
+  return Object.keys(c.requiredRows ?? {}).filter((f) => !snap.rows?.[f]);
+}
+
+/**
+ * 未验证行面的登记表（键＝端点路径，值＝为什么还没验到）——与 `KNOWN_STALE_SNAPSHOTS` 同形：
+ * 空白不是"没问题"，但也不许长成第二个 PASSTHROUGH，所以重采补上行面后必须从这里摘掉
+ * （`obsoleteUnverifiedRows` 会当场红逼摘）。
+ */
+export const UNVERIFIED_ROWS: Record<string, string> = {
+  "/bond/yieldcurve":
+    "快照 `rows:null`＝10-16 现场腿采到的是降级态（`note=yield curve no valid rows`）⇒ `requiredRows.curve` 的 `[date,values]` 从未被行面验证；重采拿到成功态后随整块摘掉（要「跑」字）",
+};
+
+/** 没登记的未验证行面＝静默盲区 ⇒ 必须点名 */
+export function unnamedUnverifiedRows(
+  snap: SnapshotFile,
+  known: Record<string, string> = UNVERIFIED_ROWS,
+): string[] {
+  return DS_CONTRACT.flatMap((c) =>
+    unverifiedRowFields(c, snap.endpoints[c.path] ?? null)
+      .filter((f) => !(c.path in known))
+      .map((f) => `${c.path} 的行面 ${f} 没采到、也没登记`),
+  );
+}
+
+/** 清单自己也得有人清：行面补上了这条还挂着＝红（否则这张表只会长） */
+export function obsoleteUnverifiedRows(
+  snap: SnapshotFile,
+  known: Record<string, string> = UNVERIFIED_ROWS,
+): string[] {
+  return Object.keys(known)
+    .filter((p) => {
+      const c = DS_CONTRACT.find((x) => x.path === p);
+      return c !== undefined && unverifiedRowFields(c, snap.endpoints[p] ?? null).length === 0;
+    })
+    .sort();
 }
 
 /** L2 的另一半：键名在 ds 源码里还以同名字面量存在吗（只证存在，不证住在哪个端点） */

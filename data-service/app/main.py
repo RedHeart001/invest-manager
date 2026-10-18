@@ -432,7 +432,7 @@ def research_start(body: dict):
 
 @app.get("/tasks/{task_id}")
 def task_status(task_id: str):
-    """轮询任务状态（PLAN：BFF 轮询 /tasks/{id}）。"""
+    """任务状态查询面（人工 curl／未来调用方点名用）。落库不走这里＝实装是 ds 收尾反向回调 web（`research/tasks.py` 的 `_emit_ingest`），本路由今日零调用方。"""
     t = research_tasks.get_task(task_id)
     if t is None:
         raise HTTPException(status_code=404, detail="task not found")

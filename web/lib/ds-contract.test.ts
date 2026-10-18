@@ -15,6 +15,7 @@ import {
   DS_RESPONSE_FILES,
   KNOWN_STALE_SNAPSHOTS,
   NO_LIVE_PROBE,
+  UNVERIFIED_ROWS,
   builderMsFor,
   coverage,
   declaredButUnused,
@@ -23,9 +24,12 @@ import {
   missingContractKeys,
   newlyStaleEndpoints,
   obsoleteKnownStale,
+  obsoleteUnverifiedRows,
   snapshotDenominator,
   staleEndpoints,
   unregisteredEndpoints,
+  unnamedUnverifiedRows,
+  unverifiedRowFields,
   REPO_ROOT,
   type SnapshotFile,
 } from "./ds-contract";
@@ -211,6 +215,49 @@ describe("闸2 L2 键名：清单要的键，快照与 ds 源码都得承认", (
         rows: { candles: ["date"] },
       }),
     ).toEqual(["close"]);
+  });
+
+  it("行面整块没采到的那一半必须逐枚登记理由（10-18 补：那声 `continue` 此前静默放行）", () => {
+    expect(unnamedUnverifiedRows(snap)).toEqual([]);
+    // 登记表自证（同 NO_LIVE_PROBE 那三条）：路径名写错＝那条登记静默失效；没理由＝散文承诺
+    const paths = DS_CONTRACT.map((c) => c.path);
+    expect(Object.keys(UNVERIFIED_ROWS).filter((p) => !paths.includes(p))).toEqual([]);
+    expect(Object.entries(UNVERIFIED_ROWS).filter(([, why]) => why.trim().length < 10)).toEqual([]);
+    // 每一条登记此刻确实还没验到（不许把已验过的留在表里冒充牙齿）
+    for (const p of Object.keys(UNVERIFIED_ROWS)) {
+      const c = DS_CONTRACT.find((x) => x.path === p)!;
+      expect(unverifiedRowFields(c, snap.endpoints[p] ?? null)).not.toEqual([]);
+    }
+    // 真牙齿＝把登记表清空，同一把尺当场点名那一枚
+    expect(unnamedUnverifiedRows(snap, {})).toEqual(["/bond/yieldcurve 的行面 curve 没采到、也没登记"]);
+    expect(obsoleteUnverifiedRows(snap)).toEqual([]);
+  });
+
+  it("反向牙齿（C34 成对）：新漏的行面没登记⇒红；行面补上却还挂着⇒另一头红", () => {
+    const k = DS_CONTRACT.find((c) => c.path === "/kline")!;
+    expect(unverifiedRowFields(k, snap.endpoints["/kline"])).toEqual([]);
+    const stripped: SnapshotFile = {
+      ...snap,
+      endpoints: { ...snap.endpoints, "/kline": { ...snap.endpoints["/kline"], rows: null } },
+    };
+    expect(unnamedUnverifiedRows(stripped)).toContain("/kline 的行面 candles 没采到、也没登记");
+    const filled: SnapshotFile = {
+      ...snap,
+      endpoints: {
+        ...snap.endpoints,
+        "/bond/yieldcurve": {
+          capturedAt: "2026-10-18",
+          provenance: "fixture",
+          topLevel: ["curve", "degraded", "note"],
+          rows: { curve: ["date", "values"] },
+        },
+      },
+    };
+    const yc = DS_CONTRACT.find((c) => c.path === "/bond/yieldcurve")!;
+    expect(unverifiedRowFields(yc, filled.endpoints["/bond/yieldcurve"])).toEqual([]);
+    expect(obsoleteUnverifiedRows(filled)).toEqual(["/bond/yieldcurve"]);
+    expect(unnamedUnverifiedRows(filled)).toEqual([]);
+    expect(obsoleteUnverifiedRows(filled, {})).toEqual([]);
   });
 });
 
