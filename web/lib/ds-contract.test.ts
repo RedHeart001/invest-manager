@@ -15,6 +15,7 @@ import {
   DS_RESPONSE_FILES,
   KNOWN_STALE_SNAPSHOTS,
   NO_LIVE_PROBE,
+  UNCAPTURED_ENDPOINTS,
   UNVERIFIED_ROWS,
   builderMsFor,
   coverage,
@@ -24,10 +25,12 @@ import {
   missingContractKeys,
   newlyStaleEndpoints,
   obsoleteKnownStale,
+  obsoleteUncapturedEndpoints,
   obsoleteUnverifiedRows,
   snapshotDenominator,
   staleEndpoints,
   unregisteredEndpoints,
+  unnamedUncapturedEndpoints,
   unnamedUnverifiedRows,
   unverifiedRowFields,
   REPO_ROOT,
@@ -174,6 +177,10 @@ describe("闸2 L2 键名：清单要的键，快照与 ds 源码都得承认", (
 
   it("覆盖面读数（不许把「没采到」读成「没问题」）", () => {
     expect(coverage(snap)).toMatchObject({ declared: DS_CONTRACT.length, 分母: 10 });
+    // 分母里没进快照的那几枚：每一枚都必须已有登记 ⇒ "没采到"要有名字与理由，不许只剩一个总数
+    const c = coverage(snap) as { 未进快照文件: string[]; 已登记未采: string[]; 无名未采: string[] };
+    expect(c.无名未采).toEqual([]);
+    expect(c.未进快照文件).toEqual(c.已登记未采);
   });
 
   it("分母口径（10-12 主人的字＝10；10-13 CR9-92 落 `/quote/realtime` 曾到 11；10-17 CR9-115 撤掉 `/quote/verified` ⇒ 回到 10）：排除表自证，跑满＝100%", () => {
@@ -258,6 +265,51 @@ describe("闸2 L2 键名：清单要的键，快照与 ds 源码都得承认", (
     expect(obsoleteUnverifiedRows(filled)).toEqual(["/bond/yieldcurve"]);
     expect(unnamedUnverifiedRows(filled)).toEqual([]);
     expect(obsoleteUnverifiedRows(filled, {})).toEqual([]);
+  });
+
+  it("分母里整块没进快照的那些必须逐枚登记理由（10-18 补：那两声 `if (!snap) return []` 此前静默放行）", () => {
+    expect(unnamedUncapturedEndpoints(snap)).toEqual([]);
+    // 登记表自证（同 `NO_LIVE_PROBE`／`UNVERIFIED_ROWS` 那两条）：路径名写错＝那条登记静默失效；没理由＝散文承诺
+    const paths = DS_CONTRACT.map((c) => c.path);
+    expect(Object.keys(UNCAPTURED_ENDPOINTS).filter((p) => !paths.includes(p))).toEqual([]);
+    expect(Object.entries(UNCAPTURED_ENDPOINTS).filter(([, why]) => why.trim().length < 10)).toEqual([]);
+    // 两张表不许重叠：一枚端不能既被移出分母、又算成"在分母里没采到"
+    expect(Object.keys(UNCAPTURED_ENDPOINTS).filter((p) => p in NO_LIVE_PROBE)).toEqual([]);
+    // 每一条登记此刻确实还没进快照（不许把已采到的留在表里冒充牙齿）
+    for (const p of Object.keys(UNCAPTURED_ENDPOINTS)) {
+      expect(snap.endpoints[p] ?? null).toBeNull();
+    }
+    // 真牙齿＝把登记表清空，同一把尺当场点名那一枚
+    expect(unnamedUncapturedEndpoints(snap, {})).toEqual(["/products"]);
+    expect(obsoleteUncapturedEndpoints(snap)).toEqual([]);
+  });
+
+  it("反向牙齿（C34 成对）：新落端点没采又没登记⇒红；登记那枚补采到了⇒另一头红逼摘", () => {
+    // (a) 抹掉一枚已采到的 ⇒ 它立刻变成"没登记的未采"＝"闸2 清单加了端点而现场腿没采"那一形
+    const stripped: SnapshotFile = {
+      ...snap,
+      endpoints: Object.fromEntries(Object.entries(snap.endpoints).filter(([p]) => p !== "/news")),
+    };
+    expect(unnamedUncapturedEndpoints(stripped)).toEqual(["/news"]);
+    // (b) 假想 `/products` 被 `--only` 点名采到了 ⇒ 那条登记当场过期，而 L2 从此真检查它
+    const pk = DS_CONTRACT.find((c) => c.path === "/products")!;
+    const filled: SnapshotFile = {
+      ...snap,
+      endpoints: {
+        ...snap.endpoints,
+        "/products": {
+          capturedAt: "2026-10-19",
+          provenance: "fixture",
+          topLevel: ["count", "products", "source", "type"],
+          rows: { products: ["type", "code", "name"] },
+        },
+      },
+    };
+    expect(missingContractKeys(pk, filled.endpoints["/products"])).toEqual([]);
+    expect(unnamedUncapturedEndpoints(filled)).toEqual([]);
+    expect(obsoleteUncapturedEndpoints(filled)).toEqual(["/products"]);
+    expect(coverage(filled).未进快照文件).toEqual([]);
+    expect(obsoleteUncapturedEndpoints(filled, {})).toEqual([]);
   });
 });
 

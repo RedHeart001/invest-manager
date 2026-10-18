@@ -352,6 +352,36 @@ export function snapshotDenominator(declared: readonly string[] = DS_CONTRACT.ma
   return declared.filter((p) => !(p in NO_LIVE_PROBE));
 }
 
+/**
+ * 分母里**整块没进快照文件**的那几枚（逐枚登记理由）。这一形此前是静默的：`missingContractKeys`
+ * 与 `unverifiedRowFields` 都以 `if (!snap) return []` 开头 ⇒ 端点没采到＝一条键都不检查、闸全绿。
+ * 10-18 现查＝分母 10、快照 9，缺的那一枚是 `/products`。
+ * ⚠️ 它与 `NO_LIVE_PROBE` 不是一回事：那三枚被移出了分母（各有理由），`/products` **在分母里**、
+ * 现场腿也带着它的探针（`window_contract.py` 的 `PROBES`），只是被同文件的 `EXPENSIVE` 挡在默认
+ * 计划外 ⇒ 不 `--only /products` 点名就永远采不到，而 `探针集合 == 分母` 那枚自测照样绿。
+ * 与 `UNVERIFIED_ROWS` 同形：登记要带理由、补上了必须摘（`obsoleteUncapturedEndpoints` 当场红逼摘）。
+ */
+export const UNCAPTURED_ENDPOINTS: Record<string, string> = {
+  "/products":
+    "在分母里、探针也在，但被 `EXPENSIVE` 挡在默认计划外＝整张列表分页多发、本窗最贵的一条 ⇒ 要 `--only /products` 显式点名；不点名则 `requiredTop [count,products,source]` 与 `requiredRows.products` 永远不被快照键面验证（补它要「跑」字）",
+};
+
+/** 没登记的"整块没进快照"＝盲区 ⇒ 必须点名（闸2 清单新落一枚端点而现场腿没采，就红在这里） */
+export function unnamedUncapturedEndpoints(
+  snap: SnapshotFile,
+  known: Record<string, string> = UNCAPTURED_ENDPOINTS,
+): string[] {
+  return snapshotDenominator().filter((p) => !snap.endpoints[p] && !(p in known)).sort();
+}
+
+/** 表自己也得有人清：那枚端点真进了快照，这条登记立刻过期＝逼摘（否则这张表只会长） */
+export function obsoleteUncapturedEndpoints(
+  snap: SnapshotFile,
+  known: Record<string, string> = UNCAPTURED_ENDPOINTS,
+): string[] {
+  return Object.keys(known).filter((p) => snap.endpoints[p] !== undefined).sort();
+}
+
 export function coverage(snap: SnapshotFile): Record<string, unknown> {
   const declared = DS_CONTRACT.map((c) => c.path);
   const denom = snapshotDenominator(declared);
@@ -365,5 +395,7 @@ export function coverage(snap: SnapshotFile): Record<string, unknown> {
     topLevelCaptured: withTop.length,
     rowsCaptured: withRows.length,
     未进快照文件: uncaptured,
+    已登记未采: Object.keys(UNCAPTURED_ENDPOINTS).sort(),
+    无名未采: unnamedUncapturedEndpoints(snap),
   };
 }
