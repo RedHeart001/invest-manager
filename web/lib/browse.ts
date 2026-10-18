@@ -6,7 +6,7 @@
 //   没有时，随结果给一句说明；正常态一条都不出（那时这句话零信息量）
 
 import { type Quote } from "./data-service";
-import { type SnapshotBadge, type StaleNote, freshnessOfTypes, snapshotBadge, staleNotes } from "./freshness";
+import { BROWSE_TYPES, type SnapshotBadge, type StaleNote, freshnessOfTypes, snapshotBadge, staleNotes } from "./freshness";
 import { fetchQuotesByType } from "./quote-enrich";
 import { prisma } from "./prisma";
 import { parseTags } from "./score";
@@ -140,6 +140,8 @@ export async function browseProducts(opts: {
     pages: Math.max(1, Math.ceil(total / opts.pageSize)),
     stale: stale.slice(0, 2),
     staleMore: Math.max(0, stale.length - 2),
-    snapshot: snapshotBadge(freshness),
+    // B3＝逐类那一份的范围要跟上面那次 `groupBy` 的过滤条件**同源**：浏览单类时不许
+    // 凭空造出另外五类的缺席行（那会把"这一类没数据"说成"六类里五类没数据"）。
+    snapshot: snapshotBadge(freshness, opts.type === "all" ? BROWSE_TYPES : [opts.type]),
   };
 }

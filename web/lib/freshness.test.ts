@@ -231,6 +231,10 @@ describe("快照出处 snapshotBadge（#22(b) 乙）", () => {
       asOf: bj("2026-10-02", "02:40"),
       covered: 5886,
       total: 6634,
+      byType: [
+        { type: "stock", total: 5573, snapCount: 5572, snapAt: bj("2026-10-01", "20:17"), absent: false },
+        { type: "bond", total: 1061, snapCount: 314, snapAt: bj("2026-10-02", "02:40"), absent: false },
+      ],
     });
   });
 
@@ -256,6 +260,7 @@ describe("快照出处 snapshotBadge（#22(b) 乙）", () => {
       asOf: null,
       covered: 0,
       total: 250,
+      byType: [{ type: "crypto", total: 250, snapCount: 0, snapAt: null, absent: false }],
     });
   });
 
@@ -265,7 +270,12 @@ describe("快照出处 snapshotBadge（#22(b) 乙）", () => {
     ]);
     const rows = await freshnessOfTypes({ type: "stock" });
     expect(rows[0]).toMatchObject({ total: 7, snapCount: 3 });
-    expect(snapshotBadge(rows)).toEqual({ asOf: null, covered: 3, total: 7 });
+    expect(snapshotBadge(rows)).toEqual({
+      asOf: null,
+      covered: 3,
+      total: 7,
+      byType: [{ type: "stock", total: 7, snapCount: 3, snapAt: null, absent: false }],
+    });
   });
 
   it("🔁 反向：Prisma 没给 `_count.snapshotAt` 时按 0 计，不得把 undefined 加进分母", async () => {
@@ -275,5 +285,41 @@ describe("快照出处 snapshotBadge（#22(b) 乙）", () => {
     const rows = await freshnessOfTypes({ type: "stock" });
     expect(rows[0].snapCount).toBe(0);
     expect(snapshotBadge(rows)?.covered).toBe(0);
+  });
+
+  // B3（主人 10-18 的字＝「先补全B3文案」）＝「缺在哪一类」必须是读得出的一维。
+  // 屏上那句「覆盖 N／M」不动（10-17 已定稿＝一字不改）——补的是机器可读位。
+  const SCOPE = ["stock", "fund", "hk"];
+  const twoRows = [row("stock", 5576, 5575, bj("2026-10-17", "02:02")), row("fund", 28086, 23856, bj("2026-10-17", "02:08"))];
+
+  it("B3：给了范围名单 ⇒ byType 按名单顺序逐类给 total/snapCount/snapAt", () => {
+    const b = snapshotBadge(twoRows, SCOPE);
+    expect(b?.byType).toEqual([
+      { type: "stock", total: 5576, snapCount: 5575, snapAt: bj("2026-10-17", "02:02"), absent: false },
+      { type: "fund", total: 28086, snapCount: 23856, snapAt: bj("2026-10-17", "02:08"), absent: false },
+      { type: "hk", total: 0, snapCount: 0, snapAt: null, absent: true },
+    ]);
+  });
+
+  it("🔁 牙齿：tab 里有入口而库里一行都没有的那一类，必须被说成 absent，不许在求和里静默消失", () => {
+    // hk 正是这一形（10-18 现查库内 hk 无行）。摘掉 byType 那圈补齐 ⇒ 这一条红，
+    // 而上面三条老断言（只读求和）在全绿——证明求和本身看不见缺席。
+    const hk = snapshotBadge(twoRows, SCOPE)?.byType.find((x) => x.type === "hk");
+    expect(hk).toMatchObject({ total: 0, snapCount: 0, absent: true });
+    expect(snapshotBadge(twoRows, SCOPE)?.byType.map((x) => x.type)).toEqual(SCOPE);
+  });
+
+  it("🔁 反向：不传名单时不得凭空造出库里没有的那一类（浏览单类时尤其要说清范围）", () => {
+    expect(snapshotBadge(twoRows)?.byType.map((x) => x.type)).toEqual(["stock", "fund"]);
+  });
+
+  it("补 byType 之后 covered/total/asOf 三个值逐字不变（缺席那一类不进分母＝屏上那句仍然说实话）", () => {
+    const plain = snapshotBadge(twoRows);
+    const withHk = snapshotBadge(twoRows, SCOPE);
+    // 这三枚才是屏上那句话读的东西：名单里多出一类缺席，求和一位都不许动。
+    expect(withHk?.covered).toBe(plain?.covered);
+    expect(withHk?.total).toBe(plain?.total);
+    expect(withHk?.asOf).toEqual(plain?.asOf);
+    expect(withHk).toMatchObject({ asOf: bj("2026-10-17", "02:08"), covered: 29431, total: 33662 });
   });
 });

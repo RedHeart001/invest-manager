@@ -44,7 +44,7 @@ async def lifespan(_app: FastAPI):
     hotspot_scheduler.start_scheduler()
     # G2（批次 D）：启动产品主数据每日同步调度（含启动补跑）
     sync_scheduler.start_scheduler()
-    # ①（2026-10-02）：启动 dev.db 每日备份调度（**无补跑**，错过一轮等下一夜）
+    # ①（2026-10-02）＋ #54 乙：启动 dev.db 每日备份调度；10-18 更正原句「**无补跑**」＝03:30 档无 misfire 补跑，但启动时 `startup_catch_up()` 必跑一次＋每小时复查会补
     backup_scheduler.start_scheduler()
     yield
     hotspot_scheduler.shutdown_scheduler()
@@ -180,7 +180,7 @@ def quote_verified(
 ):
     """行情 + 双源交叉验证（R13）：主源结果叠加备源比对，差异超阈值显式标注。
 
-    按需端点——不叠加到普通 /quote，避免成倍放大对限流敏感的数据源请求。
+    按需端点——不叠加到普通 /quote，避免成倍放大限流敏感请求。10-18 更正：CR9-115 已删详情页「双源核对」按钮与 BFF `/api/quote/verify` ⇒ web 侧零调用方（端点按批次七定案 (c) 保留）。
     """
     from .providers.chain import verify_metric
 

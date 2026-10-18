@@ -221,6 +221,22 @@ export const KNOWN_STALE_SNAPSHOTS: Record<string, string> = {
   // 10-16 19:0x 重采后销账（原十条＝`/quote`…`/hotspots/status` 整块，由 CR9-108 把 `main.py`＋
   // `providers/akshare_provider.py` 改新而判过期；键面一处没变，新路由不进 `DS_CONTRACT`＝分母仍 11）。
   // 这一格只在"有人把构造面改新、快照还没重采"时才有内容。
+  //
+  // 10-18 登记＝同一形，且**只有注释变了**：`main.py` 的备份调度那一行与 `/quote/verified` 的
+  // docstring、`providers/chain.py` 的 `verify_metric` 注意段——那三句说的是 CR9-115 之前的世界
+  // （「无补跑」「按需调用」），PLAN `:179` 预留的「两处注释随第二批更正」没随第二批走完。
+  // 键面一处没变，但 `builderMsFor` 把脏文件拧成 `Date.now()` ⇒ 现存 9 枚整块判过期。
+  // 摘法＝10-19 人工窗口 `test-script/window_contract.py --live --write` 重采后**这 9 条一起删**
+  // （重采之后 `obsoleteKnownStale` 会当场红逼摘＝设计，不是故障）。逐条写的"谁把构造面改新"：
+  "/bond/yieldcurve": "键面由 `main.py` 的 `/bond/yieldcurve` 路由生成＝本轮改了它的注释；10-19 窗口重采后随整块摘掉",
+  "/fund/holdings": "键面住 `main.py` 路由＋`akshare_provider.py`，本轮只碰 `main.py` 的注释；10-19 窗口重采后随整块摘掉",
+  "/fund/report": "键面住 `main.py` 路由＋`akshare_provider.py`，本轮只碰 `main.py` 的注释；10-19 窗口重采后随整块摘掉",
+  "/hotspots/status": "键面由 `main.py` 的状态路由拼出，本轮 `main.py` 的 `lifespan` 注释被改；10-19 窗口重采后随整块摘掉",
+  "/kline": "键面住 `main.py` 路由＋`tencent_provider.py`，本轮只碰 `main.py` 的注释；10-19 窗口重采后随整块摘掉",
+  "/news": "键面住 `main.py` 路由＋`akshare_provider.py`，本轮只碰 `main.py` 的注释；10-19 窗口重采后随整块摘掉",
+  "/quote": "键面由 `main.py` 路由＋`providers/chain.py` 生成，本轮**两枚都改了注释**；10-19 窗口重采后随整块摘掉",
+  "/quote/realtime": "键面住 `app/realtime.py`（本轮一行没碰），被同一把尺取的 max 牵连；10-19 窗口重采后随整块摘掉",
+  "/quotes": "批量现价路径，键面由 `main.py`＋`chain.py` 生成＝本轮两枚都改了注释；10-19 窗口重采后随整块摘掉",
 };
 
 /** L3 的"新增"那一半：不在已知清单里的过期才该红 */

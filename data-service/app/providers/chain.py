@@ -58,8 +58,8 @@ def verify_metric(
       差异在阈值内时标注"双源一致"
     - 备源不可用不影响主源结果（只记录说明）
 
-    注意：本函数是**按需**调用（由 /quote/verified 端点驱动），
-    不叠加到每次普通 /quote ——否则会成倍放大对限流敏感的数据源请求。
+    注意：本函数只被 ds 端点 `/quote/verified` 驱动，不叠加到每次普通 /quote——否则会成倍放大对限流敏感的数据源请求。
+    10-18 更正：CR9-115 删掉「双源核对」按钮与 BFF `/api/quote/verify` 后 web 侧零调用方（端点与 ds 离线用例仍在）；实时区的比对不经这里＝`realtime.py` 自己点两源、自己算偏差。
     """
     try:
         providers = get_provider_chain(type_)

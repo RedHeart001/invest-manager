@@ -152,12 +152,46 @@ export function staleNotes(rows: Freshness[], today: string = beijingToday()): S
  *  · 有行但**一行快照都没有** ⇒ `asOf` 留 null，只报覆盖、不报一个不存在的时刻；
  *  · `asOf` 取的是各类 `snapshotAt` 的**最大值**（"这批数里最近的那一次落快照"），
  *    不是"最早"——报最早会把 10-15 说成 10-09 那种更旧的形态，反向误导。 */
-export type SnapshotBadge = { asOf: Date | null; covered: number; total: number };
+export type SnapshotBadgeType = {
+  type: string;
+  /** 该类行数；库里连一行都没有时＝0 */
+  total: number;
+  snapCount: number;
+  snapAt: Date | null;
+  /** B3＝「有 tab 入口，但这一类压根不在分母里」那一档。`groupBy` 给不出这种类，
+   *  所以它只能由**范围名单**补出来：少了这一位，`hk` 那种缺席会在 `covered/total` 的
+   *  求和里静默消失，读的人只能看见"30,172／35,151"而不知道六类里有一类是零。 */
+  absent: boolean;
+};
 
-export function snapshotBadge(rows: FreshnessRow[]): SnapshotBadge | null {
+export type SnapshotBadge = {
+  asOf: Date | null;
+  covered: number;
+  total: number;
+  byType: SnapshotBadgeType[];
+};
+
+/** B3 的出口：`snapshotBadge` 除求和外再逐类带一份，机器可读位（**不上屏**——屏上那句
+ *  「覆盖 N／M」此刻已说实话，主人 10-17 已定稿＝一字不改）。
+ *  `scope` 缺省＝`rows` 里出现的类型，所以不传名单时不会凭空造出缺席行。 */
+export function snapshotBadge(
+  rows: FreshnessRow[],
+  scope: readonly string[] = rows.map((r) => r.type),
+): SnapshotBadge | null {
   const total = rows.reduce((a, r) => a + (r.total ?? 0), 0);
   if (total === 0) return null;
   const covered = rows.reduce((a, r) => a + (r.snapCount ?? 0), 0);
   const times = rows.map((r) => r.snapAt).filter((d): d is Date => !!d).map((d) => d.getTime());
-  return { asOf: times.length ? new Date(Math.max(...times)) : null, covered, total };
+  const byType: SnapshotBadgeType[] = scope.map((type) => {
+    const r = rows.find((x) => x.type === type);
+    const rowCount = r?.total ?? 0;
+    return {
+      type,
+      total: rowCount,
+      snapCount: r?.snapCount ?? 0,
+      snapAt: r?.snapAt ?? null,
+      absent: rowCount === 0,
+    };
+  });
+  return { asOf: times.length ? new Date(Math.max(...times)) : null, covered, total, byType };
 }
