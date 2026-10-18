@@ -468,7 +468,7 @@ def test_board_leg_exception_split() -> None:
 def test_board_leg_reports_once() -> None:
     """CR9-112（#79 后续 P1）：一次映射＝一枚逻辑请求 ⇒ 只回报一次（C29，`docs/CONSTRAINTS.md:63`）。
 
-    为什么这是缺陷不是口径之争：`acquire()` 在两条腿的循环**外**（`pipeline.py:878`），而甲′
+    为什么这是缺陷不是口径之争：`acquire()` 在两条腿的循环**外**（`map_board_products` 里那枚 `_EM.acquire(timeout=15)`），而甲′
     加宽换腿之后 `except` 在循环**内** ⇒ 一枚坏板块能连报两枚失败，达到 `failure_threshold=2`
     当场把整个东财族锁 180s（`limiter.py:185-193`），而个股新闻与转债→正股映射共用这一族
     （`akshare_provider.py:76`）。旧写法因为无条件 `break` 恰好只报一枚，所以这条违例是加宽之后才有的。

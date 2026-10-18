@@ -7,7 +7,7 @@
 读不出增量时把限制一起写，不含糊过去（us／crypto 不经东财桶＝这一维本来就无证据）。
 
 主源名按注册面抄（不是猜）：`akshare`＝东财（akshare_provider.py:322）、
-`akshare-fund-nav`＝场外净值（:517）、`akshare-hk`＝东财港股直连（hk_provider.py:70）、
+`akshare-fund-nav`＝场外净值（`akshare_provider.py` 里那枚 `"source": f"{self.source}-fund-nav"`）、`akshare-hk`＝东财港股直连（hk_provider.py:70）、
 `yfinance`＝美股主源（openbb_provider.py:80）、`coingecko`＝加密单源（crypto_provider.py:59）、
 备源 `tencent`／`sina-bond`（sina_bond_provider.py:37）。
 

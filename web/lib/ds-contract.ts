@@ -135,7 +135,7 @@ export const DS_CONTRACT: readonly EndpointContract[] = [
     requiredTop: ["degraded", "note", "curve"],
     requiredRows: { curve: ["date", "values"] },
     readBy: ["web/app/product/[type]/[code]/page.tsx"],
-    note: "`source` **不在 requiredTop**：它只在成功分支有（`akshare_provider.py:888`），降级分支只回 `{degraded,note,curve}`（`main.py:323`）——声明成必需要求降级响应也带它。消费侧本来就按可选处理（`page.tsx:55` `source?: string`、`:454` 空则不渲染「· 来源：」）。10-13 现场腿采到的正是降级态（note＝`yield curve no valid rows`）。",
+    note: "`source` **不在 requiredTop**：它只在成功分支有（`akshare_provider.py:888`），降级分支只回 `{degraded,note,curve}`（`main.py:323`）——声明成必需要求降级响应也带它。消费侧本来就按可选处理（`web/app/product/[type]/[code]/page.tsx:55` 的 `source?: string`、同文件那枚 `yieldData?.source` 三元＝空则整段「· 来源：」不渲染）。10-13 现场腿采到的正是降级态（note＝`yield curve no valid rows`）。",
   },
   {
     path: "/bond/underlying",
@@ -221,7 +221,7 @@ export const KNOWN_STALE_SNAPSHOTS: Record<string, string> = {
   // 10-16 19:0x 重采后销账（原十条＝`/quote`…`/hotspots/status` 整块，由 CR9-108 把 `main.py`＋
   // `providers/akshare_provider.py` 改新而判过期；键面一处没变，新路由不进 `DS_CONTRACT`＝分母仍 11）。
   // 这一格只在"有人把构造面改新、快照还没重采"时才有内容。
-  //
+  // 10-18 12:0x 续＝本轮又改了 `app/realtime.py` 里那枚漂到空行的 `acquire` 锚点注释（号换成符号）；清单仍这 9 枚、不必新增。
   // 10-18 登记＝同一形，且**只有注释变了**：`main.py` 的备份调度那一行与 `/quote/verified` 的
   // docstring、`providers/chain.py` 的 `verify_metric` 注意段——那三句说的是 CR9-115 之前的世界
   // （「无补跑」「按需调用」），PLAN `:179` 预留的「两处注释随第二批更正」没随第二批走完。
@@ -235,7 +235,7 @@ export const KNOWN_STALE_SNAPSHOTS: Record<string, string> = {
   "/kline": "键面住 `main.py` 路由＋`tencent_provider.py`，本轮只碰 `main.py` 的注释；10-19 窗口重采后随整块摘掉",
   "/news": "键面住 `main.py` 路由＋`akshare_provider.py`，本轮只碰 `main.py` 的注释；10-19 窗口重采后随整块摘掉",
   "/quote": "键面由 `main.py` 路由＋`providers/chain.py` 生成，本轮**两枚都改了注释**；10-19 窗口重采后随整块摘掉",
-  "/quote/realtime": "键面住 `app/realtime.py`（本轮一行没碰），被同一把尺取的 max 牵连；10-19 窗口重采后随整块摘掉",
+  "/quote/realtime": "键面住 `app/realtime.py`（11:4x 那轮一行没碰、12:0x 改了它那枚假锚点注释）；10-19 窗口重采后随整块摘掉",
   "/quotes": "批量现价路径，键面由 `main.py`＋`chain.py` 生成＝本轮两枚都改了注释；10-19 窗口重采后随整块摘掉",
 };
 

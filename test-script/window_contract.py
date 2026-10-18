@@ -67,7 +67,7 @@ PROBES: list[dict[str, Any]] = [
     {"path": "/quotes", "params": {"type": "stock", "codes": "600519"}, "egress": "1 发"},
     {"path": "/fund/holdings", "params": {"code": "510300"}, "egress": "1 发"},
     {"path": "/fund/report", "params": {"code": "510300"},
-     "egress": "2–3 发（`akshare_provider.py:782` 公告 1 发＋`:809-817` 行业配置按年份循环 1–2 发；6h TTL）"},
+     "egress": "2–3 发（`akshare_provider.py` 的 `fund_announcement_report_em` 公告 1 发＋`fund_portfolio_industry_allocation_em` 按年份循环 1–2 发；6h TTL）"},
     {"path": "/bond/yieldcurve", "params": {"days": "90"}, "egress": "1 发（内存缓存 30 分钟）"},
     {"path": "/hotspots/status", "params": {}, "egress": "0 发（读调度器状态，本地内存、零上游、零副作用）"},
     {"path": "/products", "params": {"type": "stock"}, "egress": "整张列表＝分页多发，本窗最贵的一条（要点名才跑）"},

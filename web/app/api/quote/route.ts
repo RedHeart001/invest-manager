@@ -25,7 +25,7 @@ export async function GET(req: NextRequest) {
     // #63（2026-10-12）：预算从 15s 抬到 30s＝全站既有口径（`QUOTE_TIMEOUT_MS`，
     // 与 `dsGet` 默认、`app/api/quote/verify/route.ts` 一致）。理由＝ds 侧一条
     // stock `get_quote` 的最坏路径是「`_em_request` 的 `acquire()` 默认 20s
-    // （`data-service/app/utils/limiter.py:136`）＋多 host 两轮 × 每发 15s
+    // （`data-service/app/utils/limiter.py` 的 `acquire(timeout=20.0)`）＋多 host 两轮 × 每发 15s
     // （`data-service/app/providers/akshare_provider.py:303-309`）」，15s 与它差
     // 一个量级 ⇒ 慢响应被掐断，又被 catch 回成「服务没启动」（违 R16）。
     // 10-11 夜 R13 实测字面＝`code=600519 503 in 15792ms`，ds 侧同发 12 次全 200。

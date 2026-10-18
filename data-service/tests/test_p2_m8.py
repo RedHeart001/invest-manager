@@ -366,7 +366,7 @@ def test_products_endpoint_passthrough_meta() -> None:
     """provider 声明的那四个键，必须**整包**走出 HTTP 边界——这一跳此前零断言。
 
     为什么单开一组（10-06 断言强度审计登记的 #40 (c)）：`intentionalSubset` 等四个键此前被断的
-    两处（`test_cr9_59_us_list.py:244-245`、本文件 `:400-401`）**都停在 provider／
+    两处（`test_cr9_59_us_list.py` 那条 `#35／CR9-63`、本文件 `乙③🔁` 那条『不带有意子集声明』）**都停在 provider／
     `list_products_with_meta` 那一层**，而 `app/main.py` 用 `**meta` 把它们透传出去那一跳，
     只有 ③／⑤ 真网窗口才读得到。⇒ 将来谁把 meta 收成白名单（`{"source": meta.get(...)}`），
     ①② 都静默，而后果正是 CR9-63 要防的那件事＝**us 永远停在旧名单**（web 读不到声明 ⇒

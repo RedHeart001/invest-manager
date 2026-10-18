@@ -14,7 +14,7 @@
   · `no_second_source` **不进分母**；
   · note 含「主源不可用，已降级至」那几发测的是**降级**不是共识 ⇒ `isDegradation` 单独记账；
   · ⚠️ `verify_metric` 用的是 `get_provider_chain()`＝**含东财主源**的全链
-    （`data-service/app/providers/chain.py:67`）⇒ 这里拿到的分歧率是「主链共识参考值」，
+    （`data-service/app/providers/chain.py` 里那枚 `get_provider_chain(type_)`）⇒ 这里拿到的分歧率是「主链共识参考值」，
     **不等于 OPT-3 实时区的源集**（实时区按红线不打东财）。回填件 `window_fill.py` 会据此拒填。
 
 用法：
