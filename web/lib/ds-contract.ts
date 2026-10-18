@@ -230,15 +230,11 @@ export const KNOWN_STALE_SNAPSHOTS: Record<string, string> = {
   // 键面一处没变，但 `builderMsFor` 把脏文件拧成 `Date.now()` ⇒ 现存 9 枚整块判过期。
   // 摘法＝10-19 人工窗口 `test-script/window_contract.py --live --write` 重采后**这 9 条一起删**
   // （重采之后 `obsoleteKnownStale` 会当场红逼摘＝设计，不是故障）。逐条写的"谁把构造面改新"：
-  "/bond/yieldcurve": "键面由 `main.py` 的 `/bond/yieldcurve` 路由生成＝本轮改了它的注释；10-19 窗口重采后随整块摘掉",
-  "/fund/holdings": "键面住 `main.py` 路由＋`akshare_provider.py`，本轮只碰 `main.py` 的注释；10-19 窗口重采后随整块摘掉",
-  "/fund/report": "键面住 `main.py` 路由＋`akshare_provider.py`，本轮只碰 `main.py` 的注释；10-19 窗口重采后随整块摘掉",
-  "/hotspots/status": "键面由 `main.py` 的状态路由拼出，本轮 `main.py` 的 `lifespan` 注释被改；10-19 窗口重采后随整块摘掉",
-  "/kline": "键面住 `main.py` 路由＋`tencent_provider.py`，本轮只碰 `main.py` 的注释；10-19 窗口重采后随整块摘掉",
-  "/news": "键面住 `main.py` 路由＋`akshare_provider.py`，本轮只碰 `main.py` 的注释；10-19 窗口重采后随整块摘掉",
-  "/quote": "键面由 `main.py` 路由＋`providers/chain.py` 生成，本轮**两枚都改了注释**；10-19 窗口重采后随整块摘掉",
-  "/quote/realtime": "键面住 `app/realtime.py`（11:4x 那轮一行没碰、12:0x 改了它那枚假锚点注释）；10-19 窗口重采后随整块摘掉",
-  "/quotes": "批量现价路径，键面由 `main.py`＋`chain.py` 生成＝本轮两枚都改了注释；10-19 窗口重采后随整块摘掉",
+  // 10-19 00:2x 重采后销账＝原 9 枚（`/bond/yieldcurve`／`/fund/holdings`／`/fund/report`／`/hotspots/status`／
+  // `/kline`／`/news`／`/quote`／`/quote/realtime`／`/quotes`）整块删除，`capturedAt` 全部落到 2026-10-19、
+  // 键面一处没变（`非200=[]`、消失键 `{}`）。这一格从此为空＝两条牙齿都在跑：清单外的过期当场红，
+  // 清单里的不再过期也红。`/bond/yieldcurve` 的 `rows` 重采后仍是 null（`curve` 是 `[date, values]` 那种
+  // 数组套数组，`key_surface()` 只认数组里的 dict）⇒ 它挂在 `UNVERIFIED_ROWS` 那一格，不在这里。
 };
 
 /** L3 的"新增"那一半：不在已知清单里的过期才该红 */
@@ -363,7 +359,7 @@ export function snapshotDenominator(declared: readonly string[] = DS_CONTRACT.ma
  */
 export const UNCAPTURED_ENDPOINTS: Record<string, string> = {
   "/products":
-    "在分母里、探针也在，但被 `EXPENSIVE` 挡在默认计划外＝整张列表分页多发、本窗最贵的一条 ⇒ 要 `--only /products` 显式点名；不点名则 `requiredTop [count,products,source]` 与 `requiredRows.products` 永远不被快照键面验证（补它要「跑」字）",
+    "在分母里、探针也在，但被 `EXPENSIVE` 挡在默认计划外＝整张列表分页多发、本窗最贵的一条 ⇒ 要 `--only /products` 显式点名；不点名则 `requiredTop [count,products,source]` 与 `requiredRows.products` 永远不被快照键面验证（补它要「跑」字）。10-19 00:29 第一次点名真打＝`/products=None`·`TimeoutError: timed out`（现场腿客户端 `window_lib.py` 的 `get(..., timeout=30.0)` 等不到整张名单；ds 侧随后 `akshare-obs` 多出 `ak.stock_zh_a_spot` 一发＝那一趟确实出网了，只是没在预算内答完）⇒ 仍未采到，这条登记照旧留着。",
 };
 
 /** 没登记的"整块没进快照"＝盲区 ⇒ 必须点名（闸2 清单新落一枚端点而现场腿没采，就红在这里） */
