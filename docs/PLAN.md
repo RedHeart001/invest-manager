@@ -109,6 +109,7 @@
 - **推送为正式交付项**：① 站内 dashboard 热点卡片流 + SSE 实时推送（任务完成即推到前端）；② ~~webhook 通道（企业微信/邮件，可配置开关）~~ → **2026-09-19 显式裁剪**（G1，见文末决策记录）
 - 热点卡片下挂"相关产品"（点击进详情页）＋**「去分析 <标的>」入口**（CR8-2 于 09-30 批次一改名的遗留描述修正：它**只是**跳 `related[0]` 详情页的 `#research` 锚点，不调统一 Agent、不触发分析、不带这条热点的上下文；落地页 `ResearchPanel` 读该品种**已有**研报，没有则停在初始态需手动生成。真做"解读"要另立需求：接口加上下文参数 ＋ 决定研报缓存键）
 - 搜索 API 无 key 时降级为"仅站内数据"，标注 `inconclusive`
+  - **⚠️ 10-18 23:2x 现值更正（只增这一行，上面那句原样留着）＝`inconclusive` 不是码上也不是屏上的字面**：现查 `grep inconclusive web/**`（非测试文件）＝**0 命中**；web 侧降级的真载体＝`degraded`＋`note` 两枚（与「场内基金行业配置」那一支的 `unavailable`、事件区新闻降级支同形）。`inconclusive` 在码上只住 `sync_scheduler.py`＝**同步腿读超时的第三态**（`ok=None`＋`outcome="inconclusive"`），与"搜索无 key 降级"无关 ⇒ **P3 那句按字面永远跑不过**＝判据载体选错那一形（同「④ 的读数面」那条 甲 的处置）。验收改按真载体读；编号＝`FIX-LEDGER` `#93`（本轮按现值更正闭掉，零码、不占 CR 号）。
 - **G2 落地（2026-09-19）**：产品主数据每日自动同步——data-service `app/sync_scheduler.py`（APScheduler，默认 02:00 Asia/Shanghai，`SYNC_HOUR`/`SYNC_MINUTE` 可覆盖）+ 启动补跑，回调 web `POST /api/sync`；状态端点 `/sync/status`、手动触发 `/sync/run`。此前仅手动触发。
 
 - **P3 补强（2026-09-12 评估定稿）**：
