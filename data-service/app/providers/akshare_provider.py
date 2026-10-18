@@ -79,8 +79,8 @@ EM_LIMITER = get_limiter("eastmoney")
 AK_OBS_LIMITER = get_limiter("akshare-obs")
 
 # CR9-97（#66 甲）：这一族上闸之后，取额度的等待上限**不用 `acquire()` 的默认 20s**。
-# 理由＝web 侧 BFF 的预算是 15s（CR9-88 §B 契约），20s 的等待本身就比调用方的耐心长
-# （＝账上那条尚未立案的 P1「`acquire()` 20s vs BFF 15s 倒挂」的同一形）。按 PROFILES 的
+# 理由＝不能让详情页挂着等满 `acquire()` 的默认 20s，而 web 侧 BFF 的耐心有上限（旧那句「预算 15s＝CR9-88 §B」
+# 已被 10-12 #63 换成 `QUOTE_TIMEOUT_MS`＝30s ⇒「20s vs 15s 倒挂」那半句不再成立，这一枚 5s 现由后面两条撑着）。按 PROFILES 的
 # `min_interval=1.0` 算，正常最坏等待 ≈1s，5s 已经留了 5 倍余量；真撞到 5s 就说明这一族
 # 正在被谁打成 runaway，那时候**拒**比让详情页挂着更符合 R10。
 AK_ACQUIRE_TIMEOUT_S = 5.0
