@@ -22,8 +22,9 @@ export async function GET(req: NextRequest) {
     // CR4（2026-09-15 review）：全站其余 ds 调用都走 dsGet（内置超时），
     // 此路由此前裸 fetch 无 signal → data-service 挂起时悬挂到 OS TCP 超时。
     //
-    // #63（2026-10-12）：预算从 15s 抬到 30s＝全站既有口径（`QUOTE_TIMEOUT_MS`，
-    // 与 `dsGet` 默认、`app/api/quote/verify/route.ts` 一致）。理由＝ds 侧一条
+    // #63（2026-10-12）：预算从 15s 抬到 30s＝全站既有口径（`QUOTE_TIMEOUT_MS`，与 `dsGet` 默认一致；
+    // 同预算的第三处 `app/api/quote/verify/route.ts` 已随 10-17 CR9-115 与那枚按钮同批删除，
+    // 现值记在 `web/lib/data-service.ts` 头上）。理由＝ds 侧一条
     // stock `get_quote` 的最坏路径是「`_em_request` 的 `acquire()` 默认 20s
     // （`data-service/app/utils/limiter.py` 的 `acquire(timeout=20.0)`）＋多 host 两轮 × 每发 15s
     // （`data-service/app/providers/akshare_provider.py:303-309`）」，15s 与它差
