@@ -279,8 +279,14 @@ describe("闸2 L2 键名：清单要的键，快照与 ds 源码都得承认", (
     for (const p of Object.keys(UNCAPTURED_ENDPOINTS)) {
       expect(snap.endpoints[p] ?? null).toBeNull();
     }
-    // 真牙齿＝把登记表清空，同一把尺当场点名那一枚
-    expect(unnamedUncapturedEndpoints(snap, {})).toEqual(["/products"]);
+    // 真牙齿（10-19 `/products` 采到之后换形＝判别力不再挂在"还没采到"这个事实上）：合成一枚
+    // "在分母里、快照里没有"的样本 ⇒ 表为空时同一把尺照样要当场点名它
+    const synthetic: SnapshotFile = {
+      ...snap,
+      endpoints: Object.fromEntries(Object.entries(snap.endpoints).filter(([p]) => p !== "/products")),
+    };
+    expect(unnamedUncapturedEndpoints(synthetic, {})).toEqual(["/products"]);
+    expect(unnamedUncapturedEndpoints(synthetic)).toEqual(["/products"]);
     expect(obsoleteUncapturedEndpoints(snap)).toEqual([]);
   });
 
@@ -291,25 +297,17 @@ describe("闸2 L2 键名：清单要的键，快照与 ds 源码都得承认", (
       endpoints: Object.fromEntries(Object.entries(snap.endpoints).filter(([p]) => p !== "/news")),
     };
     expect(unnamedUncapturedEndpoints(stripped)).toEqual(["/news"]);
-    // (b) 假想 `/products` 被 `--only` 点名采到了 ⇒ 那条登记当场过期，而 L2 从此真检查它
+    // (b) 逼摘那一头（10-19 `/products` 真的采到了 ⇒ 登记已销，这条牙齿改挂合成登记表：
+    //     "表里还留着一条已采到的"必须点名它，不许跟着被采到的东西一起消失）
     const pk = DS_CONTRACT.find((c) => c.path === "/products")!;
-    const filled: SnapshotFile = {
-      ...snap,
-      endpoints: {
-        ...snap.endpoints,
-        "/products": {
-          capturedAt: "2026-10-19",
-          provenance: "fixture",
-          topLevel: ["count", "products", "source", "type"],
-          rows: { products: ["type", "code", "name"] },
-        },
-      },
-    };
-    expect(missingContractKeys(pk, filled.endpoints["/products"])).toEqual([]);
-    expect(unnamedUncapturedEndpoints(filled)).toEqual([]);
-    expect(obsoleteUncapturedEndpoints(filled)).toEqual(["/products"]);
-    expect(coverage(filled).未进快照文件).toEqual([]);
-    expect(obsoleteUncapturedEndpoints(filled, {})).toEqual([]);
+    // L2 从此真检查它（此前 `if (!snap) return []` 让它一条键都没比过）
+    expect(missingContractKeys(pk, snap.endpoints["/products"])).toEqual([]);
+    expect(unnamedUncapturedEndpoints(snap)).toEqual([]);
+    const stillRegistered = { "/products": "假想那条还没摘的登记" };
+    expect(obsoleteUncapturedEndpoints(snap, stillRegistered)).toEqual(["/products"]);
+    expect(unnamedUncapturedEndpoints(snap, stillRegistered)).toEqual([]);
+    expect(coverage(snap).未进快照文件).toEqual([]);
+    expect(obsoleteUncapturedEndpoints(snap, {})).toEqual([]);
   });
 });
 

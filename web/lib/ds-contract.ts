@@ -356,10 +356,18 @@ export function snapshotDenominator(declared: readonly string[] = DS_CONTRACT.ma
  * 现场腿也带着它的探针（`window_contract.py` 的 `PROBES`），只是被同文件的 `EXPENSIVE` 挡在默认
  * 计划外 ⇒ 不 `--only /products` 点名就永远采不到，而 `探针集合 == 分母` 那枚自测照样绿。
  * 与 `UNVERIFIED_ROWS` 同形：登记要带理由、补上了必须摘（`obsoleteUncapturedEndpoints` 当场红逼摘）。
+ * 10-19 现值＝**表为空**（`/products` 已采到 ⇒ 覆盖面 10/10，见下面那格销账沿革）；空表是原设计，
+ * 不是"这张表没用了"——闸的判别力改由 `ds-contract.test.ts` 那两枚合成样本提供（摘掉一枚已采到的
+ * ⇒ 空登记表也必须点名它）。
  */
 export const UNCAPTURED_ENDPOINTS: Record<string, string> = {
-  "/products":
-    "在分母里、探针也在，但被 `EXPENSIVE` 挡在默认计划外＝整张列表分页多发、本窗最贵的一条 ⇒ 要 `--only /products` 显式点名；不点名则 `requiredTop [count,products,source]` 与 `requiredRows.products` 永远不被快照键面验证（补它要「跑」字）。10-19 00:29 第一次点名真打＝`/products=None`·`TimeoutError: timed out`（现场腿客户端 `window_lib.py` 的 `get(..., timeout=30.0)` 等不到整张名单；ds 侧随后 `akshare-obs` 多出 `ak.stock_zh_a_spot` 一发＝那一趟确实出网了，只是没在预算内答完）⇒ 仍未采到，这条登记照旧留着。",
+  // 销账沿革（CR9-124，10-19 11:52:48）＝`/products` 由现场腿点名真采到：`status 200`·`error null`·
+  // `vanished []`·`topLevel [count,degraded,note,products,source,type]`·
+  // `rows.products [code,exchange,name,pinyin,pinyinInitials,tags,type]` ⇒ 那条登记当场过期（留着＝
+  // `obsoleteUncapturedEndpoints` 红）。00:29 那次没采到的成因已随 CR9-124 抬掉＝客户端预算 30s→180s
+  // （`test-script/window_lib.py` 的 `http_json(..., timeout=30.0)` 现可由单条探针自定；ds 侧那条
+  // A 股全量名单是 `ak.stock_zh_a_spot` 的 120s 看门狗那支）。这一趟的代价＝逻辑 2 发：
+  // durable `eastmoney 136→137`（主源试完被拒）＋`akshare-obs 12→13`（`ak.stock_zh_a_spot` 那支备源）。
 };
 
 /** 没登记的"整块没进快照"＝盲区 ⇒ 必须点名（闸2 清单新落一枚端点而现场腿没采，就红在这里） */

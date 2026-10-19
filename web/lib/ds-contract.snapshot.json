@@ -184,6 +184,29 @@
           "nextRun"
         ]
       }
+    },
+    "/products": {
+      "capturedAt": "2026-10-19",
+      "provenance": "test-script/window_contract.py --live --write（现场腿，真响应键面）",
+      "topLevel": [
+        "count",
+        "degraded",
+        "note",
+        "products",
+        "source",
+        "type"
+      ],
+      "rows": {
+        "products": [
+          "code",
+          "exchange",
+          "name",
+          "pinyin",
+          "pinyinInitials",
+          "tags",
+          "type"
+        ]
+      }
     }
   }
 }

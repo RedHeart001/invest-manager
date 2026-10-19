@@ -76,9 +76,15 @@ class NoProxyOpener:
             return None, f"{type(e).__name__}: {e}"
 
 
-def http_json(opener: NoProxyOpener, path: str, params: dict[str, Any] | None = None):
-    """→ (status, parsed_dict | raw_text | None, error | None)。非 2xx 不抛，交回调用方计数。"""
-    status, body = opener.get(DS_BASE + path, params or {})
+def http_json(opener: NoProxyOpener, path: str, params: dict[str, Any] | None = None,
+              timeout: float = 30.0):
+    """→ (status, parsed_dict | raw_text | None, error | None)。非 2xx 不抛，交回调用方计数。
+
+    `timeout`＝单条探针自己的客户端预算（默认与 `NoProxyOpener.get` 同值＝30s）。
+    只有 `/products` 需要抬：ds 侧那条 A 股全量名单走 `ak.stock_zh_a_spot` 的 120s 看门狗，
+    30s 等不到它答完＝结构上采不到（10-19 00:29 实测 `TimeoutError`，成本已付）。
+    """
+    status, body = opener.get(DS_BASE + path, params or {}, timeout=timeout)
     if status is None:
         return None, None, body
     try:

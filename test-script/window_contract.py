@@ -70,7 +70,9 @@ PROBES: list[dict[str, Any]] = [
      "egress": "2–3 发（`akshare_provider.py` 的 `fund_announcement_report_em` 公告 1 发＋`fund_portfolio_industry_allocation_em` 按年份循环 1–2 发；6h TTL）"},
     {"path": "/bond/yieldcurve", "params": {"days": "90"}, "egress": "1 发（内存缓存 30 分钟）"},
     {"path": "/hotspots/status", "params": {}, "egress": "0 发（读调度器状态，本地内存、零上游、零副作用）"},
-    {"path": "/products", "params": {"type": "stock"}, "egress": "整张列表＝分页多发，本窗最贵的一条（要点名才跑）"},
+    {"path": "/products", "params": {"type": "stock"}, "timeout": 180.0,
+     "egress": "整张列表＝分页多发，本窗最贵的一条（要点名才跑；客户端预算 180s＝CR9-124 抬的，"
+               "30s 等不到 ds 侧 `ak.stock_zh_a_spot` 那 120s 看门狗答完＝10-19 00:29 实测 TimeoutError）"},
 ]
 
 
@@ -130,7 +132,7 @@ def vanished_keys(snapshot_entry: dict[str, Any] | None, surface: dict[str, Any]
 
 
 def collect(opener: NoProxyOpener, probe: dict[str, Any], snapshot: dict[str, Any], receipt: Receipt) -> dict[str, Any]:
-    status, body, err = http_json(opener, probe["path"], probe["params"])
+    status, body, err = http_json(opener, probe["path"], probe["params"], probe.get("timeout", 30.0))
     surface = key_surface(body)
     entry = snapshot.get("endpoints", {}).get(probe["path"])
     # 非 200 的键面不是响应键面（那是 `detail` 错误体），拿它比快照只会造假阳性
