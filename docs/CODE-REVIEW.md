@@ -353,7 +353,7 @@ crypto 43s、bond 1.3s、hk 4ms）。⇒ 30 分钟不是同步的固有成本，
 | 需求条目 | 判定 | 证据 |
 |---|---|---|
 | **需求 1 / M1**「相关产品来自**板块成分映射**而非模糊匹配」 | ✅ 未失效（降级路径已实测） | 当日 `/api/hotspots` = 14 条 digest、`related` 逐条非空（样本 9/9/16）；用**最新代码**直接跑 `map_board_products("创新药"/"光伏设备")` → `source=sina·创新药`/`sina·光伏`、各 6 只成分，note 如实列"新浪板块名称未匹配…"。东财名单不可达 ⇒ codes 缓存为空 ⇒ 自动按名称请求 ⇒ **与改动前逐字同行为** |
-| ⚠️ 同一条需求的**验收欠账** | ⬜ BK 代码路径的"成分等价"仍无实网证据 | requests 层已实证扇出 **9→1**（`fs=m:90+t:3` vs `fs=b:BKxxxx`），但 `push2.eastmoney.com` 从 09-26 起持续被本机系统代理按 host 拒（`ProxyError`，多次复测同结果），拿不到"两条路径成分是否相同"的比对。**离线已钉**"传代码/传名称走同一解析、同一返回形态"（`test_cr6_pipeline` 16/16）；实网复测命令记在 FIX-LEDGER 的 CR9-3 行 |
+| ⚠️ 同一条需求的**验收欠账** | ⬜ BK 代码路径的"成分等价"仍无实网证据 | requests 层已实证扇出 **9→1**（`fs=m:90+t:3` vs `fs=b:BKxxxx`），但 `push2.eastmoney.com` 从 09-26 起持续被本机系统代理按 host 拒（`ProxyError`，多次复测同结果），拿不到"两条路径成分是否相同"的比对。**离线已钉**"传代码/传名称走同一解析、同一返回形态"（`test_cr6_pipeline` 16/16）；实网复测命令记在 FIX-LEDGER 的 CR9-3 行 **10-19 17:0x 现值（只增，本行原句不回改）**＝这一格已被 10-16 16:0x 那次 BK 成分实网验收结清（代码路径与名称路径成分整集相等）⇒ 权威读数＝[FIX-LEDGER.md](FIX-LEDGER.md) 看板 **CR9-3** 那行的「整条闭环」；此处 ⬜ 是那次验收之前的当时读数。 |
 | **需求 2 / M2 + R14 分类浏览** | ✅ 未失效 | `/api/search?q=&type=stock&sort=changePct` → `total=5913`、本页 20 条、**20/20 带实时价**、`page 1/296`；字段 `type,code,name,exchange,tags,price,changePct,currency,quoteSource`（被删的 `stale` 从未有消费者，界面不依赖） |
 | **需求 2 / 关键词与代码搜索** | ✅ 未失效 | `q=600519` → 命中 1 条，`price=1237`、`currency=CNY`、`quoteSource` 齐 |
 | **需求 3 / M3 六区结构 + R16 来源标注 + 免责** | ✅ 未失效 | `/product/fund/110022` 服务端 HTML 含 净值 / 数据来源 / 变化解读 / 明细数据 / 深度分析 / "仅供参考，不构成投资建议" |
