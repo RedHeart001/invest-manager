@@ -252,6 +252,17 @@ def test_page_env() -> None:
               akp._us_list_pages() == akp.US_LIST_PAGE_CEILING, str(akp._us_list_pages()))
     check("默认值不许超过硬上限（两个常数不许互相矛盾）",
           akp.US_LIST_DEFAULT_PAGES <= akp.US_LIST_PAGE_CEILING)
+    # CR10-2（10-20 枚3 的补牙）＝账上那句「两道夹都被测试钉住」此前不成立：夹住有效页数的
+    # 其实是整条看门狗，不是 CEILING。逐页顶到超时那一档，150s 只够 `150 // (20+0.5)`＝7 页。
+    _per_page_s = akp.US_LIST_REQUEST_TIMEOUT_S + akp.US_LIST_PAGE_INTERVAL_S
+    _pages_the_watchdog_allows = int(akp.US_LIST_WHOLE_TIMEOUT_S // _per_page_s)
+    check("CR10-2 真硬闸是看门狗：50 页 × 每页最坏 20.5s＝1025s ＞ 150s 的整条预算",
+          akp.US_LIST_WHOLE_TIMEOUT_S < akp.US_LIST_PAGE_CEILING * _per_page_s,
+          f"whole={akp.US_LIST_WHOLE_TIMEOUT_S} vs ceiling*per_page={akp.US_LIST_PAGE_CEILING * _per_page_s}")
+    check("CR10-2 看门狗夹出的有效页数＝7（改了任一枚常数这行就红，逼人来对算式）",
+          _pages_the_watchdog_allows == 7, str(_pages_the_watchdog_allows))
+    check("🔁 整条预算至少够走完一页（否则名单腿在任何网络条件下都必然空手而归）",
+          akp.US_LIST_WHOLE_TIMEOUT_S >= _per_page_s, str(akp.US_LIST_WHOLE_TIMEOUT_S))
     check("跑完不污染环境", "US_LIST_PAGES" not in os.environ)
 
 
