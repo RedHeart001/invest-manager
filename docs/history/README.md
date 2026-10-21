@@ -86,6 +86,7 @@ wc -l docs/history/*.md
 | [2026-10-19-fix-ledger-当日轮明细1018归档.md](2026-10-19-fix-ledger-当日轮明细1018归档.md) | FIX-LEDGER.md 的块搬迁（2026-10-19） | 整体搬迁，内容逐字保留 | 见 [../FIX-LEDGER.md](../FIX-LEDGER.md) |
 | [2026-10-19-readme-当时读数行归档.md](2026-10-19-readme-当时读数行归档.md) | README.md 的块搬迁（2026-10-19） | 整体搬迁，内容逐字保留 | 见 [../README.md](../README.md) |
 | [2026-10-19-fix-ledger-待拍板已闭项归档.md](2026-10-19-fix-ledger-待拍板已闭项归档.md) | FIX-LEDGER.md 的块搬迁（2026-10-19） | 整体搬迁，内容逐字保留 | 见 [../FIX-LEDGER.md](../FIX-LEDGER.md) |
+| [2026-10-21-fix-ledger-当日轮明细1020归档.md](2026-10-21-fix-ledger-当日轮明细1020归档.md) | FIX-LEDGER.md 的块搬迁（2026-10-21） | 整体搬迁，内容逐字保留 | 见 [../FIX-LEDGER.md](../FIX-LEDGER.md) |
 
 > **「同日续 N」的去处（10-08 重组留下的 19 处旧指针）**：上层文件里凡写「PROGRESS 同日续 N」的句子，其原文现在都在
 > [2026-10-08-progress-进度日志归档.md](2026-10-08-progress-进度日志归档.md)（该文件按「同日续 1…75」分节，编号与旧指针一一对得上，已逐号核对齐 75 段）。
