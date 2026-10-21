@@ -36,3 +36,18 @@ python test-script/window_bond_map.py --dry-run   # 刀 C：翻页成本 ≥3 �
 
 纪律：本目录只放**只读观测**脚本；任何会写库/破坏性操作的脚本不得入内。
 本目录唯一的写动作是 `window_contract.py --write`：它回写的是仓库内的**键面快照**（`web/lib/ds-contract.snapshot.json`，只有键名、不存行情数值、不碰 SQLite／Prisma），且必须显式带 `--write`。⚠️ 两个后果：**(a)** 那是**版本管理里的文件** ⇒ 采完会多一笔 dirty，要单独一笔提交；**(b)** 保险丝停过手那一轮**拒写**（半截清单不该被抄成快照）。
+
+## 10-22 从 gitignored `data-service/runtime/` 入册的四枚（主人的字＝「挪」）
+
+入册动机不是收纳癖，是观察项②＝被活跃 docs 当"可复现凭证"引用的件全住在一个**清空目录就全军消失**的地方，而账上不自知。⚠️ 上面那条「只放只读观测脚本」的纪律**先于本次入册存在**，所以入册范围按它筛过＝四枚进、三枚退回（明细＝FIX-LEDGER「当日轮明细 · 10-22」）。
+
+| 脚本 | 用途 | 来源 |
+|---|---|---|
+| `p79-probe4.py` | #79 后续 A/B 对照臂探针（先立对照组，再测两臂） | 10-17；docs 指路＝`runtime/p79-probe4.py` |
+| `_live_stamp.fixed.py` | ③ 实网回执的**树戳**：一份判据两处出口（p0/p1 import、④ 用 `--line` spawn 同一份）；不复用 `window_lib` 的理由写在文件头 | 10-15；`runtime/_live_stamp.fixed.py` |
+| `uslist50-1018.py` | B1 甲+ 的覆盖面实测：只跑美股名单那条腿、取 50 页、**零写入**（只调 provider 列表方法＋只读 SQL） | 10-18；`runtime/uslist50-1018.py` |
+| `run-offline-ds-1018.py` | 跑 ② 的离线 ds 套件但**排除 `test_p6_mcp`**（那枚自带一条无条件真报价）；汇总行按 `gate.mjs` 的两套正则解析，解析不出＝红 | 10-18；`runtime/run-offline-ds-1018.py` |
+
+- 自查（入库前跑的）＝密钥形态 `(sk-|tvly-|ghp_|AKIA)` **0**、`token|secret|password|api_key|authorization` **0**、硬编码绝对路径 **0**（四枚都由 `__file__`／env 取路）。
+- **没入册、仍在 `runtime/` 的三枚**＝`start-ds-1018-14p.ps1`／`restart-ds-1018-15p.ps1`（后者内含 `taskkill /F /T`＝破坏性）／`keepawake_holder.py`（改系统状态）⇒ 按上面那条纪律**不得入内**，退回原位；观察项② 的范围因此从"7 枚可入册"更正为"4 枚已入册＋3 枚定档不入"。
+- **刻意留在 `runtime/` 不动的两类**＝运行态状态文件（`hotspot-state.json`／`limiter-state.json`／`sync-state.json`，`app/hotspot/scheduler.py:65` 明写该目录按设计 gitignored）与一次性回执（`.out`／`.log`／`.html`）＝前者入库＝打破设计决定，后者入库＝把一次性产物变成长期包袱。
