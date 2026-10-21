@@ -3,7 +3,7 @@
  *
  * 为什么欠这一份（10-06 断言强度审计登记为待拍板 #40 的 (a)）：全仓 `find web/app -name "*.test.ts*"`
  * 只有 `research/ingest` 与 `watchlist` 两枚 route 测试，而这个端点是**每日刷新腿本体**
- * （刀 3/甲-1 之后 ds 链式打的就是它）。`route.ts:56/:60/:61/:67` 那四个调用点
+ * （刀 3/甲-1 之后 ds 链式打的就是它）。`route.ts` 里 `startRefreshProgress` / `onResult: recordRefreshResult` / 两枚 `finishRefreshProgress` 那四个调用点
  * ——起跑落 `running`、逐类落 `done`、收尾落 `completed`/`failed`——此前零断言，
  * 摘掉任何一行 ① 都无感。
  *

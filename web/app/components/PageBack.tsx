@@ -15,7 +15,7 @@ import {
  * 语义＝"回到我来的那一页"（主人 2026-10-01 定）。首选 `router.back()`：它回到**你来时那一条 URL**，
  * 于是 `q`/`type` 原位、60 秒内结果直接命中 `lib/search-cache.ts` 不再发请求。
  * ⚠️ 这里原来写的是"带回 `staleTimes` 承载的滚动/分页态"——10-09 读码收窄：查询模式只往 URL 写
- * `q` 与 `type`（`search-client.tsx:188`，只有浏览模式写 sort/page），所以那两样从来不在
+ * `q` 与 `type`（`search-client.tsx` 提交查询时那条 `router.replace`，只有浏览模式写 sort/page），所以那两样从来不在
  * `back()` 的保证范围内，别把这句当验收条件。
  *
  * #56 甲（10-08）：文案与行为一度取的是两个键（`from` vs `history.length`）⇒ 粘贴裸 URL

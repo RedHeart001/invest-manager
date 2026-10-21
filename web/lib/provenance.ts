@@ -79,7 +79,7 @@ export function planBack(rawFrom: string | null | undefined, q: string | null): 
 // 应用内的 `Link`/`router.push` 不换文档 ⇒ 轨迹里留着上一页，`back()` 才真能回到它，
 // CR8-6 那条"回来时还是你来时那一条 URL"（`q`/`type` 在 URL 里、60 秒内结果命中 search-cache）
 // 也因此没被这刀牺牲掉。注意别把这句话读成"sort/page/滚动也保证带回"——查询模式只往 URL 写
-// `q` 与 `type`（`search-client.tsx:188`），其余从来不在 back() 的保证范围内。
+// `q` 与 `type`（`search-client.tsx` 提交查询那条 `router.replace`），其余从来不在 back() 的保证范围内。
 
 let currentPath: string | null = null;
 let previousPath: string | null = null;

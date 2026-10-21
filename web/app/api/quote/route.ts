@@ -27,7 +27,7 @@ export async function GET(req: NextRequest) {
     // 现值记在 `web/lib/data-service.ts` 头上）。理由＝ds 侧一条
     // stock `get_quote` 的最坏路径是「`_em_request` 的 `acquire()` 默认 20s
     // （`data-service/app/utils/limiter.py` 的 `acquire(timeout=20.0)`）＋多 host 两轮 × 每发 15s
-    // （`data-service/app/providers/akshare_provider.py:303-309`）」，15s 与它差
+    // （`akshare_provider.py` 遍历 `EM_HOSTS` 的那个 for，单发超时＝`REQUEST_TIMEOUT`）」，15s 与它差
     // 一个量级 ⇒ 慢响应被掐断，又被 catch 回成「服务没启动」（违 R16）。
     // 10-11 夜 R13 实测字面＝`code=600519 503 in 15792ms`，ds 侧同发 12 次全 200。
     const res = await fetch(

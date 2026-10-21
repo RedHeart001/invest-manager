@@ -211,7 +211,7 @@ def test_akshare_family_gate_cr9_97() -> None:
           and declared["cooldown_max"] == 0.0, str(declared))
     check("CR9-97：参数逐项等于实例上的值（调参仍只有 PROFILES 一处，CR9-18 同条纪律）",
           {k: getattr(obs, k) for k in declared} == declared, str(obs.state()))
-    check("CR9-97：取额度的等待上限＝5s，不是 `acquire()` 的默认 20s（BFF 预算 15s，#63 那条倒挂同形）",
+    check("CR9-97：取额度的等待上限＝5s，不是 `acquire()` 的默认 20s（BFF 预算＝`QUOTE_TIMEOUT_MS` 30s；#63 那次抬之前写的 15s 已作废）",
           akp.AK_ACQUIRE_TIMEOUT_S == 5.0, str(akp.AK_ACQUIRE_TIMEOUT_S))
 
     name = "ak.__cr9_97_gate"

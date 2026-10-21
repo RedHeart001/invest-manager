@@ -7,10 +7,10 @@ const DATA_SERVICE_URL = process.env.DATA_SERVICE_URL ?? "http://localhost:8000"
  * （本文件 `dsGet` 默认；另一处 `app/api/quote/verify/route.ts` 已随 10-17 CR9-115 删）。此前 `/api/quote`
  * 与详情页 SSR 各写死 15s，与 ds 侧一条 stock `get_quote` 的最坏路径差一个量级：
  * `_em_request` 的 `acquire()` 默认 **20s**（`data-service/app/utils/limiter.py` 的 `acquire(timeout=20.0)`）
- * ＋ 多 host 两轮 × 每发 15s（`data-service/app/providers/akshare_provider.py:303-309`）。
+ * ＋ 多 host 两轮 × 每发 15s（`akshare_provider.py` 里遍历 `EM_HOSTS` 的那个 for，单发超时＝`REQUEST_TIMEOUT`）。
  * 15s 会在多 host 降级（上游抖动）时把慢响应掐断，再被回成「服务没启动」（违 R16；
  * 10-11 夜 R13 实测字面 `code=600519 503 in 15792ms`，而同发 ds 侧 12 次全 200）。
- * ⇒ 预算不许低于 30s；独立成常量是为了让三处调用点（route、详情页 SSR）不再各写一个数。
+ * ⇒ 预算不许低于 30s；独立成常量是为了让两个消费点（`/api/quote` 的裸 fetch、详情页 SSR 的 `dsGet`）不再各写一个数。
  */
 export const QUOTE_TIMEOUT_MS = 30_000;
 

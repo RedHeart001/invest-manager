@@ -35,11 +35,11 @@ from . import openbb_provider  # noqa: F401  美股 provider（yfinance 后端�
 # akshare `register(["stock","fund","bond"])` 只进 _QUOTE_REGISTRY（主源注册表）；
 # openbb `register_chain(["us"], position=0)` 只进 _CHAIN_REGISTRY——**"us" 不在
 # _QUOTE_REGISTRY 里**。因此：
-# - `get_provider("us")` 抛 KeyError（base.py:66 只查 _QUOTE_REGISTRY）；
+# - `get_provider("us")` 抛 KeyError（base.py 的 `get_provider` 只查 _QUOTE_REGISTRY）；
 # - `get_provider_chain("us")` 正常返回 [yfinance]（主源缺失时 chain 只含备源，
 #   base.py:72 的语义——position=0 在 chain 里仍被当普通成员，不等于主源注册）。
 # 代码若有"单源直取"场景，对 us 须走 get_provider_chain，勿用 get_provider。
 # hk 与 us **不同**（CR9-8 纠错，2026-09-26 实测：get_provider("hk") → akshare-hk）：
-# hk_provider.py:326-327 用的是 register(["hk"]) + register_list(["hk"])，所以
+# hk_provider.py 的 `_register()` 用的是 register(["hk"]) + register_list(["hk"])，所以
 # get_provider("hk") 正常返回、不会 KeyError；get_provider_chain("hk") 才 = [HkProvider, TencentProvider]。
 # 原注释把 us 的结论套到 hk 上（称其用 register_chain 且 get_provider 抛 KeyError），两句皆错。

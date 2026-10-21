@@ -60,7 +60,7 @@ export function shouldPaceBatch(type: string, marker: boolean | null): boolean {
  * 代价实测口径（不是推算）：09-27 12:2x 用改后代码实跑 `POST /api/market/refresh?type=bond`
  * ⇒ **11 批 51.7s（有效 4.7s/批，末批无尾延）**，`updated=311 failedBatches=0` 快照照常产出；
  * 按当日真实批次数 149 个东财批次折算全类型刷新 ≈ **700s**（＋场外净值首拉与 280 批写库），
- * 这就是 `/api/market/refresh` 的 maxDuration 从 800 抬到 1500 的依据（CR9-20）。
+ * 这就是 CR9-20 那一次把它从 800 抬到 1500 的依据；**现值＝2400**（10-02 刀 3/甲-1 之后按新实测再抬，理由写在 `route.ts` 头上那段）。
  */
 export const EM_BATCH_DELAY_MS = 5000;
 

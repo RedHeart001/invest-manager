@@ -195,7 +195,7 @@ export const DS_RESPONSE_FILES = [
 /**
  * L3 的**已知陈旧**清单（10-13 落 CR9-92 这一轮登记）。
  *
- * 为什么要这张表，而不是把 L3 关掉或改松：这一条腿的构造面是「四枚文件里最新的那次提交」，
+ * 为什么要这张表，而不是把 L3 关掉或改松：这一条腿的构造面是「`DS_RESPONSE_FILES` 那五枚里最新的那次提交」，
  * 所以**任何一次 ds 落码**都会把所有已存快照判成过期——而重采要真打上游、只能在人工窗口做
  * （10-13 A 窗最后一步）。如果不隔离，落 CR9-92 的那一笔就会让闸1 常红，
  * 而常红的闸等于没有闸（CR9-14 那一轮的教训原话：不先隔离，后续任何一批都失去门禁判别力）。
@@ -216,7 +216,7 @@ export function builderMsFor(committedMs: number, isDirty: boolean, nowMs: numbe
 
 /** 已知陈旧清单自证用：这些条目的来路（谁把构造面改新的、什么时候重采）。
  *  登记表为空＝L3 两条牙齿都在跑：清单外的过期当场红，清单里的不再过期也红（逼着摘）。
- *  每条的 `why` 有 ≥20 字符的下限（`ds-contract.test.ts:231`），且要写清"谁把构造面改新的＋哪一轮重采"。 */
+ *  每条的 `why` 有 ≥20 字符的下限（`ds-contract.test.ts` 里那两条 `why.trim().length` 断言），且要写清"谁把构造面改新的＋哪一轮重采"。 */
 export const KNOWN_STALE_SNAPSHOTS: Record<string, string> = {
   // 10-13 13:47 `window_contract.py --live --write` 重采后销账（原两条＝`/quote`／`/kline`，
   // 由 CR9-92 落码判过期）。
