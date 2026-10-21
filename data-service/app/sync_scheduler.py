@@ -47,7 +47,7 @@ from zoneinfo import ZoneInfo
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from .utils.timeutil import beijing_today
+from .utils.timeutil import beijing_today, leg_staleness
 
 log = logging.getLogger("sync.scheduler")
 
@@ -750,6 +750,7 @@ def status() -> dict:
     # `fromDisk` 先例）。没有这层回落时，逐类 `note` 在重启后永久读不到＝验收对象住在内存里。
     disk_result = (disk_marker or {}).get("lastResult")
     in_proc_result = _state["lastResult"]
+    sync_hour, sync_minute = _sync_hour_minute()
     return {
         "running": _state["running"],
         "runs": _state["runs"],
@@ -772,6 +773,14 @@ def status() -> dict:
         # fail-open 的两枚仪器位：读不出／写不进都要看得见，不许用省略冒充
         "markerReadError": _state.get("markerReadError"),
         "markerWriteFailed": bool(_state.get("markerWriteFailed")),
+        # CR10-1：这条腿「今天该不该已经有它」由读的一方算——`skippedReason` 住内存，
+        # 而擦掉它的那次重启正是丢腿的原因（10-19／10-20／10-21 三夜同一形）。
+        "legStaleness": leg_staleness(
+            (disk_marker or {}).get("lastAttemptDate"),
+            hour=sync_hour,
+            minute=sync_minute,
+            instrument_ok=not (_state.get("markerWriteFailed") or _state.get("markerReadError")),
+        ),
         "jobs": jobs,
         "timezone": str(TZ),
     }

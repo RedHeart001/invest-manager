@@ -24,7 +24,7 @@ from zoneinfo import ZoneInfo
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from ..utils.timeutil import beijing_today
+from ..utils.timeutil import beijing_today, leg_staleness
 from .pipeline import run_pipeline
 
 log = logging.getLogger("hotspot.scheduler")
@@ -359,6 +359,15 @@ def status() -> dict:
         "lastAttemptFromDisk": bool(attempt and attempt.get("lastAttemptDate")) and _state["runs"] == 0,
         "stateWriteFailed": bool(_state.get("stateWriteFailed")),
         "catchUpSkipReason": _state.get("catchUpSkipReason"),
+        # CR10-1：义务时刻取盘前那一枚（与 `_reached_schedule_today` 同一道门）——一条
+        # date-keyed marker 服务两条腿，逐腿的证据仍只有 `jobs[].nextRun`。
+        "legStaleness": leg_staleness(
+            (attempt or {}).get("lastAttemptDate"),
+            hour=PRE_MARKET_HOUR,
+            minute=PRE_MARKET_MINUTE,
+            weekdays_only=True,
+            instrument_ok=not _state.get("stateWriteFailed"),
+        ),
     }
     # #34（CR9-62）：内存为空 ⇒ 回落到磁盘那份并标 `fromDisk=True`，一条 curl 就能把
     # "这个进程跑过"与"上个进程跑过、我重启了"分开（同 #29／CR9-53 的备份状态位）。

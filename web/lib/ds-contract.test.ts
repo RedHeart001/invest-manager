@@ -166,6 +166,14 @@ describe("闸2 L2 键名：清单要的键，快照与 ds 源码都得承认", (
     expect(missing).toEqual([]);
   });
 
+  it("CR10-1 的 `legStaleness`：新增键不进 DS_CONTRACT（会点亮 declaredButUnused 那枚僵尸），但必须真住在 ds 源码里", () => {
+    const text = dsSourceText();
+    // 只读判据是响应面的一部分：改名／删接线 ⇒ 这条红。刻意不把 `/sync/status` 注册进清单＝
+    // 它没有 web 调用方，注册了反而造一枚"清单里有、没人读"的空头契约。
+    expect(keysAbsentInDsSource(["legStaleness", "verdict", "ageDays", "expectedBy"], text)).toEqual([]);
+    expect(DS_CONTRACT.map((c) => c.path)).not.toContain("/sync/status");
+  });
+
   it("有快照的那些：声明键 ⊆ 快照键面", () => {
     const drift = DS_CONTRACT.flatMap((c) =>
       missingContractKeys(c, snap.endpoints[c.path] ?? null).map(
