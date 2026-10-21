@@ -642,9 +642,13 @@ def test_startup_hook_is_wired_into_start_scheduler() -> None:
         orig_state = dict(bs._state)
         orig_request_run = bs.request_run
         calls: list[str] = []
-        # 记录器：收下 trigger、只回"已接受"——真的补跑由 `startup_catch_up` 那条链去测（见上一个用例）
-        bs.request_run = lambda trigger="manual": (
-            calls.append(trigger), {"accepted": True, "note": "recorder"})[1]
+        labels: list[object] = []
+        # 记录器：收下 trigger 与 label、只回"已接受"——真的补跑由 `startup_catch_up` 那条链去测（见上一个用例）
+        # CR10-4：那个 `**kw` 不是宽容，是判据的一部分——替身不认新 kwarg 时，`startup_catch_up`
+        # 的 `except` 会把 TypeError 吞成 `reason=error`，而 `calls` 只读成空列表＝看不出谁不认账。
+        bs.request_run = lambda trigger="manual", **kw: (
+            calls.append(trigger), labels.append(kw.get("label")),
+            {"accepted": True, "note": "recorder"})[2]
         try:
             os.environ["BACKUP_DIR"] = boot
             bs._state.update({"running": False, "lastRun": None, "lastResult": None, "runs": 0})
@@ -653,9 +657,12 @@ def test_startup_hook_is_wired_into_start_scheduler() -> None:
             bs._write_state(
                 {"lastRun": stale, "ok": True, "outcome": "completed", "runs": 1}, boot)
             calls.clear()
+            labels.clear()
             bs.start_scheduler()
             check("#38：落后 30 小时 ⇒ `start_scheduler()` 自己就把 startup-catchup 投递出去（接线在）",
                   calls == ["startup-catchup"], str(calls))
+            check("CR10-4：起服务那一支投递时带 label=startup（少它盘上就分不出两个入口）",
+                  labels == ["startup"], str(labels))
         finally:
             bs.shutdown_scheduler()
         check("#38：记录器把真补跑挡住 ⇒ 本用例一份快照都不产出（不占磁盘、不动 `backups/`）",
@@ -672,10 +679,13 @@ def test_startup_hook_is_wired_into_start_scheduler() -> None:
                  "ok": True, "outcome": "completed", "runs": 1}, boot)
             bs.start_scheduler()
             calls.clear()
+            labels.clear()
             hourly = {j.id: j for j in bs._scheduler.get_jobs()}[bs.STALE_CHECK_JOB_ID]
             hourly.func()
             check("#54 乙：落后 30 小时 ⇒ 每小时那一枚真的投递补跑（不必等下一次重启）",
                   calls == ["startup-catchup"], str(calls))
+            check("CR10-4：每小时那一支投递时带 label=hourly（与起服务那一支在盘上分得开）",
+                  labels == ["hourly"], str(labels))
         finally:
             bs.shutdown_scheduler()
 
@@ -684,16 +694,79 @@ def test_startup_hook_is_wired_into_start_scheduler() -> None:
             bs._write_state(
                 {"lastRun": fresh, "ok": True, "outcome": "completed", "runs": 2}, boot)
             calls.clear()
+            labels.clear()
             bs.start_scheduler()
             check("🔁 #38：刚备过 ⇒ 起服务一条都不投递（同日反复重启的代价仍由 26 小时门限挡住）",
-                  calls == [], str(calls))
+                  calls == [] and labels == [], "%s｜%s" % (str(calls), str(labels)))
             hourly = {j.id: j for j in bs._scheduler.get_jobs()}[bs.STALE_CHECK_JOB_ID]
             hourly.func()
             check("🔁 #54 乙：刚备过 ⇒ 每小时复查同样不投递（正常节奏下它不会每天多复制一份 63 MB）",
-                  calls == [], str(calls))
+                  calls == [] and labels == [], "%s｜%s" % (str(calls), str(labels)))
         finally:
             bs.shutdown_scheduler()
             bs.request_run = orig_request_run
+            for k, v in orig_env.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+            bs._state.clear()
+            bs._state.update(orig_state)
+
+
+def test_backup_state_label_separates_the_two_catchup_entries() -> None:
+    """CR10-4：`state.json` 的 `label` 把两个补跑入口分开——`trigger` 对它们同字面。
+
+    此前"这份是起服务补的还是长驻复查补的"只活在一行 `log.warning` 里，而那行住的 `.err`
+    未入库、退出前还删不掉 ⇒ 盘上读不出来。成对（🔁）三枚：startup 那一支写 `startup`、
+    hourly 那一支写 `hourly`、常规 cron 那一支写 `null`。第三枚是**会红的样本**＝若把 label
+    写死（或让 daily 也带上补跑的名字），它就红 ⇒ 证明这一位不是恒真。
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        src = os.path.join(tmp, "dev.db")
+        _make_db(src, rows=3)
+        out = os.path.join(tmp, "backups")
+        keys = ("DB_PATH", "BACKUP_DIR", "BACKUP_KEEP", "BACKUP_STALE_HOURS", "BACKUP_MAX_AGE_DAYS")
+        orig_env = {k: os.environ.get(k) for k in keys}
+        orig_state = dict(bs._state)
+        try:
+            os.environ.update({"DB_PATH": src, "BACKUP_DIR": out, "BACKUP_KEEP": "7"})
+            os.environ.pop("BACKUP_STALE_HOURS", None)
+            os.environ.pop("BACKUP_MAX_AGE_DAYS", None)
+
+            # ① 起服务那一支：盘上什么都没有 ⇒ no-state ⇒ 补一份
+            r = bs.startup_catch_up()
+            _wait_idle()
+            disk = bs.read_state(out) or {}
+            check("CR10-4：起服务补的那一份，盘上说得出自己（label=startup）",
+                  r.get("triggered") is True and disk.get("label") == "startup",
+                  "%s｜%s" % (str(r), str(disk)))
+            check("CR10-4：`trigger` 一字未改（仍 startup-catchup＝三处断言钉着的既有取舍）",
+                  disk.get("trigger") == "startup-catchup", str(disk))
+
+            # ② 长驻复查那一支：把 lastRun 拨回 30 小时前 ⇒ 门限（26h）判落后 ⇒ 补
+            old = (datetime.now(bs.TZ) - timedelta(hours=30)).isoformat(timespec="seconds")
+            bs._write_state({"lastRun": old, "ok": True, "outcome": "completed"}, out)
+            r2 = bs.startup_catch_up(label="hourly")
+            _wait_idle()
+            disk2 = bs.read_state(out) or {}
+            check("CR10-4：每小时复查补的那一份 label=hourly（与 ① 在盘上分得开）",
+                  r2.get("triggered") is True and str(r2.get("reason", "")).startswith("stale-")
+                  and disk2.get("label") == "hourly",
+                  "%s｜%s" % (str(r2), str(disk2)))
+            check("🔁 CR10-4：两个入口 `trigger` 同字面 ⇒ 少了 label 这一位就分不出是谁补的",
+                  disk.get("trigger") == disk2.get("trigger")
+                  and disk.get("label") != disk2.get("label"),
+                  "%s｜%s" % (str(disk), str(disk2)))
+
+            # ③ 会红的样本：常规 cron 那一支不带 label（写死 label／到处贴补跑名字 ⇒ 这枚红）
+            res = bs.run_once("daily")
+            disk3 = bs.read_state(out) or {}
+            check("🔁 CR10-4：常规 cron 那一份 label 是 null（键在、值空＝不冒充补跑）",
+                  res.get("ok") is True and disk3.get("trigger") == "daily"
+                  and "label" in disk3 and disk3.get("label") is None,
+                  "%s｜%s" % (str(res), str(disk3)))
+        finally:
             for k, v in orig_env.items():
                 if v is None:
                     os.environ.pop(k, None)
@@ -714,6 +787,7 @@ if __name__ == "__main__":
     test_backup_state_survives_process_death()
     test_startup_catch_up_and_age_purge()
     test_startup_hook_is_wired_into_start_scheduler()
+    test_backup_state_label_separates_the_two_catchup_entries()
     fails = [x for x in results if not x[1]]
     print(f"\n===== {len(results) - len(fails)}/{len(results)} 通过 =====")
     if fails:

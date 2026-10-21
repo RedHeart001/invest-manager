@@ -33,6 +33,9 @@ scheduler 里没有一处引用它，`backups/` 目录是空的。单机自托�
   错过一次 03:30 最迟在一个小时内补上，而不是等下一次重启。门限仍是 26 小时：正常节奏下
   下一档 03:30 会先把 `state.json` 刷新，`age` 永远到不了 26 ⇒ 复查不会变成每天多复制一份
   63 MB（这一条有断言钉着）。
+- **CR10-4（10-21 主人的字＝「改」）**：`state.json` 多一枚 `label`，把"起服务时补的"与
+  "长驻每小时复查补的"分开——`trigger` 分不出这两枚（两个入口都写 `startup-catchup`），
+  而唯一说得出它的那行 `log.warning` 住在未入库、退出前还删不掉的 `.err` 里。
 """
 
 from __future__ import annotations
@@ -273,8 +276,12 @@ def rotate(outdir: str, keep: int) -> list[str]:
     return removed
 
 
-def run_once(trigger: str = "scheduled") -> dict:
-    """做一份一致性快照并按份数轮换（调用方须保证单飞）。"""
+def run_once(trigger: str = "scheduled", *, label: str | None = None) -> dict:
+    """做一份一致性快照并按份数轮换（调用方须保证单飞）。
+
+    `label` 只落 `state.json`、不进结果载荷也不进 `/health`（`health()` 按键取值，多一枚
+    键不会漏出去）：它回答的是"这一份是哪个入口补的"，而 `trigger` 对两个补跑入口同字面。
+    """
     started = time.time()
     src = _source_db()
     outdir = _backup_dir()
@@ -334,6 +341,7 @@ def run_once(trigger: str = "scheduled") -> dict:
             "outcome": result.get("outcome"),
             "runs": runs,
             "trigger": trigger,
+            "label": label,
             "skippedReason": result.get("skippedReason"),
             "kept": result.get("kept"),
         },
@@ -342,7 +350,7 @@ def run_once(trigger: str = "scheduled") -> dict:
     return result
 
 
-def request_run(trigger: str = "manual") -> dict:
+def request_run(trigger: str = "manual", *, label: str | None = None) -> dict:
     """手动触发（后台执行，立即返回）——与 /sync/run、/hotspots/run 同形。"""
     with _lock:
         if _state["running"]:
@@ -350,7 +358,11 @@ def request_run(trigger: str = "manual") -> dict:
         _state["running"] = True
     try:
         threading.Thread(
-            target=run_once, args=(trigger,), name="db-backup-manual", daemon=True
+            target=run_once,
+            args=(trigger,),
+            kwargs={"label": label},
+            name="db-backup-manual",
+            daemon=True,
         ).start()
     except Exception:  # noqa: BLE001 线程起不来要回滚 running，否则永久卡 True
         with _lock:
@@ -363,12 +375,14 @@ def startup_catch_up(*, label: str = "startup") -> dict:
     """查一次"最近这份备份是不是太旧了"，太旧就当场补一份（#37／CR9-65，主人 10-05 的字）。
 
     两个调用点共用这一条：进程启动时一次（`start_scheduler` 末尾），以及**每小时复查一次**
-    （#54 乙，10-08 主人的字）。`label` 只进日志，用来把"起服务时补的"与"长驻着复查补的"
-    在日志里分开；投递出去的 `trigger` 仍是 `startup-catchup`（`state.json` 里的口径不变）。
+    （#54 乙，10-08 主人的字）。`label` 进日志**也进 `state.json`**（CR10-4）：两个入口投递的
+    `trigger` 都是 `startup-catchup`（三处断言钉着那句字面，换它＝改既有取舍），所以"这份是
+    起服务补的还是长驻复查补的"此前只活在一行 `log.warning` 里，而那行住的 `.err` 未入库、
+    退出前还删不掉。
 
     返回值只用于日志与断言，**不进 `/health`**——那一位已经有 `lastRun`/`ok`/`outcome`
-    在说话，再加一个键只会让"这份是补的"和"这份是准的"混在一起；要说清是谁做的，
-    `trigger="startup-catchup"` 已经落在结果载荷与 `state.json` 里。
+    在说话，再加一个键只会让"这份是补的"和"这份是准的"混在一起；要说清是谁做的，读
+    `state.json` 的 `label`（`daily`／`manual` 两条路径不带 label＝`null`）。
 
     判"落后"的三种情况：`state.json` 不存在（这台机从没备过）／载荷读不出来或时刻字段
     不合法／落后超过 `BACKUP_STALE_HOURS`（默认 26 小时＝错过一次 03:30 ＋ 2 小时容差）。
@@ -399,7 +413,7 @@ def startup_catch_up(*, label: str = "startup") -> dict:
                 "backup %s check: last backup %dh ago (< %dh) ⇒ 不补跑", label, age_h, stale_h
             )
             return {"triggered": False, "reason": reason, "ageHours": age_h}
-        got = request_run("startup-catchup")
+        got = request_run("startup-catchup", label=label)
         # 这条用 warning：uvicorn 默认配置下 log.info 完全不打（门槛⑤ 记过的老账），
         # 而"补了一份"必须第二天还能从日志里读出来。
         log.warning(
