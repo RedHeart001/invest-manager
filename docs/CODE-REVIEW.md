@@ -27,7 +27,7 @@
 | **CR7** | 09-20 | `2efda87`（被审代码） | "第二轮·全项目"（**误名**） | `CR7-1..14` | 已闭环（逐项状态见 FIX-LEDGER 看板；余 3 项手测与门禁复现见 CR9-14） |
 | **CR8** | 09-24 | `3b07643`（被审代码） | 界面语义审查（主人本地实跑点击驱动） | `CR8-1..8`（**09-30 晚主人再实跑时新增 CR8-8**） | 开放；6 项已拍板待实施（09-26 实测确认代码一行未动），CR8-7 转 OPT-2，**CR8-8 当日发现当日修（09-30）** |
 | **CR9** | 09-26 | `02f0e95`（被审代码，工作树干净） | 全项目审查（CR7 闭环复核 + 两路并行审计 + 实时接口/DB 探针） | `CR9-1..47`（**09-27 批次七排到 44；09-28 死项清理轮占 45/46/47**） | 开放；**逐批执行中**——发现时点是"23 项全部未处置"，**批次〇–七后的实修/撤回/余项计数只在 [FIX-LEDGER.md](FIX-LEDGER.md) 维护，本行不复述**（09-26 CR9-23 同族教训） |
-| **CR10** | 10-21 | `da583d3`（被审代码；porcelain 只剩两枚未入库服务日志） | 全面梳理轮（三头并行探码＋docs 逐节现查＝盘点题；观察项①落成机制）＋注释面 stale 轮（码面 16 枚现查清单） | `CR10-1..`（取走 **CR10-1**／**CR10-2**／**CR10-3**） | 开放；**已收尾的 CR9 之后起轮**＝主人 10-20 那句「口径挑定＝CR10」落地那天；计数只在 [FIX-LEDGER.md](FIX-LEDGER.md) 状态卡维护，本行不复述 |
+| **CR10** | 10-21 | `da583d3`（被审代码；porcelain 只剩两枚未入库服务日志） | 全面梳理轮（三头并行探码＋docs 逐节现查＝盘点题；观察项①落成机制）＋注释面 stale 轮（码面 16 枚现查清单）＋备份腿来源可证轮（`state.json` 的 `label`） | `CR10-1..`（取走 **CR10-1**／**CR10-2**／**CR10-3**／**CR10-4**） | 开放；**已收尾的 CR9 之后起轮**＝主人 10-20 那句「口径挑定＝CR10」落地那天；计数只在 [FIX-LEDGER.md](FIX-LEDGER.md) 状态卡维护，本行不复述 |
 
 **为什么 CR6/CR7 会"误名"**：git 用的是连续"第 N 轮"（CR2–CR5），而 09-18 起文档重新从"第一轮"计数，测试文件却延续内部编号 `test_cr6_*.py`，PLAN 又并行维护 C/O/R 系列——四套编号各说各话。
 
@@ -754,6 +754,14 @@ eastmoney_quote_ctl    ok= 0/10 gap=6s  ERR=['ConnectionError'] x10
 - **回执**＝`runtime/windowContract-products-1019.out`＋`windowContract-1019-1152.jsonl`·三本账 `pre-6-1019.json`／`post-6-1019.json`／`post-7-1019.json`·`runtime/screen-1019-ssr.html`·闸1 两把 `gate1-1066-*`／`gate1-1067-*`＋`gate1-full-1019-1210.out`；全部 gitignored，写完核 `git status --porcelain`＝0。体量末态本节写完会动 ⇒ **不在正文自抄自指数**，要复算看 `docscan-1019-*.out` 或现跑那把尺。
 - **落账面**＝本节＋门槛区新增 `#### 当日轮明细 · 10-19` 一行＋状态卡四格**换值**（当前轮次＝**CR9 已收尾**）＋待拍板 #81／#84／#85／#92 各一枚 ✅ 行＋「本轮不做」两行（C5 hk·E1 覆盖面·C3／C4 件 2 换形）＋README 现值行换档＋PROGRESS 状态总览＋任务书前置 **17**＋四块整搬的归档与索引行。
 
+
+#### 追加一百零三 · 10-21 23:2x（**CR10-4＝备份腿来源可证：`state.json` 多一枚 `label`，`trigger` 一字未改**）
+
+> 字＝那枚答「先搬后写＋**改** 两枚都给」的后半。落点＝`app/backup_scheduler.py`（**不在** `DS_RESPONSE_FILES` 五枚 ⇒ 闸2 L3 不亮、不重采、零额度）。**改了什么**＝`run_once`／`request_run` 各多一枚 keyword-only `label`（默认 `None`）并写进 `state.json`（`trigger` 旁一枚新键），`startup_catch_up` 改成 `request_run("startup-catchup", label=label)`；`health()` 按键取值 ⇒ `/health` 形状未变、`main.py` 没碰。**不改 `trigger`**＝两个入口同字面、六处断言钉着（清单见 FIX-LEDGER 23:2x）＝换它是改既有取舍。**治的那一格**＝「起服务补的还是每小时复查补的」此前只活在一行 `log.warning`（住的 `.err` 未入库、退出前删不掉）。
+> - **测**＝新用例 `test_backup_state_label_separates_the_two_catchup_entries` 5 枚（startup 写 `startup`／hourly 写 `hourly`／🔁 两枚 `trigger` 同字面而 `label` 不同＝少了这一位就分不出／🔁 常规 cron 那一份 `label` 是 `null`＝**会红的样本**：写死 label 或让 `daily` 也带补跑名字就红）＋接线两枚各加 1（记 label 的那只替身）。**先红后绿一枚**＝第一跑 **85/87**：既有用例的记录器替身 `lambda trigger="manual"` 不认新 kwarg ⇒ TypeError 被 `except` 吞成 `reason=error`、`calls` 读成 `[]`＝**看不出是谁不认账**；修法＝替身收 `**kw` 且记下 label（那枚 `**kw` 从此是判据的一部分）⇒ **89/89**。⚠️ 自纠一枚＝先写的 `reason == "stale-30h"` 是假红（`int(29.99h)`＝29）⇒ 换 `startswith("stale-")`。
+> - **按"改了谁就跑谁"跑三枚**（直跑取码）＝`test_backup_db` **89/89**·`test_cr9_45_health_async` **22/22**·`test_leg_staleness` **39/39**，`exit=0`（回执 `exitcode-*.out`）；闸1 `--skip ds` 全绿 **7s**＝tsc 0｜① **458/458**｜NEW=0／KNOWN 0/13｜断链 0，抬头 `dev deed383 dirty=4`（回执 `gate1-nods-1021-2332.out`）。**没跑**＝② 那 26 套（含一条无条件真报价）；覆盖它的只有 `test_backup_db`＝已单独跑。
+> - **装载态＝没装载（明写）**：新码不进正在跑的那棵（ds 17:44 起、D1 定档重启归主人）⇒ 明早 03:30 那轮的 `state.json` **仍无 `label` 键**＝预期；第一枚现场读数＝下次重启之后那一轮（判据＝`label` 是不是 `startup`）。
+> - **体量**＝本节写完顶穿 FILE 阈（120,427＞120,000；写前余 2,466）⇒ 按"先压自己写的字"摘回阈内；**下一轮往本文件写话前必须先有一句「搬」**（候选＝追加九十四～九十七那几节）。
 
 #### 追加一百零二 · 10-21 22:1x–23:0x（**方案轮＋批准轮＝四枚等字排完序、「排」落地、两枚仪器自纠、「搬」已做；docs 那笔零生产码⇒不占号，下一枚仍＝CR10-4**）
 

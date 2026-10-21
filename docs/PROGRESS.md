@@ -25,7 +25,7 @@
 
 > **验证基线**：现值只读 [FIX-LEDGER.md](FIX-LEDGER.md)「验证门槛（权威现值）」。
 
-> **当前阶段**：P0–P7 全部完成；**CR1–CR9 审查期已收尾＝CR9 于 10-19 12:3x 账面关闭**；**CR10 已于 10-21 起轮、当天三枚**（读时 verdict／us 超时断言／注释 stale 换准）⇒ 下一枚 **CR10-4**＝本轮「改」那笔（备份腿 `label` 落盘）；**push 判据现跑** `git rev-list --count origin/dev..HEAD`；**「排」已落地**＝02:45 一次性回执 cron（盘上优先）⇒ **明早判据五条**（第⑤＝`limiter-state.json` 有没有 `2026-10-22` 那格＋mtime 前移）；⚠️ **`limitersDurable`／`limitersWindow` 是"盘上＋未落盘增量"的合并投影**（`limiter.py:357`／`:426`）⇒「两本同值＝零出网」作废、独立证据只剩盘上文件；未立案等字＝跑／挪。逐项待办与计数只看 [FIX-LEDGER.md](FIX-LEDGER.md) 的未闭环看板与状态卡。
+> **当前阶段**：P0–P7 全部完成；**CR1–CR9 审查期已收尾＝CR9 于 10-19 12:3x 账面关闭**；**CR10 已于 10-21 起轮、当天四枚**（读时 verdict／us 超时断言／注释 stale 换准／备份腿 `label` 落盘＝**已落码、未装载**）⇒ 下一枚 **CR10-5**；push 判据现跑；**「排」已落地**＝02:45 一次性回执 cron（盘上优先）⇒ **明早判据五条**（第⑤＝`limiter-state.json` 有没有 `2026-10-22` 那格＋mtime 前移）；⚠️ **`limitersDurable`／`limitersWindow` 是"盘上＋未落盘增量"的合并投影**（`limiter.py:357`／`:426`）⇒「两本同值＝零出网」作废、独立证据只剩盘上文件；未立案等字＝跑／挪。逐项待办与计数只看 [FIX-LEDGER.md](FIX-LEDGER.md) 的未闭环看板与状态卡。
 
 ## 阻塞与问题
 
