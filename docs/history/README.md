@@ -91,6 +91,7 @@ wc -l docs/history/*.md
 | [2026-10-21-门槛区1016明细行六行.md](2026-10-21-门槛区1016明细行六行.md) | FIX-LEDGER.md 的块搬迁（2026-10-21） | 整体搬迁，内容逐字保留 | 见 [../FIX-LEDGER.md](../FIX-LEDGER.md) |
 | [2026-10-21-fix-ledger-当日轮明细1021上半场归档.md](2026-10-21-fix-ledger-当日轮明细1021上半场归档.md) | FIX-LEDGER.md 的块搬迁（2026-10-21） | 整体搬迁，内容逐字保留 | 见 [../FIX-LEDGER.md](../FIX-LEDGER.md) |
 | [2026-10-22-fix-ledger-当日轮明细1021下半场归档.md](2026-10-22-fix-ledger-当日轮明细1021下半场归档.md) | FIX-LEDGER.md「当日轮明细 · 10-21」下半场 L308–L324（17 行／8,298 字符／sha `1d889b0dbe140363`） | 整体搬迁，内容逐字保留；件名与标题日期手工补正（`--move` 未传 `--date`／`--slug` 会回落 `2026-10-11-docs-move`＝`docs-scan.py:765-766`） | 见 [../FIX-LEDGER.md](../FIX-LEDGER.md) |
+| [2026-10-22-code-review-追加96-97归档.md](2026-10-22-code-review-追加96-97归档.md) | CODE-REVIEW.md 的块搬迁（2026-10-22） | 整体搬迁，内容逐字保留 | 见 [../CODE-REVIEW.md](../CODE-REVIEW.md) |
 
 > **「同日续 N」的去处（10-08 重组留下的 19 处旧指针）**：上层文件里凡写「PROGRESS 同日续 N」的句子，其原文现在都在
 > [2026-10-08-progress-进度日志归档.md](2026-10-08-progress-进度日志归档.md)（该文件按「同日续 1…75」分节，编号与旧指针一一对得上，已逐号核对齐 75 段）。
