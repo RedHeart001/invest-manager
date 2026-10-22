@@ -24,10 +24,18 @@ data-service **没有任何 provider 注册 hk** → 对 type=hk 调 /quote、/k
 - 多 host 按序降级
 - 字段映射到与 A 股相同的内部 schema（复用 `to_float`）
 - 失败抛 `ProviderError` → 上层显式降级（R10），不静默返回空
+
+**列表这一支自 CR10-5 起有第二腿**（主人 10-22 的选型字＝「把 PLAN.md 选型字补上」）：东财
+`clist/get` 全部 host 失败／首页为空／映射后 0 行 ⇒ 换新浪 `getHKStockData`（`node=qbgg_hk`），
+按 CR9-31 以 `(items, {"source": "sina-hk-spot", "degraded": True, ...})` 显式声明出网源。
+**它仍不走 akshare 的 `stock_hk_spot`**——那个封装打的确实是新浪域名，但它本体的
+`for page in range(1, 100)` 会把翻页预算交到第三方手里；本文件自己翻、自己停在调用侧预算内
+（见 `HK_SINA_SOFT_BUDGET_S`）。行情/K 线两支撑照旧只有东财一条腿，**降级只发生在列表**。
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 
@@ -62,6 +70,29 @@ HK_MARKET_FILTER = "m:128 t:3,m:128 t:4,m:128 t:1,m:128 t:2"
 HK_LIST_FIELDS = "f12,f14,f2,f3,f4,f5,f6,f15,f16,f17,f18"
 # 单股行情字段（与 akshare_provider.EM_QUOTE_FIELDS 同口径）
 HK_QUOTE_FIELDS = "f43,f44,f45,f46,f47,f48,f57,f58,f60,f116,f117,f162,f164,f167,f168,f169,f170,f86"
+
+# ---------- 港股列表的降级腿（CR10-5，主人 10-22 的选型字＝「把 PLAN.md 选型字补上」） ----------
+# 上游＝新浪 `Market_Center.getHKStockData`（`node=qbgg_hk`）。10-21 23:5x 探针实测（3 发）：
+# HTTP 200·**每页硬顶 60 行**（`num=100` 与 `num=1000` 返回字节数逐字相同 ⇒ 服务端无视 `num`）·
+# `page=2` 能翻（00073–00139，与 page=1 不同批）⇒ 全量 ≈4,700÷60 ≈ **79 页**。
+# 响应里**没有 total 字段**，4,700 是东财那一侧的读数（外推），所以下面那枚上限按"页"而不是按"条"定。
+HK_SINA_LIST_URL = (
+    "https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHKStockData"
+)
+HK_SINA_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+    "Referer": "https://finance.sina.com.cn/stock/hkstock/",  # 缺 Referer 那一形按新浪惯例易被拒
+}
+HK_SINA_PAGE_ROWS = 60  # 服务端上限；写大无用（实测无视 num），只是别让请求里出现假承诺
+HK_SINA_PAGE_CEILING = 90  # ≈4,700÷60 的算术上限＋余量；D3／CR7-13 同形：不许无上限捶源
+HK_SINA_PAGE_INTERVAL_S = 0.5  # 页间自睡（`sina-us-category-list` 同形；整趟只 1 枚逻辑令牌）
+# **调用侧预算**：web `lib/sync.ts:283` 打 `/products` 是 `timeout: 120_000`，MCP 那侧
+# `MCP_LIST_TIMEOUT_S` 默认也是 120s。探针实测新浪单页 ≈1.3s ⇒ 79 页 ≈ 142s **本来就超预算**：
+# 真按全量跑＝钱花完而调用方先掐断＝"花了钱、没落库"那一形（10-19 为 `/products` 付过一次学费）。
+# 所以这里做成**预算内主动停**：到 soft budget 就把已拿到的行交回去并如实声明覆盖面，
+# 看门狗只是兜底（必须 < 120s，否则先红的是客户端不是本函数）。要全量得先抬那两枚调用侧预算。
+HK_SINA_SOFT_BUDGET_S = 85.0
+HK_SINA_WHOLE_TIMEOUT_S = 110.0
 
 
 class HkProvider(BaseProvider):
@@ -256,15 +287,28 @@ class HkProvider(BaseProvider):
 
     # ---------- 产品列表（慢路径：分页；**仅供每日同步**） ----------
 
-    def list_products(self, type_: str) -> list[dict]:
-        """全量港股列表。
+    def list_products(self, type_: str) -> list[dict] | tuple[list[dict], dict]:
+        """全量港股列表：东财 `clist/get` 为主源，**只在它整条不可用之后**降级到新浪。
 
         **性能警示**：东财港股 `clist/get` 服务端忽略大分页参数，固定 100 条/页，
         港股约 4700 只 → 约 48 次请求（受源族限速，实测约 4 分钟）。
         故本方法**只应在每日同步任务中调用**，不得用于行情路径。
+
+        降级那一支（CR10-5）＝返回 `(items, meta)` 按 CR9-31 显式声明出网源；主源成功时
+        **仍返回裸 `list[dict]`**（`test_g6_hk` 那三枚断言钉的就是这个形状，不改既有取舍）。
         """
         if type_ != "hk":
             raise ProviderError(f"unsupported list type: {type_}")
+        try:
+            return self._list_products_em()
+        except ProviderError as em_err:
+            # 只在这一枚出口上换源：`_em_json` 的"全部 host 失败"与"首页 diff 为空"都归到这里，
+            # 两条都是"东财这一夜答不出"，不是"港股没有 4700 只"。
+            log.warning("hk list primary (em clist) failed: %s ⇒ 降级至新浪全量列表", em_err)
+            return self._list_products_sina(f"{type(em_err).__name__}: {em_err}")
+
+    def _list_products_em(self) -> list[dict]:
+        """东财主源那一支（原 `list_products` 本体，一字未改语义）。"""
         from .akshare_provider import _pinyin_pair
 
         base_params = {
@@ -324,7 +368,116 @@ class HkProvider(BaseProvider):
                     "tags": [],
                 }
             )
+        if not products:
+            # 有行但一行都映射不出来＝上游换了字段名，与"整条不可用"同判：交给下一支，
+            # 不许静默回 []（那会把"没到货"读成"港股到货 0 只"）。
+            raise ProviderError(f"hk list parsed to 0 rows from {len(diff)} em rows")
         return products
+
+    # ---------- 列表降级腿：新浪 `getHKStockData`（CR10-5） ----------
+
+    def _sina_hk_page(self, page: int) -> list[dict]:
+        """一发新浪港股列表页。**只在 `_ak_request` 的族闸与看门狗之内**被调用。"""
+        r = requests.get(
+            HK_SINA_LIST_URL,
+            params={
+                "page": str(page),
+                "num": str(HK_SINA_PAGE_ROWS),
+                "sort": "symbol",
+                "asc": "1",
+                "node": "qbgg_hk",
+                "_s_r_a": "init",
+            },
+            headers=HK_SINA_HEADERS,
+            timeout=REQUEST_TIMEOUT,
+        )
+        r.raise_for_status()
+        rows = json.loads(r.text)  # 探针实测：顶层就是数组，不套 data/result/list
+        return rows if isinstance(rows, list) else []
+
+    def _list_products_sina(self, em_reason: str) -> tuple[list[dict], dict]:
+        """东财答不出时的第二腿。整趟翻页包在**一枚** `_ak_request` 里＝
+        `sina-us-category-list` 同形（CR9-97 口径：令牌按逻辑请求计 1 次，页间自己睡）⇒
+        **`granted` 只 +1，不等于只发了 1 发 HTTP**（页码数见返回的 note）。
+        记账仍打 `akshare-obs` 族（`observe("sina.hk-list")`），**不占东财桶**。
+        """
+        from .akshare_provider import _ak_request, _pinyin_pair
+
+        collected: dict[str, str] = {}
+        t0 = time.monotonic()
+
+        def _sweep() -> tuple[str, int]:
+            """翻页，返回（停止原因, 实际页数）。"""
+            stalled = 0
+            for page in range(1, HK_SINA_PAGE_CEILING + 1):
+                rows = self._sina_hk_page(page)
+                if not rows:
+                    return "exhausted", page
+                before = len(collected)
+                for item in rows:
+                    if not isinstance(item, dict):
+                        continue
+                    code = str(item.get("symbol", "")).strip()
+                    name = str(item.get("name", "")).strip()
+                    if code and name:
+                        collected.setdefault(code, name)
+                if len(collected) == before:
+                    # 拿回一批行却一个新代码都没有＝它在重复同一页；再睡再打就是白花钱
+                    stalled += 1
+                    if stalled >= 2:
+                        return "stalled", page
+                else:
+                    stalled = 0
+                if time.monotonic() - t0 >= HK_SINA_SOFT_BUDGET_S:
+                    return "budget", page  # **主动停在调用侧 120s 预算之内**，别让客户端掐掉
+                time.sleep(HK_SINA_PAGE_INTERVAL_S)
+            return "ceiling", HK_SINA_PAGE_CEILING
+
+        try:
+            stop, pages = _ak_request(_sweep, HK_SINA_WHOLE_TIMEOUT_S, "sina.hk-list")
+        except Exception as sina_err:  # noqa: BLE001 两支都失败＝显式降级，不静默返回空
+            raise ProviderError(
+                f"hk list unavailable from both sources: eastmoney（{em_reason}）；"
+                f"sina（{type(sina_err).__name__}: {sina_err}）"
+            ) from sina_err
+
+        products: list[dict] = []
+        for code, name in collected.items():
+            full, initials = _pinyin_pair(name)
+            products.append(
+                {
+                    "type": "hk",
+                    "code": code,
+                    "name": name,
+                    "pinyin": full,
+                    "pinyinInitials": initials,
+                    "exchange": "HK",
+                    "tags": [],
+                }
+            )
+        if not products:
+            raise ProviderError(
+                f"hk list empty from both sources: eastmoney（{em_reason}）；"
+                f"sina 翻页 {pages} 页后停止（{stop}）、0 行"
+            )
+        elapsed = round(time.monotonic() - t0, 1)
+        complete = stop == "exhausted"
+        log.info("hk list degraded to sina: %d rows, %d pages, stop=%s, %.1fs", len(products), pages, stop, elapsed)
+        return products, {
+            "source": "sina-hk-spot",
+            "degraded": True,
+            # #35／CR9-63 那两件事分开：`degraded`＝"这批不是东财那批"，`intentionalSubset`＝
+            # "缺口是我们自己的预算造成的、不是上游又劣化了一档"⇒ web 的降级缩水闸据此放行。
+            # 翻页取尽（`exhausted`）时**不许**声明子集。
+            "intentionalSubset": not complete,
+            "note": (
+                f"东财港股列表不可用（{em_reason}），已降级至新浪 getHKStockData（node=qbgg_hk）："
+                f"本次 {len(products)} 只、翻页 {pages} 页后{'取尽' if complete else f'主动停（{stop}）'}、"
+                f"耗时 {elapsed}s（每页硬顶 {HK_SINA_PAGE_ROWS} 行——服务端无视 `num`；soft budget "
+                f"{HK_SINA_SOFT_BUDGET_S}s ⇔ 调用侧 120s）；新浪的名称列是短名（实测 00001＝「长和」）、"
+                "与东财 `f14` 不同形 ⇒ 换源那夜会有整批名字被改写；响应里没有 total ⇒ 覆盖面无法与上游盘子对账"
+            ),
+        }
 
 
 def _register() -> None:
