@@ -834,35 +834,7 @@ eastmoney_quote_ctl    ok= 0/10 gap=6s  ERR=['ConnectionError'] x10
 - **测**＝docs 三闸＝报警 **0**／断链 **0**／表格 **42 表·447 数据行·错位 0**（新增那一枚表＝本节这张六行表；⚠️ 节名计数 **10→9**＝搬走那六行里带着一枚节名指路，断链仍 0＝不是新缺陷，是从活跃档搬进了归档件）；`node scripts/gate.mjs --skip ds`（＝零出网那半）全绿 **6s**＝tsc 0｜① **458/458·49 文件**（分母不动＝本轮零新断言）｜NEW=0／KNOWN 0/13｜selftest PASS｜断链 0，抬头＝`dev 8dfdb1a dirty=8`＝回执 `data-service/gate1-nods-1021-2059.out`＋运行器自写 `data-service/runtime/gate1-1102-1021-2059.out`（这份自写「跳过了 1 步＝不等于全量」）。**本轮没跑全序那一把**＝零生产码⇒② 那 26 套分一枚都没变，跑它＝为拿好看的数字二次买 p6 那条真报价。**三枚新仪器**（全 gitignored）＝`data-service/backup-hourly-1021.out`（hourly 那行原文＋`backups/` 全列＋`/health` 与两本账）／`data-service/prebaseline-1021-2034.out`（明早 02:00 的对照基线）／`data-service/move-dry-1021-2037.out`·`move-go-1021-2038.out`·`verify-move-1021.out`（搬的干跑／写盘／无损证明）。
 - **没动**＝`DS_RESPONSE_FILES` 那五枚构造面·任何 `.env`·基线登记·`#83` 空号·已入库 commit（`8dfdb1a` 不 amend）·门槛③④ 与 `window_contract.py --live --write`（无「跑」字）·hk 那 48 页·**服务进程**（17:35／17:44 那两棵没换＝20:44 那一枪与明早那轮都靠它们在场）·屏上任何字面·观察项② 那 18 枚 `runtime/` 仪器·`Watchlist` 与 E 桶十枚·三枚等字的项（排／跑／挪）。那两枚 `??` 服务日志按主人的「甲」继续不动（`.err` 里现在多了一行 hourly 取证原文＝退出前删不掉，副本已在 `.out`）。
 
-#### 追加九十九 · 10-21 19:3x–19:5x（**注释面 stale 轮＝码面 16 枚现查清单；CR10-3＝非构造面 13 枚换准、3 枚走甲**）
-
-- **需求（逐字）**＝「检查一下，现在还有哪些需要改动的，列出来并推荐处理方案」＋四答＝「闸2走甲，全量改动，先搬后写，暂不push」。＝先盘点题接方案题：逐枚给证据＋三档（必须／值得／不必），他挑档，本轮才动盘。
-- **结果＝16 枚的形状**＝**死行号锚 11 枚**（注释引 `file:line`，被引那一行早已是别的函数）＋**数字与常量不同源 5 枚**（注释里的数与常量现值不等）。本轮**换准 13 枚**（非构造面）、**走甲 3 枚**（`main.py`／`tencent_provider.py`／`akshare_provider.py`＝住在闸2 构造面清单里）。**统一改法＝行号换符号**＝注释只说「哪个函数／哪个常量」，不再引行号 ⇒ 这一族腐坏从此不再发生（CR9-118 净零行纪律第三次执行）。
-
-| 载体 | 那句说什么 | 现查真身 | 处置 |
-|---|---|---|---|
-| `web/lib/data-service.ts:10` | 「多 host 两轮 × 每发 15s」引 `akshare_provider.py:303-309` | `:303`＝`def _pinyin_pair`；遍历 `EM_HOSTS` 的 for 在 `:328`，单发超时＝`REQUEST_TIMEOUT`（`:71`＝15） | ✅ CR10-3 改引符号 |
-| `web/app/api/quote/route.ts:30` | 同一枚 `:303-309` 锚 | 同上 | ✅ CR10-3 改引符号 |
-| `web/lib/data-service.ts:13` | 「让**三处**调用点不再各写一个数」 | 同文件 `:7` 自记第三处（`/api/quote/verify`）随 CR9-115 删 ⇒ 消费点只有 `route.ts:35` 与 `page.tsx:84` | ✅ CR10-3 换「两个消费点」 |
-| `web/lib/events.ts:34` | 「`akshare_provider.py:761` 的 `PERIODIC_KEYWORDS`」 | `:761` 是 `if 季度 not in df.columns`；定义在 `:788`（同锚也住在 PLAN 那张表那行） | ✅ CR10-3 改引符号＋PLAN 只增一行现值位 |
-| `data-service/app/providers/__init__.py:38` | 「`base.py:66` 只查 `_QUOTE_REGISTRY`」 | `:66`＝`def register_list`；`get_provider` 在 `:78`、查表在 `:79` | ✅ CR10-3 改引 `get_provider` |
-| `data-service/app/providers/__init__.py:43` | 「`hk_provider.py:326-327` 用的是 register＋register_list」 | `:330`＝`def _register()`、注册两行在 `:332-333` | ✅ CR10-3 改引 `_register()` |
-| `web/lib/ds-contract.ts:219` | 「`why` 的 ≥20 字符下限＝`ds-contract.test.ts:231`」 | `:231` 只是一个 `}),`；两条断言在 `:200`（`NO_LIVE_PROBE`）与 `:240`（`UNVERIFIED_ROWS`） | ✅ CR10-3 改引 `why.trim().length` |
-| `web/app/components/PageBack.tsx:18` | 「`q`／`type` 住在 `search-client.tsx:188`」 | `:188`＝`if (!res.ok) throw`；写 URL 的是 `:194` 那条 `router.replace` | ✅ CR10-3 改引符号（CR8-6 那一格的锚） |
-| `web/lib/provenance.ts:82` | 同一枚 `:188` | 同上 `:194` | ✅ CR10-3 改引符号 |
-| `web/app/api/market/refresh/route.test.ts:6` | 「`route.ts:56/:60/:61/:67` 那四个调用点」 | 真身＝`:59` `startRefreshProgress`·`:63` `onResult: recordRefreshResult`·`:64` 与 `:70` 两枚 `finishRefreshProgress` | ✅ CR10-3 改引符号（顺带避开斜杠形） |
-| `web/lib/market-snapshot.ts:63` | 「`/api/market/refresh` 的 maxDuration 从 800 抬到 **1500** 的依据（CR9-20）」 | `route.ts:30` 现值 **2400**（`:21-24` 已写明 10-02 刀 3/甲-1 之后按新实测抬上去） | ✅ CR10-3 改成「CR9-20 那次的依据；现值＝2400」 |
-| `data-service/tests/test_p2_m8.py:214` | 用例名「BFF 预算 **15s**，#63 那条倒挂同形」 | `QUOTE_TIMEOUT_MS = 30_000`（`data-service.ts:15`）＝CR9-122 那轮只改了 ds 侧注释、测试名这串没跟着走 | ✅ CR10-3 换 30s＋符号 |
-| `web/lib/ds-contract.ts:198` | 「构造面是「四枚文件里最新的那次提交」」 | `DS_RESPONSE_FILES` 现值＝**五枚**（`:187-193`）＝`main.py`／`chain.py`／`akshare_provider.py`／`tencent_provider.py`／`realtime.py` | ✅ CR10-3 改成「那五枚」＝#77 那条规程的输入不再少算一枚 |
-| `data-service/app/main.py:102` | 「入库回调带 token 这件事代码侧早就有了（`hotspot/pipeline.py:652`）」 | token 在 `:1058-1059`；`:652`＝LLM 预算耗尽走关键词回退 | 🟡 **走甲**＝构造面五枚之一，等 `window_contract --live --write` 同窗 |
-| `data-service/app/providers/tencent_provider.py:35` | 「同一交易日比较恒假（`tests/test_p0.py:91` 实测）」 | `:91`＝「kline 每根 OHLC 合理」；那条交叉验证在 `:123` | 🟡 **走甲**（同上） |
-| `data-service/app/providers/akshare_provider.py:221` | 「整条列表的看门狗预算（夹到上限 **50 页**时够用）」 | 50×(20s＋0.5s)＝1025s ≫ 150s ⇒ `int(150//20.5)`＝**7 页**＝**CR10-2 今天钉住的那枚数** | 🟡 **走甲**（同上）⇒ 这句与刚提交的测试面对面矛盾，已写进「本轮不做」 |
-
-- **自纠（我的账错一枚）**＝10-21 17:5x 那轮我把「#94 那半刀」列进还欠的一枚 ⇒ 现查＝`akshare_provider.py:82-83` 已写明 30s＝**CR9-122 于 10-19 已闭**（权威＝FIX-LEDGER 待拍板第 94 项末那枚 ✅ 行；我抄的是「本轮不做」里 10-18 那句「摘出本批」的当时读数）⇒ 已在「本轮不做」只增现值位，原句不回改。**同轮否掉子代理一枚读数**＝它主张 `providers/chain.py:67` 那枚旧锚也要连带动手＝那条属 **#83 空号**那一族（10-18 定档不占），本轮没碰；另它把 `verifyVerdict` 说成「仍有调用方」是对的（ds 侧 `providers/chain.py:122`／`realtime.py:465`＋web 侧 `lib/realtime.ts:46`／`RealtimeStrip.tsx:104`／契约 `ds-contract.ts:81`），账上那句「零调用方」只对**已删的 BFF 路由**成立，本行按现查记清。
-- **仪器读数（本轮自己的判据，供以后复算）**＝净零行＝`git diff --numstat` 九枚码面文件增＝删·共 13 行；构造面零碰＝`git diff --name-only` 不含那五枚；闸2 现值未动＝`KNOWN_STALE_SNAPSHOTS`／`UNCAPTURED_ENDPOINTS` 两表键数各 **0**·`NO_LIVE_PROBE` 3·分母 10·快照十条 `capturedAt` 全＝2026-10-19；闸1 全绿 60s 抬头 `dev da583d3 dirty=15`；`legStaleness` 现场第二枚＝同步腿仍 `stale-2d`⇔热点腿 `fresh`；durable 今天那格由 17:4x 的 `3/1` 变 **`3/9`** 与进程内对齐＝10-20 那条机器知识的正证；库里 total 35,416 与 `max(snapshotAt)` 10-19 10:44 不变（同步腿仍欠两夜，明早 02:00 那一支自带答案）。
-- **体量现值（写在本节，不写进被测量的三格）**＝搬＝`当日轮明细 · 10-19` 下半场六行（11 行／5,958 字符／sha `fecf6a3e5f31e4e3`）＋一枚指针＋`history/README.md` 索引行 ⇒ FIX-LEDGER 119,800→**114,159**（余 5,841·行数 405→395）→**本轮写完＝117,632（余 2,368·行数 403·max_line 1,486）**；CODE-REVIEW 99,720→**104,882**（本行自身再＋百来字，下一轮请现跑那把尺＝`python scripts/docs-scan.py`）；PLAN 48,465→**48,687**·PROGRESS 4,149→**4,174**·README 17,354→**17,838**（新行 484／阈 500）。三闸复跑＝报警 **0**／断链 **0**／表格 **41 表·439 数据行·错位 0**。**下一轮往 FIX-LEDGER 写话前仍要先有一句「搬」**（余 2,368；候选＝「本轮不做」那节里 10-18 已闭的那几枚巨行）。
-- **测**＝`node scripts/gate.mjs`（默认全序＝含 ②）一把全绿 **60s**＝tsc 0｜① 458/458·49 文件｜② 26 套 1030/1030｜NEW=0／KNOWN 0/13｜selftest PASS｜断链 0，回执 `data-service/gate1-full-1021-193x.out`＋`data-service/runtime/gate1-1100-1021-1940.out`＝两枚为止；docs 三闸写完复跑。**⚠️ 这把不是零出网**＝② 的 `test_p6_mcp` 带一条无条件真报价、且把 `LIMITER_STATE_FILE` 指进 tempfile＝三本账读不到＝账外账。**没动**＝`main.py`／`chain.py`／`akshare_provider.py`／`tencent_provider.py`／`realtime.py` 五枚一枚没碰·屏上任何字面·`.env`／基线登记／`#83` 空号·已入库 commit（`da583d3` 不 amend）·门槛③④ 与 `window_contract --live --write`（无「跑」字）·hk 那 48 页·`Watchlist` 与 E 桶十枚·观察项② 那 18 枚 `runtime/` 仪器·push（等字）。
-
+> **【已搬归档】** 追加九十九 · 10-21 19:3x–19:5x（**注释面 stale 轮＝码面 16 枚现查清单；CR10-3＝非构造面 13 枚换准、3 枚走甲**） —— 正文见 [2026-10-22-code-review-追加99归档.md](history/2026-10-22-code-review-追加99归档.md)（体量治理：整块搬迁，原地只留指针）。
 #### 追加九十八 · 10-21 17:0x–17:5x（**全面梳理轮＝盘点题＋第三次整夜丢腿＋观察项①落成机制＝CR10-1＋CR10-2**；本轮有生产码 ⇒ **CR10 起轮**）
 
 - **需求（逐字）**＝「先启动web和ds，然后完整扫描读取理解一遍项目代码，再结合docs目录下项目文档，结合现在项目完成情况，全面梳理一遍项目代码，看还有哪些点没做」＋批准那份计划；岔口三答＝先 web 后 ds（真补跑）｜范围含 CR10-1｜防睡起一枚到 10-22 09:40。
