@@ -37,10 +37,29 @@ import sys
 import tempfile
 
 MAX_FILE_CHARS = 120000
-MAX_LINE_CHARS = 1500
+MAX_LINE_CHARS = 1000  # 10-22 从 1500 降下来：1500 时 FIX-LEDGER 只有 1 条命中（且卡在 1488 刚好阈下），
+                       # 而实测它有 18 行 >1200、31 行 >1000 —— 1500 这把尺量不到真正读不动的行。
+                       # 降到 1000 后 CODE-REVIEW（852 行、零巨行）一行都不会被误伤，定位是准的。
 MAX_SECTION_CHARS = 30000
 MAX_SPEED_CHARS = 500
 MAX_TITLE_CHARS = 500
+
+# 单文件字符阈的**按角色覆盖**（10-22 加）。
+# 为什么不再用同一个数：FIX-LEDGER 是只增的账本，逼它搬是有效的；CODE-REVIEW 是"一轮一节"的
+# 发现记录（852 行 / 零巨行 / 结构健康），同样 114k 却读得动 —— 对它用同一个阈，只会逼着把
+# 结构完好的整节拆出去，反而破坏"一轮一节"的阅读连续性。⇒ 记录类给 150k，账本类维持 120k。
+FILE_CHAR_OVERRIDES = {
+    "docs/CODE-REVIEW.md": 150000,
+}
+
+
+def file_char_limit(path):
+    """该文件的单文件字符阈：先查按角色覆盖，再回落全局默认。"""
+    rel = path.replace(os.sep, "/")
+    for key, limit in FILE_CHAR_OVERRIDES.items():
+        if rel.endswith(key):
+            return limit
+    return MAX_FILE_CHARS
 
 SPEED_TITLES = ("状态卡", "当前状态", "速览", "状态总览")
 BASELINE_PATH = os.path.join("scripts", "docs-scan-baseline.json")
@@ -235,10 +254,11 @@ def collect_alarms(root, rows, ts):
     for r in rows:
         rel = relpath(root, r["path"])
         lines = lines_of(read(r["path"]))
-        if r["chars"] > MAX_FILE_CHARS:
+        if r["chars"] > file_char_limit(r["path"]):
+            limit = file_char_limit(r["path"])
             d, need = _disease_for("FILE", None)
             alarms.append({"ruler": "FILE", "file": rel, "line": None, "anchor": rel,
-                           "detail": "chars=%d > %d" % (r["chars"], MAX_FILE_CHARS),
+                           "detail": "chars=%d > %d" % (r["chars"], limit),
                            "disease": d, "need": need})
         for kind, ln, title, chars, end in r["sec_hits"]:
             d, need = _disease_for("SECTION", kind)

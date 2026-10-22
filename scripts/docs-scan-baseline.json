@@ -2,68 +2,18 @@
  "keys": [
   [
    "docs/FIX-LEDGER.md",
-   "FILE",
-   "docs/FIX-LEDGER.md"
+   "LINE",
+   "| **CR9-26** | `Product` 里 **hk 0 行 / crypto 0 行 / us 仅 1 行*"
   ],
   [
    "docs/FIX-LEDGER.md",
    "LINE",
-   "> ① **web 单测**：`npx tsc --noEmit` 0 错 + `npx vitest run` **3"
+   "| **CR9-41** | `Product` crypto 0 行的根因不是\"外网不通\"，而是 **ds 的 `NO"
   ],
   [
    "docs/FIX-LEDGER.md",
    "LINE",
-   "> ② **ds 离线 20 套件 = 638 项**（**10-05 16:1x CR9-63 把 `cr9_59_u"
-  ],
-  [
-   "docs/FIX-LEDGER.md",
-   "LINE",
-   "> ③ **ds 实网 2 套件**（需 uvicorn 在跑且外部源可用；失败必须先分\"外部源态\"与\"代码回归\"）：`"
-  ],
-  [
-   "docs/FIX-LEDGER.md",
-   "LINE",
-   "> ④ **集成 7 套件**：`node web/scripts/verify-all.mjs`，并按 CR9-25 "
-  ],
-  [
-   "docs/FIX-LEDGER.md",
-   "LINE",
-   "> ⑤ **改后探针（CR9-24 拍板 (b)，2026-09-26）**：dev 侧 uvicorn **不加 `-"
-  ],
-  [
-   "docs/FIX-LEDGER.md",
-   "LINE",
-   "| **CR9-3** | 东财令牌按 akshare 函数计次，1 次 acquire ≈ 10–20 个 HTTP "
-  ],
-  [
-   "docs/FIX-LEDGER.md",
-   "LINE",
-   "| **G7（CR6 遗留）** | 写接口完整身份鉴权 | — | 🟡 **token 链路代码侧已完工、欠配置**（"
-  ],
-  [
-   "docs/FIX-LEDGER.md",
-   "LINE",
-   "| **OPT-2** | **新闻层多源合并（fusion）**：把 `fetch_news` 从\"任一源成功即返回\""
-  ],
-  [
-   "docs/FIX-LEDGER.md",
-   "LINE",
-   "| **OPT-3** | **多源实时行情聚合器**（详情页「当日实时行情条」的取数侧）：ds 链之上的独立只读端点，"
-  ],
-  [
-   "docs/FIX-LEDGER.md",
-   "LINE",
-   "| **八（10-01 全量测试轮的修复顺序）** ✅ **刀 1 已落地（17:1x–17:4x，主人\"按推荐顺序推进"
-  ],
-  [
-   "docs/FIX-LEDGER.md",
-   "SECTION",
-   "验证门槛（权威现值）"
-  ],
-  [
-   "docs/PROGRESS.md",
-   "SPEED",
-   "| P1 | 产品主数据 + 智能搜索（M2） | ✅ 完成 | 2026-09-11 | **35,177 条产品已同"
+   "| **OPT-4** | **门禁自动化：闸1「收尾一键」＋闸2「跨服务契约快照」**——闸1＝一条命令跑完四道零出网"
   ]
  ]
 }
