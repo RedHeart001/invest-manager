@@ -28,6 +28,7 @@
 | **C9** | **浏览器只与 web 通信**：禁止前端直连 data-service（P7 容器化后 data-service 不发布端口）；经 `POST /api/hotspots/run` 等 BFF 代理 | 各 `web/app/api/**/route.ts` |
 | **C10** | **ingest 结果必须可观测**：research 落库回调失败写回任务状态（`ingestOk`/`ingestNote`），禁止"任务显示成功但研报未落库" | `data-service/app/research/tasks.py:156-166`（**写回侧在此，非 web 侧**——2026-09-24 核对：`ingestOk`/`ingestNote` 在 `web/` 零命中）；消费侧读 `web/lib/research.ts` 的 `ok`/`note` 字段 |
 | **C11** | **K 线增量缓存防重复回源**：头部缺口回源失败同样进入失败窗口（`RECHECK_MS` = 30 分钟，`kline.ts:47`）；并发写入的重复行现由 **`INSERT OR IGNORE`** 吸收（`:184`，注释在 `:158` 明写"无需 catch P2002"）——**机制已换，不再是"P2002 按已写入处理"**；P2002 判定现仅存在于 `web/lib/hotspots.ts:44,219`（热点去重路径） | `web/lib/kline.ts:47,157-185,262` |
+| **C11 现值更正（10-22 14:5x，只增这一行；上面那格的三个行号原样不回改）** | 那三个锚点已随代码漂移：`RECHECK_MS` 的声明现值在 **`kline.ts:55`**、`INSERT OR IGNORE` 的写库处现值在 **`:217`**（"无需 catch P2002"那句注释同段）⇒ 约束正文一字不改，只把**锚点换准**；判别力零变化（本条约束的行为断言在 `web/lib/kline*.test.ts`，不靠行号） | `web/lib/kline.ts:55,217` |
 | **C12** | **快照刷新失败必须显式**：整批无可用报价计入 `failedBatches`，禁止"0 更新 0 失败"伪装成功 | `web/lib/market-snapshot.ts` |
 | **C13** | **界面细节**：热点时间用北京时间（Intl timeZone）；SSE updater 内禁止副作用；ECharts 卸载必须 dispose；搜索 loading 收尾须确认请求未过期；browse 模式 sort/page 从 URL 还原；详情页五路取数并行 | 各前端页面 |
 | **C14** | **安全基线**：外部抓取链接仅放行 `http(s)`；`/api/health` 不回显异常细节；`/api/tools/status` 不回显服务端路径且探测结果缓存 30s；MCP 工具名截断时附加哈希防碰撞 | `web/lib/*`、`web/app/api/health` |
@@ -171,6 +172,8 @@
 | 港股 列表 | 东财 `clist/get`（多 host 降级） | **确认无可用备源**（腾讯无全量港股列表接口）→ 显式降级：已有数据保留（C1 空载荷保护 + 降级缩水保护）+ 同步显式报错（R10 语义） |
 
 > ⚠️ **现值更正（10-22 落 CR10-5，只增这一段；上面那行原句一字不回改＝它是 09-20 那次"腾讯被否掉"的实测陈述，那句到今天仍然成立）**＝"确认无可用备源"这半句在本行**只对"腾讯那一家"成立**，不是"这一格永远填不了"：新浪 `Market_Center.getHKStockData`（`node=qbgg_hk`）10-21 23:5x 探针实测可达（HTTP 200·每页 60 行·`page=2` 能翻），10-22 由主人的选型字（「把 PLAN.md 选型字补上」）落成**港股列表的第二腿**＝`hk_provider._list_products_sina`（按 CR9-31 声明 `source=sina-hk-spot`＋`degraded`；两支都失败仍抛 `ProviderError`＝R10 那句"显式降级、不静默返回空"没被削弱）。三条边界要一起读，别把它当成"覆盖面问题解决了"：**(a)** 每页硬顶 60 行 ⇒ 全量 ≈79 页/夜，而**调用侧预算 120s**（`web/lib/sync.ts:283`／`MCP_LIST_TIMEOUT_S`）⇒ 落地形＝预算内主动停＋`intentionalSubset` 声明，取到的是子集；**(b)** 新浪的名称列是**短名**（00001＝「长和」）＝换源那夜整批名字被改写，与 A 股那枚降级腿当年同一形；**(c)** 它记在 `akshare-obs` 族（`min_interval=1.0`／`burst=4`／`rate_per_min=30`／不熔断，`AK_ACQUIRE_TIMEOUT_S=5.0`）⇒ **不占东财桶，但那一夜该族若被别的路径打满，这一腿会拿不到令牌而失败**（离线钻实测到过一次字面 `sina.hk-list rate-limited (akshare family gate)`）＝它是"多一条腿"，不是"必然到货"。
+
+> ⚠️ **现值更正（10-22 14:3x，主人的字＝四答里那句「抬到全量（推荐）」；上面那段的 (a) 原句一字不回改）**＝(a) 里那句「调用侧预算 120s」**指错了对象**，现查三处源码：web 夜间同步打 `/products` 的真实预算是 **600s**（`web/lib/sync.ts` 的 `dsGet("/products", { type }, 600_000)`，全仓 `/products` 只有这一个运行期调用方）；`sync.ts:283` 的 `timeout: 120_000` 是 **Prisma `$transaction`**；`MCP_LIST_TIMEOUT_S` 只作用于 MCP 工具 `list_products`（`mcp_server.py`），ds 的 `/products` HTTP 路由不走它。⇒ 三条边界里的 (a) 换档：`HK_SINA_SOFT_BUDGET_S` **85→300**、`HK_SINA_WHOLE_TIMEOUT_S` **110→420**、`MCP_LIST_TIMEOUT_S` 默认 **120→450**（外层看门狗必须晚于最慢的内层预算，否则 `run_with_timeout` 放弃后线程杀不掉、仍在花额度）⇒ 到货是**全量**而非"预算内子集"；`HK_SINA_PAGE_CEILING=90` 仍是硬顶，三个数都 < BFF 的 600s。**(b)(c) 两条边界不变。**
 
 ---
 

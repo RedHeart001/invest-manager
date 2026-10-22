@@ -42,7 +42,11 @@ MCP_HTTP_HOST = os.environ.get("MCP_HTTP_HOST", "127.0.0.1")
 MCP_HTTP_PORT = int(os.environ.get("MCP_HTTP_PORT", "8765"))
 # D3（CR7-13）：list_products 看门狗阈值——外部 MCP 客户端不应感知"卡死"。
 # 环境变量可覆盖（测试注入短超时用）。
-MCP_LIST_TIMEOUT_S = float(os.environ.get("MCP_LIST_TIMEOUT_S", "120"))
+# 10-22：120 → 450。理由＝它是**外层**看门狗，`run_with_timeout` 放弃之后线程杀不掉、
+# 内层翻页会继续花上游额度（`utils/timeout.py`）⇒ 外层必须晚于最慢的那条内层预算
+# （`hk_provider.HK_SINA_WHOLE_TIMEOUT_S = 420`，10-22 为"港股全量 ≈79 页"抬上去的那枚）。
+# 120s 这个数从来只管 MCP 工具，**不是** ds `/products` HTTP 路由的预算（后者由 BFF 给 600s）。
+MCP_LIST_TIMEOUT_S = float(os.environ.get("MCP_LIST_TIMEOUT_S", "450"))
 
 try:
     from fastmcp import FastMCP

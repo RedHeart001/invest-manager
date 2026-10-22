@@ -218,7 +218,7 @@ US_LIST_DEFAULT_PAGES = 15  # ≈300 只：第 1 页 NVDA/AAPL/GOOGL/GOOG/MSFT/A
 US_LIST_PAGE_CEILING = 50  # 硬上限：防"合法但手滑多打两个 0"的 env 值变成几千次上游请求
 US_LIST_PAGE_INTERVAL_S = 0.5  # 翻页之间的节流（新浪侧无声明，按对上游礼貌的常规间隔）
 US_LIST_REQUEST_TIMEOUT_S = 20.0  # 单页超时（实测 0.19–6.31s，最慢那一档留 3 倍余量）
-US_LIST_WHOLE_TIMEOUT_S = 150.0  # 整条列表的看门狗预算（夹到上限 50 页时够用）
+US_LIST_WHOLE_TIMEOUT_S = 150.0  # 整条列表的看门狗预算（真正先到的是它：50 页 × 最坏 20.5s ≫ 150s ⇒ 有效页数 ≈ int(150//20.5)＝7，见 test_cr9_59_us_list）
 
 
 def _us_list_pages() -> int:

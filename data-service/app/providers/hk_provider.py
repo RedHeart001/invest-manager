@@ -86,13 +86,16 @@ HK_SINA_HEADERS = {
 HK_SINA_PAGE_ROWS = 60  # 服务端上限；写大无用（实测无视 num），只是别让请求里出现假承诺
 HK_SINA_PAGE_CEILING = 90  # ≈4,700÷60 的算术上限＋余量；D3／CR7-13 同形：不许无上限捶源
 HK_SINA_PAGE_INTERVAL_S = 0.5  # 页间自睡（`sina-us-category-list` 同形；整趟只 1 枚逻辑令牌）
-# **调用侧预算**：web `lib/sync.ts:283` 打 `/products` 是 `timeout: 120_000`，MCP 那侧
-# `MCP_LIST_TIMEOUT_S` 默认也是 120s。探针实测新浪单页 ≈1.3s ⇒ 79 页 ≈ 142s **本来就超预算**：
-# 真按全量跑＝钱花完而调用方先掐断＝"花了钱、没落库"那一形（10-19 为 `/products` 付过一次学费）。
-# 所以这里做成**预算内主动停**：到 soft budget 就把已拿到的行交回去并如实声明覆盖面，
-# 看门狗只是兜底（必须 < 120s，否则先红的是客户端不是本函数）。要全量得先抬那两枚调用侧预算。
-HK_SINA_SOFT_BUDGET_S = 85.0
-HK_SINA_WHOLE_TIMEOUT_S = 110.0
+# **调用侧预算（10-22 现查更正）**：web 夜间同步那条路打 `/products` 的真实预算是 **600s**
+# （`web/lib/sync.ts` 里 `dsGet("/products", { type }, 600_000)`；此前账上写成"`sync.ts:283`
+# 的 120s"是指错了对象——那里是 Prisma `$transaction` 的 timeout，不是 HTTP 预算）。
+# 另有两枚 120s 不在这条路上：`MCP_LIST_TIMEOUT_S` 只管 MCP 工具 `list_products`，
+# ds 的 `/products` HTTP 路由不走它；它已随本次一并抬到 450s，避免"外层 120s 先放弃、
+# 内层线程仍在翻页"那一形（`utils/timeout.py` 的 `run_with_timeout` 杀不掉线程）。
+# 探针实测新浪单页 ≈1.3s ⇒ 79 页 ≈ 142–182s：soft budget 300s 足够跑到 `exhausted`，
+# 看门狗 420s 兜底，两者都 < 客户端 600s，也 < MCP 那枚 450s。
+HK_SINA_SOFT_BUDGET_S = 300.0
+HK_SINA_WHOLE_TIMEOUT_S = 420.0
 
 
 class HkProvider(BaseProvider):

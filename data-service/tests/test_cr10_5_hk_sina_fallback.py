@@ -249,7 +249,10 @@ if __name__ == "__main__":
     test_fallback_books_to_akshare_obs_family()
 
     fails = [x for x in results if not x[1]]
-    print(f"\n===== CR10-5 hk 降级腿 {len(results) - len(fails)}/{len(results)} 通过 =====")
+    # 汇总行必须是 `gate.mjs` 认得的两种形态之一（`===== N/M 通过 =====` 或 `== 标题：N/M 通过 ==`）。
+    # 10-22 全量闸1 实测：写成 `===== 标题 N/M 通过 =====` 时两条正则都不匹配 ⇒ 闸判「解析不出」＝红，
+    # 而套件本身 27/27 全绿 ⇒ 假红。这里改成带标题的第二形（标题与数字之间有全角冒号）。
+    print(f"\n== CR10-5 hk 降级腿：{len(results) - len(fails)}/{len(results)} 通过 ==")
     if fails:
         for name, _, detail in fails:
             print(f"  - {name}: {detail[:200]}")

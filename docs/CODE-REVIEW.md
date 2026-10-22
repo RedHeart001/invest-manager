@@ -29,6 +29,8 @@
 | **CR9** | 09-26 | `02f0e95`（被审代码，工作树干净） | 全项目审查（CR7 闭环复核 + 两路并行审计 + 实时接口/DB 探针） | `CR9-1..47`（**09-27 批次七排到 44；09-28 死项清理轮占 45/46/47**） | 开放；**逐批执行中**——发现时点是"23 项全部未处置"，**批次〇–七后的实修/撤回/余项计数只在 [FIX-LEDGER.md](FIX-LEDGER.md) 维护，本行不复述**（09-26 CR9-23 同族教训） |
 | **CR10** | 10-21 | `da583d3`（被审代码；porcelain 只剩两枚未入库服务日志） | 全面梳理轮（三头并行探码＋docs 逐节现查＝盘点题；观察项①落成机制）＋注释面 stale 轮（码面 16 枚现查清单）＋备份腿来源可证轮（`state.json` 的 `label`） | `CR10-1..`（取走 **CR10-1**／**CR10-2**／**CR10-3**／**CR10-4**） | 开放；**已收尾的 CR9 之后起轮**＝主人 10-20 那句「口径挑定＝CR10」落地那天；计数只在 [FIX-LEDGER.md](FIX-LEDGER.md) 状态卡维护，本行不复述 |
 
+> **⚠️ 现值更正（10-22 14:5x，只增这一行；上面两张表里 CR9 那行的「开放；逐批执行中」原句不回改）**＝**CR9 已于 10-19 12:3x 收尾**（主人的字＝批准收口计划第 7 枚＝账面收工）；当前开放轮次是 **CR10**，已取 **CR10-1…CR10-5**（10-22 14:3x 那轮把 CR10-3 余下的三枚注释结清、并把 hk 全量预算抬档），下一枚＝**CR10-6**。实修/撤回/余项的一切计数只认 [FIX-LEDGER.md](FIX-LEDGER.md)。
+
 **为什么 CR6/CR7 会"误名"**：git 用的是连续"第 N 轮"（CR2–CR5），而 09-18 起文档重新从"第一轮"计数，测试文件却延续内部编号 `test_cr6_*.py`，PLAN 又并行维护 C/O/R 系列——四套编号各说各话。
 
 **命名规则（今后固定）**：
@@ -726,6 +728,31 @@ eastmoney_quote_ctl    ok= 0/10 gap=6s  ERR=['ConnectionError'] x10
 - **回执（全在 gitignored 的 `data-service/runtime/`）**＝`pre-10-health-1018-22p.json`／`post-3-health-1018-23p.json`／`vitest-dscontract-1018-23p.out`（落码后 17/17）／`vitest-dscontract-DRILL-E1-1018-23p.out`（摘登记⇒恰 3 枚红）／`vitest-dscontract-1018-23p-post.out`（复原）／`gate-1018-23p.out`＋闸自己的 `gate1-1055-1018-2323.out`／`docscan-1018-23p.out`。docs 面＝`#92`／`#93`／`#94` 三条立案＋门槛区「22:5x–23:2x」一行＋「本轮不做」三行（E1 现值位／#94 摘出本批／restore 撤案）＋编号格**换值**＋PLAN 只增一行现值更正＋README 换档＋任务书前置 **14**。
 
 > **【已搬归档】** 追加九十六 · 10-19 00:1x–00:4x（**实网立刻跑轮＝② 的分母由推导转实测＋闸2 九条过期销账（CR9-123）＋`/products` 点名没采到＝B 支＋转债那两列的方案（零码）**） —— 正文见 [2026-10-22-code-review-追加96-97归档.md](history/2026-10-22-code-review-追加96-97归档.md)（体量治理：整块搬迁，原地只留指针）。
+#### 追加一百零六 · 10-22 14:2x–15:0x（**全量验收与收尾轮＝CR10-3 剩余三枚注释结清＋hk 全量预算抬档＋门槛①②③④ 全部换到实测现值**；主人的字＝「严格按照计划……落实完毕之后重新完整测试一遍，没问题了再更新 docs……最后 add、commit 和 push」；本轮有生产码 ⇒ 占 **CR10-6** 之前的最后一枚，下一枚仍＝**CR10-6**）
+
+> **需求（逐字）**＝「你先把项目的 web 和 ds 起起来，然后对照 docs 目录的需求做一次完整全量测试，看还有哪些点没做完（先不要找新问题），然后思考并推荐处理方案；目标是今天把整个项目做完」→ 四答（AskUserQuestion）＝**hk 全量＝抬到全量（推荐）**／**Watchlist＝不做，留产品判断（推荐）**／**docs 先「搬」＝授权（推荐）**／**全量测试＝全跑（推荐）**。
+>
+> **① 落码（三件，都在起服务之前＝让 `_live_stamp` 读回 `装载=成立`）**
+> - **A7＝CR10-3 最后三枚注释换准**（只动注释、行为零改动）：`data-service/app/main.py:102` 的 `` `hotspot/pipeline.py:652` `` → 改引符号 `emit_ingest` 里 `headers["x-ingest-token"]`（真身 `:1059`）；`data-service/app/providers/tencent_provider.py:35` 的 `` `tests/test_p0.py:91` `` → 改引那条用例名（真身 `:123`）；`data-service/app/providers/akshare_provider.py:221` 那句「夹到上限 50 页时够用」→ 改成「真正先到的是看门狗：50 页 × 最坏 20.5s ≫ 150s ⇒ 有效页数 ≈ `int(150//20.5)`＝7，见 `test_cr9_59_us_list`」（**`US_LIST_WHOLE_TIMEOUT_S = 150.0` 这个值一个字没动**——它是一行真实常量，不是注释）。⇒ **CR10-3 十六枚至此全闭。**
+> - **A8＝hk 全量预算抬档**（`data-service/app/providers/hk_provider.py`）：`HK_SINA_SOFT_BUDGET_S` **85→300**、`HK_SINA_WHOLE_TIMEOUT_S` **110→420**；同批 `data-service/app/mcp_server.py` 的 `MCP_LIST_TIMEOUT_S` 默认 **120→450**。**为什么必须同批抬第三个数**＝它是**外层**看门狗，而 `utils/timeout.py` 的 `run_with_timeout` 放弃之后**线程杀不掉**、内层翻页仍会跑到自己的 420s ⇒ 外层必须晚于最慢的内层预算，否则造出"钱花完而调用方先掐断"那一条老形。
+> - **D 桶＝一枚既有前提的现查更正**：CR10-5 的论证把「调用侧预算 120s」当既成事实，**指错了对象**——web 夜间同步打 `/products` 的真实预算是 **600s**（`web/lib/sync.ts` 的 `dsGet("/products", { type }, 600_000)`，全仓 `/products` 只有这一个运行期调用方）；`sync.ts:283` 那个 `120_000` 是 **Prisma `$transaction`** 的选项；`MCP_LIST_TIMEOUT_S` 只作用于 MCP 工具、ds 的 `/products` HTTP 路由不走它。⇒ `PLAN.md` M3 与 `CONSTRAINTS.md` C-4 各按「只增不改」补一行现值（原句一字不回改）。
+>
+> **② 起服务（零出网，不是说法是读数）**＝复用 10-20 那枚已验证整序运行器的形状（先 web 后 ds、`SYNC_CATCHUP=off`、`PYTHONPATH=.`、不带 `--reload`、不手设 `NO_PROXY`），新落点名 `data-service/runtime/start-both-1022-143x.ps1`／`.out` ⇒ **3000 node PID 12916**／**8000 python PID 13284**（ds StartTime `14:29:34`）。**零出网三证**＝`limiter-state.json` 的 `2026-10-22` 格与 `mtime=08:30:01` **启停前后逐字相同**；进程内 `akshare-obs`／`eastmoney` 两族 `granted=0`；热点补跑被 CR9-94 的 date-keyed marker 挡成 `skip=already attempted today…lastAttemptDate=2026-10-22`（**这句今天兑现得干净：`trigger=pre-market`、`outcome=completed`**）。armed 现值＝同步 **10-23 02:00**／备份 **10-23 03:30**／热点 **10-22 16:30 与 10-23 08:30**；`legStaleness= fresh`；`staleCheckNextRun=15:29:35`。
+>
+> **③ 门槛③（实网两套）——顺序是这一轮最要紧的一刀**＝**③ 排在所有东财请求之前**（历轮口径：重采与 ④ 都会花东财桶、可能打进 180s 冷却，而"主源档一个窗口只取到一次"）。结果：`test_p1.py` **14/14 `exit=0`**，回执字面 **`[PASS] bond 主源态：全量覆盖 count > 500`**＝**主源档到手**；`test_p0.py` **14/15**，唯一那条红是「交叉验证 quote.price == 当日 kline.close」，实测 `quote=1313.56`（14:35 的实时价）⇔ `kline_close=1314.95`（当日 bar）——**这条断言自己的注释就写着"收盘后 price 应等于当日 close"**，盘中跑属条件不符、不是回归；**收盘后 15:10 复跑＝15/15 `exit=0`**（回执 `runtime/gate3-p0-1022pm.out`，抬头 `dirty=17/5`、`装载=成立`），那一枚红就此定性。
+>
+> **④ 门槛②（ds 离线 27 套）＝第一次真跑满，并且抓出一条**假红**＝`node scripts/gate.mjs` 首跑 `exit=1`，红的是 `test_cr10_5_hk_sina_fallback.py`「汇总解析不出」，而该套**单跑 27/27 全绿**。成因＝它 10-22 09:0x 首次落码时把汇总行写成 `===== 标题 N/M 通过 =====`，而 `scripts/gate.mjs` 的两条正则只认 `===== N/M 通过 ====` 与 `== 标题：N/M 通过 ==`（这正是 `gate.mjs` 自己那条"汇总解析不出来＝红"的判据在起作用——它没错，错在套件的汇总形态）。修法＝把该套汇总行改成第二种形态（带全角冒号），**没有放宽闸的任何判据**；改后 `node scripts/gate.mjs --skip tsc,vitest,docs` 复跑 **27 套 1064/1064 全绿 `exit=0`**。⇒ 账上那句「用例总数 1057 是推算、没实测」**就此作废**，现值＝**1064**。
+>
+> **⑤ 闸2 现场腿＝十条端点全部重采到 10-22**（`test-script/window_contract.py --live --write --only …` 点名全部十枚，含默认计划外的 `/products`）。**踩到一枚新形**＝第一次把十个路径写成一条 `--only a,b,c` 时，**Git Bash 的 MSYS 路径转换把打头的 `/quote` 改写成 Windows 路径**，结果只采到 9 枚、`/quote` 静默漏掉（输出里"本件会点"列表少一枚是唯一线索，`exit=0`、`非200=[]` 都照常绿）⇒ 补跑 `MSYS_NO_PATHCONV=1 … --only /quote` 补上。**纪律：在 Git Bash 下给现场腿传以 `/` 开头的参数必须关路径转换，并且跑完要逐枚核 `capturedAt` 而不是只看 exit。** 改后十条 `capturedAt` 全＝`2026-10-22`，`非200=[]`、消失键 `{}`、`obsoleteKnownStale=[]`（`KNOWN_STALE_SNAPSHOTS` 仍空表）。
+>
+> **⑥ 门槛④（集成七套）＝七套 `exit=0`＋末行 `ALL DONE`＋断言缺口 0**＝db 18/18｜p1 23/23｜p2 **55**（54|55）｜p3 35/35｜p4 23/23｜p6 25/25｜p5 **18**（18|21|22）＝合计 **197**；抬头 `HEAD=7147dd1 dirty=10/5 ds=14:29:34 装载=成立`，跑期间 `web/**` 零编辑（CR9-47）。**档别＝降级档**（同窗 `eastmoney denied 81→150`＝这一跑自己也把桶打满），按历轮口径它结清"④ 有 10-22 的全序列凭据"、**不填刀 5 ③ 的主源格**。
+>
+> **⑦ 出网账（与起服务那一段分开记）**＝`eastmoney granted 32→86／denied 81→150`、`akshare-obs 3→11`、`realtime-obs` 只 `observe`（3 条、`granted=0`）＝**这一把花了钱**。其中 `denied 69` 是 ④ 的 p3/p4 与 ③ 同窗抢东财桶的结果（降级档照常绿）。
+>
+> **⑧ 顺手拿到的一枚机器可读位**＝`GET /api/search?type=stock` 的 `snapshot` ＝`{asOf: 2026-10-22T02:01:44 北京, covered: 5574, total: 5575}`、`stale=[]` ⇒ CR9-105／117 那句「快照截至 X（覆盖 N/M 条）」的**数据侧首次用真数核过**（此前只用只读 SQL 预测过）；**屏上字面仍是 CSR-only**（`curl /search` 只看得见 SSR 骨架，四个关键词 0 命中）⇒ 那一格继续标"屏上验收归人工"。
+>
+> **⑨ 没动**＝任何 `.env`／基线登记／`#83` 空号／屏上任何字面（本轮零 web 生产码改动）／`DS_RESPONSE_FILES` 五枚里除三处注释外的任何一行／已入库的 `7147dd1`（不 amend）／两枚 `??` 服务日志／`runtime/` 状态件与回执。**没做**＝不找新问题、不新开编号、不 manual 买 hk 那 ~48 页、不做 Docker（C31）、不补 G7、不做 Watchlist 清单页。
+
 #### 追加一百零五 · 10-22 09:0x–11:2x（**CR10-5＝hk 列表的第二腿落码＋选型字进 PLAN；本节＝那句「搬」腾出位之后补上的论证节本体**；主人的字＝「把 PLAN.md 选型字补上」＋「按推荐路线推进」；本轮有生产码 ⇒ 取 **CR10-5**）
 
 > **分工**：可复算的数与顺序只在 [FIX-LEDGER.md](FIX-LEDGER.md)（门槛区＋状态卡＋当日轮明细），本节只放论证；引用下面任何数字都要连"哪把尺、对着哪一棵树"一起抄。
