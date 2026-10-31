@@ -18,7 +18,7 @@
 > | **未闭环看板** | 见下方「🔴 未闭环看板」节（本卡不复述条目） |
 > | **armed 自动化** | 现查（**10-22 14:50**＝本轮新起那棵）＝`/sync/status.jobs[]` **10-23 02:00**／`dbBackup.nextRun` **10-23 03:30**／`/hotspots/status.jobs[]` **10-22 16:30 与 10-23 08:30**；`legStaleness`＝**`fresh`**（`ageDays=0`·`lastAttemptDate=2026-10-22`）；`staleCheckNextRun` **15:29:35**＝hourly 活着；`qoder_cron`＝**0 枚**；防睡＝**本轮没起**⇒ 16:30 那枚与今夜 02:00／03:30 都**不在保护内**。⚠️ 进程级防睡**挡不住关电源**（09:37 那枚 `1074` 就是＝见「当日轮明细 · 10-22」）。`runs`／`trigger` 不作判据；进程态⇒每轮必换值 |
 > | **服务监听** | 现查（**10-22 14:29**）＝**两棵已换**＝**3000** node PID **12916**／**8000** python PID **13284**（ds StartTime `14:29:34`）⇒ **CR10-4／CR10-5 与本轮 CR10-3 三枚注释、hk 预算新值全在这棵里**（`_live_stamp` 读回 `装载=成立`）。零出网＝启停前后盘上账逐字相同（`eastmoney 32／81`＋`akshare-obs 3／0`、`mtime` 恒 08:30:01）＋进程内两族 `granted=0`；热点补跑 `skip=already attempted today…lastAttemptDate=2026-10-22`；`watchdogs=0`·BFF `ingest count=5`。库里 **hk 仍 0 行**·`state.json` **仍无 `label`**＝等下一次备份腿 |
-> | **本卡现值更正（10-31 13:5x，只增这一行；上面各格原句一律不回改）** | **当前轮次＝CR10 开放**（-1…-5 已闭；**-6 已立项并落修**＝腾讯备源日 K 窄窗口）｜**下一可用＝CR10-7**｜**真未闭＝C31（暂缓）＋CR10-6（P3，待现场验收）**；hk 已到货 2809 行（CR9-26② 口径待裁）｜**服务现值＝3000 PID 23896／8000 PID 7312**（10-31 13:56 重启，含 CR10-6 修复）｜**等字与 armed 明细、逐项读数一律见本文件「当日轮明细 · 10-30」与门槛区 10-30 行**，本格不复述｜体量＝现跑 `python scripts/docs-scan.py` |
+> | **本卡现值更正（11-01 02:5x，只增这一行；上面各格原句一律不回改）** | **当前轮次＝CR10**（-1…-6 已闭/已落修）｜**下一可用＝CR10-7**｜**真未闭＝仅 CR10-6（P3，待窄窗口实机一眼）**；**CR9-26② 与 CR10-5 已于 11-01 双双闭环**（11-01 自然轮 `trigger=daily`、hk 2809、`sina-hk-spot`），**C31 已于 10-31 四条判据全绿**｜**观察项**＝hk 覆盖面 2809 vs 东财约 4700 未归因｜**服务现值**＝3000 PID 17580／8000 PID 10548｜**armed**＝同步 11-02 02:00／备份 11-02 03:30｜读数见「当日轮明细 · 11-01」与门槛区，本格不复述 |
 ---
 
 ## 🔴 未闭环看板
@@ -26,7 +26,7 @@
 | 编号 | 事项 | 严重度 | 状态 | 前置 / 卡点 |
 |---|---|---|---|---|
 | **CR9-3** | 东财令牌按 akshare 函数计次，1 次 acquire ≈ 10–20 个 HTTP 请求 | P2 | ✅ **(a) 已实施（批次四）；(b) 定案"不实施"（批次五）；BK 成分等价性 10-16 16:0x 实网验收＝代码路径与名称路径成分整集相等 ⇒ 整条闭环。两条新读数（扇出量级、行业板那条腿从未被尝试）＝门槛区「10-16 15:5x–16:0x」那行＋CODE-REVIEW 追加八十，未立新号等主人字** | （沿革与逐条读数见本节末『**CR9-3**』＝原文逐字节出表，没删一个字） |
-| **CR9-26** | `Product` 里 **hk 0 行 / crypto 0 行 / us 仅 1 行** ⇒ 这三类的消费侧从未在真实数据上跑通（`/product/hk/00700` 实测 404）；hk 列表失败文案还谎称"已降级至备源" | P2 | 🟡 **① ✅ 已修／② crypto ✅ 已闭环（转 CR9-41）／hk＝上游态定档（10-19 12:0x，处置见本节末 C5 那两行；不手动买那 48 页、不设截止）** | **①**：`_em_request` 的限速文案去掉 `"; fallback to backup source"`（该函数不知道自己有没有备源，列表类必然说谎），降级结论改由 `chain_call` 在备源**真的成功**时写出；`test_cr9_symbol_guard` 24→**25**。**类型完整率断言**落 `test-db.mjs`（16→**18**）：按六类补零后断"合计==全表行数"（抓未声明类型，🔁 注入 `zzz-tmp` 一行 → 34927 vs 34928 精确变红、删后复原 leftover=0）与"已有主数据的四类未跌回 0 行"。<br>**② 本批把"crypto 不可达"这个前提证伪了**：真正原因与处置另立 **CR9-41**（ds 的 `NO_PROXY=*` 废掉注册表代理，配 `HTTPS_PROXY` 即 250 只入库）⇒ **crypto 半边闭环**，完整率 **4/6→5/6**。**只剩 hk 一项**：列表 48 页要 `clist/get`，今日该接口在东财侧持续 `RemoteDisconnected`（行情/K 线用真实代码复探是**好的**，见 CR9-40），且 C-4 已确认**无可用备源** ⇒ **CR7-4 的 00700 详情页手测仍被挡**，属外部源态而非代码。可复跑判据（工作日早上跑，通了就顺手做 CR7-4 手测）：`curl "http://127.0.0.1:8000/products?type=hk"` 期望 200 + ~4700 行，随后 `POST :3000/api/sync?type=hk`。<br>**顺手记下这条保护的前提盲区（设计观察，非今日实测缺陷）**：70% 缩水保护要求 `existingCount > 0` 才生效（`sync.ts:160`）⇒ **首次到货那一次没有基线可比**，如果上游分页行为变了、只给回一小截，这一轮会静默成为常态。真要堵，正解就是 CR9-31 那条信封：让列表 provider 把上游自己声明的 `total` 带出来、`count < total` 即显式标注——**但今天没有观察到任何实例（hk 列表今日压根没到货），故只登记盲区、不改代码** |
+| **CR9-26** | `Product` 里 **hk 0 行 / crypto 0 行 / us 仅 1 行** ⇒ 这三类的消费侧从未在真实数据上跑通（`/product/hk/00700` 实测 404）；hk 列表失败文案还谎称"已降级至备源" | P2 | ✅ **整条闭环（2026-11-01 02:0x，按字面判据＋主人裁定）**＝① 已修／② crypto 已闭环（转 CR9-41）／**hk 已到货 2809 行**（11-01 自然轮 `trigger=daily`、`source=sina-hk-spot`），`/product/hk/00700` 200。**覆盖面留白（2809 vs 东财约 4700）另立观察项，不挡本条闭环** | **①**：`_em_request` 的限速文案去掉 `"; fallback to backup source"`（该函数不知道自己有没有备源，列表类必然说谎），降级结论改由 `chain_call` 在备源**真的成功**时写出；`test_cr9_symbol_guard` 24→**25**。**类型完整率断言**落 `test-db.mjs`（16→**18**）：按六类补零后断"合计==全表行数"（抓未声明类型，🔁 注入 `zzz-tmp` 一行 → 34927 vs 34928 精确变红、删后复原 leftover=0）与"已有主数据的四类未跌回 0 行"。<br>**② 本批把"crypto 不可达"这个前提证伪了**：真正原因与处置另立 **CR9-41**（ds 的 `NO_PROXY=*` 废掉注册表代理，配 `HTTPS_PROXY` 即 250 只入库）⇒ **crypto 半边闭环**，完整率 **4/6→5/6**。<br>**③ hk 落地（10-30 手动腿 → 11-01 自然轮两次独立到货）**：东财 `clist/get` 持续 `RemoteDisconnected`（行情/K 线复探是好的，见 CR9-40），C-4 曾判"无可用备源"——**那一判只排掉了腾讯一家**；CR10-5 补上的新浪 `getHKStockData` 腿自 10-30 起两次真实行使（手动 48 页取尽 2809 只；11-01 自然轮 44.5s 同样 2809 只）。CR7-4 的 `/product/hk/00700` 手测在 HTTP/SSR 层通过（浏览器屏上那一形仍未见）。<br>**遗留（已外置为观察项，不在本行）**：2809 与东财口径约 4700 的差异未归因（新浪响应无 `total`、每页硬顶 60 行）⇒ 见「待拍板」区新增的观察行；另一条设计盲区（70% 缩水保护要求 `existingCount > 0`，首次到货无基线）仍只登记、不改代码 |
 | **CR9-41** | `Product` crypto 0 行的根因不是"外网不通"，而是 **ds 的 `NO_PROXY=*` 顺带废掉了 Windows 注册表系统代理**——CoinGecko 恰恰只能走该代理 | P2（验收层） | ✅ **已定位并闭环（2026-09-27 批次五，配置项，未改代码）** | 代码其实早就为此准备好了：`crypto_provider._overseas_session()` 是 `trust_env=False` 的独立会话 + `_proxies()` 读显式 `HTTPS_PROXY`（R12）。缺的只是**启动环境里没人设这个变量**（注册表代理在 env 里根本看不见）。同进程实测两档：不设 ⇒ `ProviderError: coingecko unreachable`（42s 才失败）；设 `HTTPS_PROXY=http://127.0.0.1:7897` ⇒ **`count=250`（BTC/ETH/USDT）**。<br>**已按此配置起 ds 并跑通端到端**：`POST /api/sync?type=crypto` → `count=250`、快照 `updated=250/250 failedBatches=0`；`/product/crypto/BTC` 200、`/api/quote?type=crypto&code=BTC` 真价 ⇒ **PLAN P2"虚拟币各验一个标的"从此有真实数据可验**，`test-db` 的类型完整率 **4/6 → 5/6（只剩 hk）**，`test-p2` 因 BTC 可达多出一条 `valueOnly` 断言（40→41，两档都登记）。<br>**这不是新需求、PLAN 不动**：PLAN **R12** 原文已定"海外源（Tavily/OpenBB/CoinGecko）**经用户本地代理优先尝试**"⇒ 本条属**该需求在本机 dev 侧的落地缺失**（配置层），代码侧 R12 的两个构件一直是对的。<br>**遗留已闭环（09-27 15:2x，主人拍板走「待你拍板」第 14 条的 A 方案）**：`HTTPS_PROXY` 已写进 `web/.env.example`（空值键 + 机制注释）与 PLAN 配置项一行，含"必须与 uvicorn 同行内联 export"这条唯一生效路径；compose 侧本来就透传（`docker-compose.yml:74/103`），无需改动 |
 | **G3（CR6 遗留）** | R13 端点零调用方 | — | → 见 CR7-3 | 同一件事，状态不在本行复述 |
 | **G6 消费侧（CR6 遗留）** | 港股取数侧已闭环，消费侧仍断链 | — | → 见 CR7-4 | 同一件事，状态不在本行复述 |
@@ -62,6 +62,8 @@
 > **现值更正（2026-10-30 18:4x，只增这一行；上面各行原句一律不回改）**＝**CR9-26② 的那半句「hk 0 行」已经过期**：只读 SQL 现查 `Product type='hk'`＝**2809 行**（2026-10-30 18:37 全量同步到货），`GET /product/hk/00700` **200**、SSR 含 `00700`／`腾讯控股`；`sync-state.json` 的 hk `note`＝`source=sina-hk-spot`·`count=2809`·48 页取尽·43.8s，东财侧 `RemoteDisconnected`（all hosts，非 cooling down）。⇒ **① 按本节门槛区 10-22 那行「出现 `source=sina-hk-spot`」的判据，本条已具备闭环条件；② 按「东财主源覆盖」口径则仍留观察（本次走的是新浪降级档，2809 < 东财约 4700 的差异未归因）。** 状态列**暂不改**：主人的字＝「等 10-31 02:00 自然同步轮再定」。CR7-4 的 00700 详情页手测在 HTTP/SSR 层已通过（浏览器屏上那一形未见）。
 
 > ⚠️ **10-16 11:0x 只读复核：CR9-26 那行有两处过期＋两处锚漂（原句一律不动）**：标题「`Product` 里 **hk 0 行 / crypto 0 行 / us 仅 1 行**」已**半过期**＝只读 SQL 现值 **crypto 250／us 177 早已到货**（10-15 20:1x 那轮刷新腿），**只剩 hk 仍是 0 行**（`group by type` 里根本没有那一行）⇒ 这一条今天欠的只有 hk 一件，别再按"三类"排它。另：账上写的路径 `data-service/app/akshare_provider.py` **不存在**（真身 `data-service/app/providers/akshare_provider.py`）；「70% 缩水保护要求 `existingCount > 0` 才生效（`sync.ts:160`）」的现身＝**`web/lib/sync.ts:223`**（那句注释在 `:213`）。顺带一条**免费**读数对本条的影响：hk 的**行情**单发在 10-15 的 A3 里已是 `200／akshare-hk／主源档` ⇒ 「hk 复探」这个点位从一开始就问错了对象——**欠的是库里到货（上游态），不是行情可达**。
+
+> ✅ **现值更正（2026-11-01 02:4x，只增这一行；上面 10-30 与 10-19 两行原句一律不回改）＝CR9-26② 已闭、真未闭从 2 行降为 0 行**＝主人的字（11-01 02:4x，答「11-01 自然轮拿到 hk 2809／source=sina-hk-spot／trigger=daily／东财仍 RemoteDisconnected，怎么收口」）＝**「两项都闭＋立覆盖面观察」**。逐项：**① CR9-26②** 翻 ✅（判据＝hk 到货且消费侧可用：库内 2809 行、`/product/hk/00700` 200）；**② CR10-5** 翻 ✅（判据＝`sync-state.json` 的 hk 出现 `source=sina-hk-spot`，且这次是**自然轮 `trigger=daily`** 产生，比 10-30 那枚手动腿更强）；**③ 覆盖面留白外置为观察项**（不挡闭环）：2809 vs 东财口径约 4700 的差未归因，触发条件＝东财恢复后跑一次 `GET :8000/products?type=hk` 对账。⇒ **看板真未闭＝C31（已于 10-31 验完全绿，仅留档）＋CR10-6（P3，已落修、待详情页窄窗口实机一眼）；CR9-26② 与 CR10-5 双双出表。**
 
 ### ⚠️ 待你拍板
 
@@ -567,41 +569,23 @@ dev 首次预热用三条本地 GET（`/`、`/api/health`、`/api/watchlist` 全
 > **【已搬归档】** 当日轮明细 · 10-20 —— 正文见 [2026-10-21-fix-ledger-当日轮明细1020归档.md](history/2026-10-21-fix-ledger-当日轮明细1020归档.md)（体量治理：整块搬迁，原地只留指针）。
 
 > **【已搬归档】** 当日轮明细 · 10-21 —— 正文见 [2026-10-31-fix-ledger-当日轮明细1021归档.md](history/2026-10-31-fix-ledger-当日轮明细1021归档.md)（体量治理：整块搬迁，原地只留指针）。
-#### 当日轮明细 · 10-30
+> **【已搬归档】** 当日轮明细 · 10-30 —— 正文见 [2026-11-01-fix-ledger-当日轮明细1030归档.md](history/2026-11-01-fix-ledger-当日轮明细1030归档.md)（体量治理：整块搬迁，原地只留指针）。
+#### 当日轮明细 · 11-01
 
-> **门槛现值换档（10-30 20:2x 首跑／10-31 14:0x 全量复跑；上面 10-22 各行原句一律不回改）**＝
-> **①** `tsc --noEmit` **0 error**｜vitest **458/458（49 文件，failed=0）**。
-> **②** `node scripts/gate.mjs` **28 套 1084/1084 全绿**（含 CR10-6 新套；回执 `runtime/gate1-1130-1031-1410.out`）。
-> **③** `test_p0.py` **15/15 `exit=0`**、`test_p1.py` **14/14 `exit=0`**（回执 `runtime/p0-1031.out`／`p1-1031.out`；树戳 `装载=成立`、`appMtime=2026-10-31T00:40:14`＝CR10-6 修复已装载）。
-> **④** `test-db` 18／`test-p1` 23／`test-p2` **55**（54|55）／`test-p3` 35／`test-p4` 23／`test-p6` 25／`test-p5` **18**（18|21|22）＝**197**、末行 `ALL DONE`、缺口 0（回执 `runtime/verify-all-1031.out`）。
-> **闸2** **10/10**、`capturedAt` 全 **2026-10-31**、`非200=[]`、`消失键={}`（回执 `runtime/windowContract-1031-write9.out`＋`-products.out`）。
-> **docs** `NEW=0／KNOWN=3/3`、断链 **0**、表格 49 表·480 行·错位 0。
-> ⚠️ **19:0x 那版读数里的三处红（p1 12/14、p0 13/15、p2 R13）在 20:1x 重启后全部消失**——成因是
-> **东财冷却期 + 上游瞬时态**，不是代码回归。**记录纪律：引用 19:0x 的数据必须同时写明它已被复跑推翻。**
+> ✅ **11-01 02:0x 自然轮（CR9-26②／CR10-5 双双闭环的依据轮）**
+> **① 触发与结果**＝`trigger=daily`（自然调度，非手动）、`lastAttemptDate=2026-11-01`、`lastAttemptOutcome=completed`、`lastRun=2026-11-01T02:02:32+08:00`、列表腿 `tookMsTotal=152135`（≈2.5 分钟）；六类**全部 completed**：stock 5576（新浪降级）／fund **28236**（主源）／bond 1066（主源）／crypto 250（主源）／hk **2809**（`source=sina-hk-spot`）／us 505（甲方案 50 页）。`legStaleness` 由 `missed-today` 转 **`fresh`**（`ageDays=0`）。
+> **② hk 两面的读数**＝列表腿 `note` 含 `source=sina-hk-spot`·`count=2809`·「翻页 48 页后取尽」·44.5s；东财侧仍 `RemoteDisconnected`（all hosts failed，**不是** cooling down）⇒ 新浪腿**第二次被真实行使**（10-30 手动腿是同源同量，两次独立成立）。库内 `Product type='hk'` **2809 行**。
+> **③ 刷新腿**＝`partial_failed`、`weakTypes=["fund"]`，但质量比 10-30 那次好得多：fund `24178/28236`、**仅 2 个失败批次**（10-30 是 232 个）；stock/hk/us/crypto 全量、bond 314/1066（`failedBatches=0`）。
+> **④ 夜间保活的三条证据（这轮"进程不死"是可查的，不是口头保证）**＝防睡 `keepawake_holder_1031.py` 从 10-31 17:38 持续 `hold ret=0x80000001` 到 **02:44** 未断；watchdog `watchdog-1031.ps1`（PID 6164）**02:00 之后零 ALERT**（日志里那 2 次 ALERT 是 10-31 20:24／20:34 我自己做的故障演练）；两棵服务 PID（web 17580／ds 10548）整夜未变。
+> **⑤ 一处如实记录的缺陷**＝watchdog 的检查触发判据是「`lastAttemptDate` 一变就跑」，结果 **02:00:27** 就触发了 `morning-check-1101.ps1`，而同步腿 **02:02:32** 才收尾 ⇒ `morning-check-1101.out` 里是**运行中的中间态**、不是最终结果。**判据缺陷**：应在 `lastAttemptOutcome` 落定后再触发。本轮判定改用实时 `/sync/status` 与 `sync-state.json`，未受该缺陷影响。
+> **⑥ 判定与处置**＝走 **(b) 档**：东财未恢复、新浪腿再次行使、2809 只取尽。主人的字＝「两项都闭＋立覆盖面观察」⇒ **CR9-26② 与 CR10-5 双双翻 ✅**（见看板），**2809 vs 东财约 4700 的覆盖面差异外置为观察项**，不挡闭环。
 
-> **10-30 现场读数（CR10-4／CR10-5／CR9-26②／同步腿；明细逐项见本节上文各条）**＝`backups/state.json` `label=startup`·`ok=true`·`runs=1`·`kept=7`＋`dev-20261030-183008.db`；`sync-state.json` hk `note` 含 `source=sina-hk-spot`·`count=2809`·48 页取尽·43.8s；`Product hk` **2809 行**、`/product/hk/00700` **200**；列表腿 `completed`、刷新腿 `partial_failed`·`weakTypes=["fund"]`（fund 2345/28224·232 失败批次；其余档全量或 failed 0；`snapshotAt` 全 10-30）。
-
-> ✅ **10-30「全量检测 + 剩余项收口」**（字＝「先启动 web 和 ds，然后对整个项目代码和功能做一次完整和全量的测试，对比 docs 目录看还有哪些东西没做」→ 后续「走完整路线」）。
-> **① 起服务**＝复用 10-22 整序运行器形状，新落 `runtime/start-both-1030-180x.ps1`／`.out`：18:30 起 **web 7516／ds 20660**；20:1x 按要求重启为 **web 9040／ds 23712**（旧两棵已停）。零出网预检与盘上账前后对账均在 `.out` 里。
-> **② CR10-4 现场读数（已闭）**＝`backups/state.json` 出现 `label:"startup"`·`trigger:"startup-catchup"`·`ok:true`·`outcome:"completed"`·`runs:1`·`kept:7`；`backups/` 新增 `dev-20261030-183008.db`、最老的 `dev-20261016-194206.db` 按 7 份轮换删除（出处：2026-10-30 18:30 `cat backups/state.json` ＋ `ls -la backups`）。⇒ 与 END_PLAN B1 的期望逐键一致。**`runs` 是本进程计数，不作跨轮判据；失败分支也写 `label`，故必须同看 `ok/outcome`。**
-> **③ CR10-5 现场读数（已取得）**＝`runtime/sync-state.json` 的 hk `note` 含 `source=sina-hk-spot`·`count=2809`·「翻页 48 页后取尽」·43.8s；东财侧是 `RemoteDisconnected`（all hosts failed，**不是** cooling down）⇒ 新浪第二腿被真实行使。**这是手动全量同步腿，不是东财自然断源夜**，故 CR10-5 的账本判据按「出现 `source=sina-hk-spot`」成立；CR9-26② 仍按主人的口径等自然轮裁。
-> **④ hk 到货**＝`Product type='hk'` **2809 行**（只读 SQL）；`GET /product/hk/00700` **200**、SSR 含 `00700`／`腾讯控股`。⚠️ 2809 < 东财口径约 4700 ⇒ **覆盖面差异未归因**（新浪每页硬顶 60 行、响应无 total），这是「按新浪闭 CR9-26②」唯一的保留理由。
-> **⑤ 全量同步**＝`POST :8000/sync/run` 列表腿 `completed`（六类：stock 5576／fund 28224／bond 1066／hk 2809／us 506／crypto 250），链式刷新腿 `partial_failed`·`weakTypes=["fund"]`（fund 2345/28224·232 失败批次，其余档全量或 failed 0；`snapshotAt` 全 10-30）；`legStaleness` 由 `stale-8d` 转 **`fresh`**。
-> **⑥ 门禁与三处红的更正**＝19:0x 首跑：① 全绿、② 27 套 1064/1064、④ 6/7（p2 R13 红）、③ p1 **12/14**（两条场外基金净值 null）＋p0 **13/15**（两条交叉验证）。**20:1x 重启后复跑：p1 14/14、p0 15/15、p2 55/55 全绿** ⇒ 三处红是**东财冷却期 + 上游瞬时态**的组合产物（现场核对：`/quote?type=fund&code=000001` 由 `price:null` 变为 `0.919`；上游 `ak.fund_open_fund_daily_em()` 表内 000001=0.919、110022=2.871，22930/24312 有值）。⇒ **CR10-7（场外基金净值）证伪，不开项**；此结论必须留档，避免下轮按旧结论重开。
-> **⑦ 闸2**＝`--live` 9 条＋`--only /products` 1 条＝**10/10**，`非200=[]`、`消失键={}`、保险丝未停；快照 10 枚端点 `capturedAt` 全 **2026-10-30**，diff 只有 `capturedAt`（键面零变化），单独提交 `c0bf88d`。
-> **⑧ 功能冒烟**＝`/`、`/search?q=600519`、`/product/stock/600519`、`/product/hk/00700`、`/chat` 均 **200**；热点 dashboard 在首页 `/`（`/hotspots` 不是页面路由，404 属路径写错，已核实 `web/app` 下只有 chat/page/search 三个页面）。
-> **⑨ 本轮不动**＝生产码（除 CR10-6 那一枚）、`.env`、基线登记、`#83` 空号、C31 之外的 Docker、已入库各笔（不 amend）、push。
-
-> ✅ **10-31 14:0x 续轮（CR10-6 验收 ＋ C31 验证 ＋ docs 收口）**：
-> **① CR10-6 判别力**＝新套 `tests/test_cr10_6_tencent_kline_window.py` **20/20**；两把钻（非破坏、monkeypatch）：**钻1** 把上游 `param` 改回调用方 `s,e`（原缺陷写法）⇒ **恰红 4 枚 🔁 反向**；**钻2** 把「过滤后为空」改成静默返回 `[]` ⇒ **恰红那 1 枚**；复原后与修复版逐字节相同（`diff -q`）再跑 20/20。
-> **② C31 验证（三项判据逐条落地）**＝镜像重建（`data-service` 与 `web` 两个 build 都 `exit=0`）后：`setpriv` 在镜像内（`/usr/bin/setpriv`）；容器内 uvicorn **PID 1 UID=1000(app)**（`setpriv --reuid 1000` 生效，不是只"存在"）；容器内 `python -m scripts.backup_db --outdir /tmp/backup-c31` 成功＝`dev-20261031-154934.db`·71,008,256 bytes·`integrity_check=ok`。**第④条护栏成立**＝宿主 `backups/state.json` 前后 md5 一致（`2b5a0e8bf83f900e0f11769f62f87afe`）、`backups/` 仍 8 个文件 ⇒ 容器没碰 CR10-4 的证据。
-> **③ C31 的一条未取到 + 定性**＝「两容器同时 healthy」没拿到：compose 起 web 时 `prisma-data` 命名卷归 root、而容器以 `node(1000)` 跑 `prisma migrate deploy` ⇒ `attempt to write a readonly database`（`20260915_research_unique_type_code_date`）⇒ **既有卷属主问题（P7 环境态），不是 C31 本体**；Dockerfile 的 `chown` 只在构建期对镜像目录生效、不覆盖已存在的卷。**要闭这一条**＝`docker volume rm invest-manager_prisma-data` 后重建（会清空容器内 SQLite，需先确认容器库无独有数据）。本轮按「不清理不可恢复数据」原则**没做**。
-
-> ✅ **10-31 18:0x 补记：上面那条「未取到」已取到（只增这一段，上段原句不回改）**＝修法**不是清卷，是就地 `chown`**：卷目录本就 `1000:1000`，而卷里 `dev.db` 是 `0:0`（09-13 建卷时以 root 跑出来的；Dockerfile 的 `chown` 只在构建期对镜像目录生效、不覆盖已存在卷）。`chown -R 1000:1000` 后 `up -d` ⇒ **web `Healthy`(3010→3000)＋data-service `healthy`(8000 内部)** ⇒ 第③条成立，**零数据丢失**，验完 `down -v` 清理干净。⇒ **C31 四条判据全齐**，看板状态由「⏳ 未验证」翻 ✅。
-> **④ docs**＝`NEW=0／KNOWN=3/3`、断链 0、表格 49 表·480 行·错位 0；FIX-LEDGER 体量 **122,506 → 117,217**（把「当日轮明细 · 10-22」整节 42 行／5,289 字符搬进 `history/2026-10-31-fix-ledger-当日轮明细1022巨行归档.md`，sha256 `d90b3533d072b1cf`、原地留指针、`history/README.md` 加索引）；⚠️ 搬前已核「承重句」L581 的判据在 `CODE-REVIEW` 追加一百零五（L764）另有活载体，不是归档独存。
-
-> ✅ **10-31 18:0x 补：C31 四条判据到齐 ＋ 今晚自然轮准备（只增这一行）**＝**① C31**＝第③条用**就地 `chown`**（零数据丢失）解决：web `Healthy`(3010→3000)＋data-service `healthy`；web 容器 `id=uid=1000(node)`、容器内备份 `integrity_check=ok`；宿主 `backups/state.json` md5 全程未变 ⇒ **C31 翻 ✅**。**② 今晚自然轮**＝主人保证机器不关 ⇒ 选「等 11-01 02:00 自然轮」而非现在闭 hk 两项；**昨晚失败真因不是关机而是进程不在场**（`missed-today` 因服务 13:56 才起），故**防睡已起**（`runtime/keepawake_holder_1031.py`，`END=11-01 04:30`，`first_ret=0x80000000`、`hold ret=0x80000001`）。**③ 明早判定（先写死）**＝(a) `source` 非 `sina-hk-spot` 且 `count≈4700` ⇒ 东财恢复，两项都闭＋留白关掉；(b) 仍 `sina-hk-spot`/2809 ⇒ 按字面闭，覆盖面另立观察；(c) 再 `error` ⇒ 保持未闭、记第 N 次。**④ 机器知识**＝`/sync` cron 未传 `weekdays_only`（默认 False）⇒ 每天都是应跑日，11-01 周日 02:00 照跑；`misfire_grace_time=1800` 只在**进程在场但调度被卡**时补跑，**进程不在场则整天跳过**。
-> **⑤ 顺手修掉一处我自己的错**＝上一轮把「10-30 门槛行」写进了「10-22」小节（标题在 L630）⇒ 本轮归位到「当日轮明细 · 10-30」并去掉重复的现场读数段（同一事实只留一个家）。
+> **11-01 自然轮读数（只增这一行；上面 10-30 各行原句不回改）**＝`trigger=daily`·`lastAttemptDate=2026-11-01`·`outcome=completed`·`tookMsTotal=152135`；
+> 六类 `count`：stock 5576（新浪降级）／fund 28236（主源）／bond 1066（主源）／crypto 250（主源）／**hk 2809（`source=sina-hk-spot`，48 页取尽，44.5s）**／us 505（甲方案）；
+> 刷新腿 `partial_failed`·`weakTypes=["fund"]`（fund 24178/28236、**2** 个失败批次；stock/hk/us/crypto 全量、bond 314/1066 failedBatches 0）；
+> `legStaleness` **`fresh`**（`ageDays=0`）；库内 `Product`＝fund 28236／stock 5576／hk 2809／bond 1066／us 505／crypto 250。
+> 夜间保活三证：防睡持续 `hold ret=0x80000001` 至 02:44 未断；watchdog 02:00 后零 ALERT；服务 PID 整夜未变（web 17580／ds 10548）。
+> ⚠️ **已知判据缺陷（本轮实测）**＝watchdog 的检查触发用「`lastAttemptDate` 一变就跑」⇒ 02:00:27 触发、而同步腿 02:02:32 才收尾，`morning-check-1101.out` 记的是中间态；正解＝等 `lastAttemptOutcome` 落定再触发，**未改码，只登记**。
 
 
 #### 附则（批次与纪律）
