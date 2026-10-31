@@ -15,7 +15,15 @@ import re
 
 import requests
 
+from ..utils.timeutil import beijing_today
 from .base import BaseProvider, ProviderError, ProviderNotSupported, register_chain
+
+
+def _beijing_today_iso() -> str:
+    """CR10-6：上游请求窗口的终点＝北京"今天"（ISO）。用北京时间而非本机时区，
+    与 `_minute_kline` 的口径一致（跨时区取数不许差一天）。"""
+    return beijing_today()  # YYYY-MM-DD
+
 
 REQ_TIMEOUT = 15
 SYMBOL_MARKETS = {"sh", "sz", "bj"}
@@ -306,27 +314,28 @@ class TencentProvider(BaseProvider):
                 return f"{ymd[:4]}-{ymd[4:6]}-{ymd[6:8]}"
             return default
 
+        # 请求窗口（调用方要的那一段，用于**本地过滤**）
         s = iso(start, "2015-01-01")
         e = iso(end, "2099-12-31")
-        import datetime as _dt
 
-        try:
-            days = min(
-                1200,
-                max(
-                    30,
-                    (
-                        _dt.date.fromisoformat(e) - _dt.date.fromisoformat(s)
-                    ).days
-                    + 10,
-                ),
-            )
-        except ValueError:
-            days = 400
+        # CR10-6（2026-10-30 实测）：**上游按"请求键"命中陈旧快照**——同一天、同一标的，
+        # 只把 `param` 里的 `s,e` 换成窄窗口（如 `2026-10-23,2026-10-30`）就会返回一份
+        # 缺当日 bar 的旧序列（实测 5 根、最后一根停在 10-29），而 `s,e` 取宽窗口
+        # （`2026-09-01,...`）或无 end 时含当日。复现三次一致，且不是本地过滤造成的
+        # （原实现原样返回上游 rows）。
+        # ⇒ 上游请求键必须**稳定**：起点与终点都不取调用方的窗口，只取一个够大的固定窗口，
+        #   再把调用方要的那一段用 `start/end` 在本地过滤。这样"今天的 bar 有没有"只由
+        #   上游最新序列决定，与用户选多窄的区间无关。
+        # 代价：宽窗口＝每次多回一点历史（腾讯单发，不额外计次，C29 口径不变）。
+        s_req = "2015-01-01"
+        e_req = _beijing_today_iso()
+        # 固定请求上限 1200 根（≈4.8 年交易日）：既够"从 2015 起全量"的常见用法，
+        # 又不会让上游按窗口长度返回不同形态。窗口过滤交给下面的本地那一段。
+        days = 1200
 
         r = requests.get(
             "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get",
-            params={"param": f"{sym},day,{s},{e},{days},qfq"},
+            params={"param": f"{sym},day,{s_req},{e_req},{days},qfq"},
             timeout=REQ_TIMEOUT,
             headers={"User-Agent": "Mozilla/5.0"},
         )
@@ -359,6 +368,13 @@ class TencentProvider(BaseProvider):
             )
         if not candles:
             raise ProviderError(f"tencent kline empty: {code}")
+
+        # CR10-6：上游给的是稳定宽窗口（含当日最新序列），这里按**调用方要的窗口**过滤。
+        # 字符串比较安全：两侧都是 `YYYY-MM-DD` 定宽 ISO。
+        candles = [c for c in candles if s <= c["date"] <= e]
+        if not candles:
+            # 与空响应同口径（C11）：显式失败，不许静默返回空列表让上层读成"到货 0 根"
+            raise ProviderError(f"tencent kline empty in window {s}..{e}: {code}")
         return {
             "type": type_,
             "code": code,
