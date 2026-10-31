@@ -31,7 +31,7 @@
 | **G3（CR6 遗留）** | R13 端点零调用方 | — | → 见 CR7-3 | 同一件事，状态不在本行复述 |
 | **G6 消费侧（CR6 遗留）** | 港股取数侧已闭环，消费侧仍断链 | — | → 见 CR7-4 | 同一件事，状态不在本行复述 |
 | **G7（CR6 遗留）** | 写接口完整身份鉴权 | — | 🟡 **token 链路代码侧已完工、欠配置**（10-01 步骤 3 复核，`d2f677f`）→ ✅ **已配置、双侧生效（10-03 00:5x）** | （沿革与逐条读数见本节末『**G7**』＝原文逐字节出表，没删一个字） |
-| **C31 验证** | Dockerfile 进程降权（`setpriv`）的镜像构建/运行验证 | — | ✅ **已验证（2026-10-31）** | 镜像重建后实测：容器内 `setpriv` 在（`/usr/bin/setpriv`）；uvicorn PID 1 **UID=1000(app)**（降权生效）；容器内 `scripts.backup_db` 成功（71,008,256 bytes、`integrity_check=ok`）；`/health` 200。⚠️ 两容器同时 healthy 这一条本轮**未取到**：compose 起 web 时 `prisma-data` 卷归 root、容器以 node(1000) 跑 `prisma migrate deploy` ⇒ `readonly database`（既有卷的属主问题，与 C31 本体无关，属 P7 环境态）；宿主 `backups/state.json` 前后 md5 一致（`2b5a0e8b…`，8 个文件未变） |
+| **C31 验证** | Dockerfile 进程降权（`setpriv`）的镜像构建/运行验证 | — | ✅ **全面验证通过（2026-10-31 18:0x）** | **四条判据逐条落地**：① 镜像内 `setpriv` 在（`/usr/bin/setpriv`）；② 容器内 uvicorn **PID 1 UID=1000**（降权真生效，不是只"存在"）；③ **两容器同时 `healthy`**（web 3010→3000、data-service 8000 内部）；④ 容器内 `scripts.backup_db` 成功（25,591,808 bytes、`integrity_check=ok`）＋web 容器 `id`＝`uid=1000(node)`。**宿主护栏**＝`backups/state.json` md5 前后一致（`2b5a0e8b…`）、`backups/` 仍 8 个文件。**⚠️ 过程中修复的一处环境态**：`prisma-data` 卷里 `dev.db` 属主是 **root**（09-13 建卷时以 root 跑出来的），而 web 容器以 `node(1000)` 运行 ⇒ `prisma migrate deploy` 报 `attempt to write a readonly database`；修法＝就地 `chown -R 1000:1000`（**未删卷、零数据丢失**），不是 `volume rm`。验证完毕已 `down -v`，容器与卷清理干净 |
 | **CR10-6** | 腾讯备源日 K **窄窗口漏当日根**（`start`+`end` 同时给且窗口较窄时，上游按请求键返回缺当日 bar 的陈旧快照） | P3（低：只在东财不可用时、且用户选了窄区间才出现） | 🟡 **已立项并已落修（10-30）** | 修法＝上游请求键稳定（固定 `2015-01-01` 起＋北京今天＋`count=1200`），调用方 `start/end` 只在 provider 内本地过滤（`tencent_provider.py`）。该文件在 `DS_RESPONSE_FILES` 五枚内 ⇒ **须同窗 `window_contract.py --live --write` 重采**＋重启 ds 装载。回归套件＝`tests/test_cr10_6_tencent_kline_window.py`（含 🔁 反向：上游 param 不得随调用窗口漂移）。**门禁不会被它触发**（p0 不传 end、p2 R13 用 90 天窗口） |
 | **C31 关联** | 任何 Docker 相关改动 | — | → 见 C31 验证 | 同一闸口（主人指示暂缓），状态不在本行复述 |
 
@@ -566,15 +566,7 @@ dev 首次预热用三条本地 GET（`/`、`/api/health`、`/api/watchlist` 全
 
 > **【已搬归档】** 当日轮明细 · 10-20 —— 正文见 [2026-10-21-fix-ledger-当日轮明细1020归档.md](history/2026-10-21-fix-ledger-当日轮明细1020归档.md)（体量治理：整块搬迁，原地只留指针）。
 
-#### 当日轮明细 · 10-21
-
-> **【已搬归档】** > ✅ **10-21 17:0x–17:5x「全面梳理轮＝ —— 正文见 [2026-10-21-fix-ledger-当日轮明细1021上半场归档.md](history/2026-10-21-fix-ledger-当日轮明细1021上半场归档.md)（体量治理：整块搬迁，原地只留指针）。
-
-> ✅ **10-21 20:4x「明早 02:00 自然轮的四条判据＋pre 基线（本轮零出网）」**＝**pre 基线**（只读 SQL＋`/health`，20:34 现跑）＝total **35,416**·`max(snapshotAt)` **10-19 10:44:04**·`group by type`＝fund 28104／stock 5494／bond 1063／us 505／crypto 250、**hk 没有那一行**·`Watchlist` **0**·`HotspotDigest` 日格 10-21＝5 行·`sync-state.json` `lastAttemptDate=2026-10-19`。两棵仍＝17:35 node／17:44 python（判活按响应字节＝web `200·1281`｜ds `200·1481`｜`/hotspots/status` `200·5716`）；`eastmoney` 进程内⇔durable 两本 `3/9` 前后逐字相同＝**本轮零出网**。**明早读四条**＝① `legStaleness.verdict` 该从 `stale-2d` 翻 **`fresh`**＝CR10-1 的第一枚**自然轮**验收（此前只有手动起服务那枚读数）；② `lastResult.failedTypes` 里 hk 在不在＝**CR9-26② 的答案**（不为它手动买那 48 页）；③ 库里 `max(snapshotAt)`／total／`group by` 是否从 10-19 前进（hk 若到货＝`group by` 里第一次出现那一行）；④ `jobs[0].nextRun`→**10-23 02:00**。**03:30 那格照旧**＝认 `dbBackup.lastRun` 时刻＋`backups/dev-20261022-*.db`（`runs`／`trigger` 不作判据）；⚠️ 今晚 20:44 已把 26h 门限清零 ⇒ 明早 03:30 那一枚是**常规 cron**、不是复查补的，两件事分开记。
-
-> **【已搬归档】** > ✅ **10-21 21:1x–23:2x「下半场九枚巨行（方案轮／hk 定性换形／两枚仪器更正／『搬』与 CR10-4 记录）」＝ —— 正文见 [2026-10-22-fix-ledger-当日轮明细1021下半场归档.md](history/2026-10-22-fix-ledger-当日轮明细1021下半场归档.md)（体量治理：整块搬迁 L308–L324＝17 行／8,298 字符／sha256 `1d889b0dbe140363`，原地只留指针；件名与标题日期是手工补正的，原因与纪律见该件头部）。
-
-> **【已搬归档】** 当日轮明细 · 10-22 —— 正文见 [2026-10-31-fix-ledger-当日轮明细1022巨行归档.md](history/2026-10-31-fix-ledger-当日轮明细1022巨行归档.md)（体量治理：整块搬迁，原地只留指针）。
+> **【已搬归档】** 当日轮明细 · 10-21 —— 正文见 [2026-10-31-fix-ledger-当日轮明细1021归档.md](history/2026-10-31-fix-ledger-当日轮明细1021归档.md)（体量治理：整块搬迁，原地只留指针）。
 #### 当日轮明细 · 10-30
 
 > **门槛现值换档（10-30 20:2x 首跑／10-31 14:0x 全量复跑；上面 10-22 各行原句一律不回改）**＝
@@ -587,7 +579,7 @@ dev 首次预热用三条本地 GET（`/`、`/api/health`、`/api/watchlist` 全
 > ⚠️ **19:0x 那版读数里的三处红（p1 12/14、p0 13/15、p2 R13）在 20:1x 重启后全部消失**——成因是
 > **东财冷却期 + 上游瞬时态**，不是代码回归。**记录纪律：引用 19:0x 的数据必须同时写明它已被复跑推翻。**
 
-> **10-30 现场读数（CR10-4／CR10-5／CR9-26②／同步腿）**＝`backups/state.json` `label=startup`·`trigger=startup-catchup`·`ok=true`·`outcome=completed`·`runs=1`·`kept=7`＋新文件 `dev-20261030-183008.db`；`sync-state.json` 的 hk `note` 含 `source=sina-hk-spot`·`count=2809`·48 页取尽·43.8s；`Product hk` **2809 行**、`/product/hk/00700` **200**；同步列表腿 `completed`、刷新腿 `partial_failed`·`weakTypes=["fund"]`（fund 2345/28224·232 失败批次；stock/hk/us/crypto 全量；bond 314/1066·failed 0；`snapshotAt` 全 10-30）。
+> **10-30 现场读数（CR10-4／CR10-5／CR9-26②／同步腿；明细逐项见本节上文各条）**＝`backups/state.json` `label=startup`·`ok=true`·`runs=1`·`kept=7`＋`dev-20261030-183008.db`；`sync-state.json` hk `note` 含 `source=sina-hk-spot`·`count=2809`·48 页取尽·43.8s；`Product hk` **2809 行**、`/product/hk/00700` **200**；列表腿 `completed`、刷新腿 `partial_failed`·`weakTypes=["fund"]`（fund 2345/28224·232 失败批次；其余档全量或 failed 0；`snapshotAt` 全 10-30）。
 
 > ✅ **10-30「全量检测 + 剩余项收口」**（字＝「先启动 web 和 ds，然后对整个项目代码和功能做一次完整和全量的测试，对比 docs 目录看还有哪些东西没做」→ 后续「走完整路线」）。
 > **① 起服务**＝复用 10-22 整序运行器形状，新落 `runtime/start-both-1030-180x.ps1`／`.out`：18:30 起 **web 7516／ds 20660**；20:1x 按要求重启为 **web 9040／ds 23712**（旧两棵已停）。零出网预检与盘上账前后对账均在 `.out` 里。
@@ -604,7 +596,11 @@ dev 首次预热用三条本地 GET（`/`、`/api/health`、`/api/watchlist` 全
 > **① CR10-6 判别力**＝新套 `tests/test_cr10_6_tencent_kline_window.py` **20/20**；两把钻（非破坏、monkeypatch）：**钻1** 把上游 `param` 改回调用方 `s,e`（原缺陷写法）⇒ **恰红 4 枚 🔁 反向**；**钻2** 把「过滤后为空」改成静默返回 `[]` ⇒ **恰红那 1 枚**；复原后与修复版逐字节相同（`diff -q`）再跑 20/20。
 > **② C31 验证（三项判据逐条落地）**＝镜像重建（`data-service` 与 `web` 两个 build 都 `exit=0`）后：`setpriv` 在镜像内（`/usr/bin/setpriv`）；容器内 uvicorn **PID 1 UID=1000(app)**（`setpriv --reuid 1000` 生效，不是只"存在"）；容器内 `python -m scripts.backup_db --outdir /tmp/backup-c31` 成功＝`dev-20261031-154934.db`·71,008,256 bytes·`integrity_check=ok`。**第④条护栏成立**＝宿主 `backups/state.json` 前后 md5 一致（`2b5a0e8bf83f900e0f11769f62f87afe`）、`backups/` 仍 8 个文件 ⇒ 容器没碰 CR10-4 的证据。
 > **③ C31 的一条未取到 + 定性**＝「两容器同时 healthy」没拿到：compose 起 web 时 `prisma-data` 命名卷归 root、而容器以 `node(1000)` 跑 `prisma migrate deploy` ⇒ `attempt to write a readonly database`（`20260915_research_unique_type_code_date`）⇒ **既有卷属主问题（P7 环境态），不是 C31 本体**；Dockerfile 的 `chown` 只在构建期对镜像目录生效、不覆盖已存在的卷。**要闭这一条**＝`docker volume rm invest-manager_prisma-data` 后重建（会清空容器内 SQLite，需先确认容器库无独有数据）。本轮按「不清理不可恢复数据」原则**没做**。
+
+> ✅ **10-31 18:0x 补记：上面那条「未取到」已取到（只增这一段，上段原句不回改）**＝修法**不是清卷，是就地 `chown`**：卷目录本就 `1000:1000`，而卷里 `dev.db` 是 `0:0`（09-13 建卷时以 root 跑出来的；Dockerfile 的 `chown` 只在构建期对镜像目录生效、不覆盖已存在卷）。`chown -R 1000:1000` 后 `up -d` ⇒ **web `Healthy`(3010→3000)＋data-service `healthy`(8000 内部)** ⇒ 第③条成立，**零数据丢失**，验完 `down -v` 清理干净。⇒ **C31 四条判据全齐**，看板状态由「⏳ 未验证」翻 ✅。
 > **④ docs**＝`NEW=0／KNOWN=3/3`、断链 0、表格 49 表·480 行·错位 0；FIX-LEDGER 体量 **122,506 → 117,217**（把「当日轮明细 · 10-22」整节 42 行／5,289 字符搬进 `history/2026-10-31-fix-ledger-当日轮明细1022巨行归档.md`，sha256 `d90b3533d072b1cf`、原地留指针、`history/README.md` 加索引）；⚠️ 搬前已核「承重句」L581 的判据在 `CODE-REVIEW` 追加一百零五（L764）另有活载体，不是归档独存。
+
+> ✅ **10-31 18:0x 补：C31 四条判据到齐 ＋ 今晚自然轮准备（只增这一行）**＝**① C31**＝第③条用**就地 `chown`**（零数据丢失）解决：web `Healthy`(3010→3000)＋data-service `healthy`；web 容器 `id=uid=1000(node)`、容器内备份 `integrity_check=ok`；宿主 `backups/state.json` md5 全程未变 ⇒ **C31 翻 ✅**。**② 今晚自然轮**＝主人保证机器不关 ⇒ 选「等 11-01 02:00 自然轮」而非现在闭 hk 两项；**昨晚失败真因不是关机而是进程不在场**（`missed-today` 因服务 13:56 才起），故**防睡已起**（`runtime/keepawake_holder_1031.py`，`END=11-01 04:30`，`first_ret=0x80000000`、`hold ret=0x80000001`）。**③ 明早判定（先写死）**＝(a) `source` 非 `sina-hk-spot` 且 `count≈4700` ⇒ 东财恢复，两项都闭＋留白关掉；(b) 仍 `sina-hk-spot`/2809 ⇒ 按字面闭，覆盖面另立观察；(c) 再 `error` ⇒ 保持未闭、记第 N 次。**④ 机器知识**＝`/sync` cron 未传 `weekdays_only`（默认 False）⇒ 每天都是应跑日，11-01 周日 02:00 照跑；`misfire_grace_time=1800` 只在**进程在场但调度被卡**时补跑，**进程不在场则整天跳过**。
 > **⑤ 顺手修掉一处我自己的错**＝上一轮把「10-30 门槛行」写进了「10-22」小节（标题在 L630）⇒ 本轮归位到「当日轮明细 · 10-30」并去掉重复的现场读数段（同一事实只留一个家）。
 
 
