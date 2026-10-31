@@ -26,6 +26,13 @@ scripts/       容器冒烟脚本
 
 ## 本地启动
 
+> **现值更正（2026-10-30，只增这一行；下面 `1) data-service 2) web` 的编号原句不回改）**＝
+> **起服务顺序必须是「先 web、后 ds」**，本块下面的编号顺序会让人反着起：
+> ds 启动约 5s 后热点补跑要 `GET` web 的 `/api/hotspots/ingest`，**web 不在**时当天热点补跑直接跳过
+> 且该进程不再重试（当天热点就丢了）。权威配方见 [docs/README.md](docs/README.md) 的「常用命令」：
+> ds 要 `SYNC_CATCHUP=off`、`PYTHONPATH=.`、用 `.venv/Scripts/python.exe`、**不带** `--reload`、
+> **不手设** `NO_PROXY`；`HTTPS_PROXY` 由 `data-service/.env` 供。
+
 ```bash
 # 1) data-service（终端 1）
 cd data-service

@@ -431,6 +431,7 @@ US_LIST_PAGES=15                 # 美股名单每次取几页（CR9-59／甲）
 - P3：手动触发热点任务，digest 落库且相关产品来自**板块成分映射**而非模糊匹配；SSE 实时推送到达前端；无搜索 key 时降级并标注 `inconclusive`
 - P4：问"最近光伏板块有什么热点，相关基金有哪些"，L1 工具链完整、回答含真实行情
 - P5：① 聊天中说"深度分析 600519"，验证意图升档 → 异步任务 → 研报落库 → 会话内推送；② 详情页按钮对 AAPL 触发同一链路；③ 确认 TradingAgents 全程只走 vendor_adapter（可断外网数据源验证 A股链路）；④ 无 Alpha Vantage key 时自动降级且响应标注来源
+  - **现值更正（10-30，只增这一行；上面 ③ 原句不回改）**＝P5 的实装主力是 **B 计划 `custom-multichar`**（见本文件 M5 段），**native TradingAgents 只跑到 spike 验证、未接入主链路** ⇒ ③ 那句按字面读不到预期行为；它不是欠项，native 版留作后续增强（要重开需新的需求字）。
 - P6：① `skills/` 放入一个示例技能，对话命中后确认正文按需注入且未命中时不占上下文；② 接入一个第三方 MCP server（如 Tavily），其工具出现在 Tool Gateway 且可被 Agent 调用，server 挂掉时降级不阻塞对话；③ 用 MCP inspector 连接本项目的 fastmcp server，验证 quote/kline 工具可调
 - P7：`docker compose up` 一键起，数据卷持久化验证
 
