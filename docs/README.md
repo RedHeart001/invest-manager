@@ -30,6 +30,7 @@
 | 查某功能修了没 | [FIX-LEDGER.md](FIX-LEDGER.md) | 每项修了没、怎么验的；**未闭环看板置顶** |
 | 查某轮发现了什么 | [CODE-REVIEW.md](CODE-REVIEW.md) | 当前轮 CR9 的完整发现；历史轮次在 [history/](history/) |
 | 回顾执行过程 | [history/](history/) | 按主题归档被压缩的过程材料，[history/README.md](history/README.md) 有索引 |
+| 评估「想做但还没做」的项 | [BACKLOG-PLAN.md](BACKLOG-PLAN.md) | 8 项待办的**可行性＋落地方案＋代价**；不是需求、不是账本，只答"能不能做、怎么落不出事" |
 
 > **位置更正（10-30，只增这一行；上面表格原句不回改）**＝上表「CODE-REVIEW.md：**当前轮 CR9**」的
 > 现值＝**当前开放轮次是 CR10**（-1…-5 已闭；-6 已立项并落修＝腾讯备源日 K 窄窗口），CR9 已于
