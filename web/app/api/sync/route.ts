@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { SYNC_TYPES, syncAll, syncType } from "@/lib/sync";
 import { checkRequestOrigin } from "@/lib/request-origin";
+import { requireWriteToken } from "@/lib/guard";
 
 // CR-07（本轮 code review）：显式声明 maxDuration。
 // C3-①（CR7-9，2026-09-25）：C0 实测全 5 类型 9.6min（部分源失败日）~13min
@@ -22,6 +23,11 @@ export async function POST(req: NextRequest) {
   const blocked = checkRequestOrigin(req);
   if (blocked) {
     return NextResponse.json({ error: blocked }, { status: 403 });
+  }
+  // G7 最小版：WRITE_TOKEN 未设时放行（本机默认态），设了才校验（见 lib/guard.ts）
+  const unauthorized = requireWriteToken(req);
+  if (unauthorized) {
+    return NextResponse.json({ error: unauthorized }, { status: 401 });
   }
   const type = req.nextUrl.searchParams.get("type");
   if (type && !SYNC_TYPES.includes(type as (typeof SYNC_TYPES)[number])) {

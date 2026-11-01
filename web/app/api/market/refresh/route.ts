@@ -7,6 +7,7 @@ import {
   startRefreshProgress,
 } from "@/lib/refresh-progress";
 import { checkRequestOrigin } from "@/lib/request-origin";
+import { requireWriteToken } from "@/lib/guard";
 
 // CR-07（本轮 code review）：全类型快照刷新走东财批量通道，单类型即数分钟。显式声明 maxDuration。
 // （C3-②/CR7-9 勘误 2026-09-25：原注释"stock 约 2.9 万只"把量级安错了类型——
@@ -37,6 +38,11 @@ export async function POST(req: NextRequest) {
   const blocked = checkRequestOrigin(req);
   if (blocked) {
     return NextResponse.json({ error: blocked }, { status: 403 });
+  }
+  // G7 最小版：WRITE_TOKEN 未设时放行（本机默认态），设了才校验（见 lib/guard.ts）
+  const unauthorized = requireWriteToken(req);
+  if (unauthorized) {
+    return NextResponse.json({ error: unauthorized }, { status: 401 });
   }
   const type = req.nextUrl.searchParams.get("type") ?? "all";
   // G6：纳入 hk（港股）。#46（CR9-74）：纳入 us——此前 `?type=all` 也叫不回 us 的价，

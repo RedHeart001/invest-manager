@@ -267,6 +267,18 @@ web/lib/guard.ts（新文件）
 | 预估工时（完整版） | 2–3 天 |
 | 碰 `DS_RESPONSE_FILES`？ | 否 |
 
+#### ✅ 落地记录（2026-11-02 00:5x，最小版已完成）
+
+主人的字（11-02 盘点轮四答）＝「深入分析p3+p4」⇒ 最小版本轮落地。**实际落点比上面方案窄一处，理由是现查的**：
+方案原写"应用到 4 个写端点"，逐个查调用方＝ds 只调 `/api/sync`（`sync_scheduler.py:445`）与
+`/api/market/refresh?type=all`（`:89/:320`）两个；`/api/hotspots/run`（`HotspotFeed.tsx:187` 手动按钮）与
+`/api/research/start`（详情页按钮＋聊天 L2）都是**浏览器端调用方**——浏览器持不了 secret，挂上守卫＝设
+`WRITE_TOKEN` 那一刻这两个按钮死 ⇒ **排除**（上表把 hotspots/run 记在"ds 调用"一列是误记，实况 ds 从不调它）。
+落地＝`web/lib/guard.ts` 的 `requireWriteToken`（未设/空串 ⇒ 放行＝本机零破坏；`Authorization: Bearer` 或
+`x-write-token`），挂两条路由、位置在 `checkRequestOrigin` 之后、拒绝回 401；**ds 侧零改动**（上云前设值时在
+`sync_scheduler.py` 两处调用点同批加头）。测＝`web/lib/guard.test.ts` **11 条**（三态 7＋接线 2＋排除面牙齿 2），
+C34 钻＝摘 sync 接线 ⇒ **恰 1 红**、复原后全绿。
+
 ---
 
 ### 2.4 美股全量「乙」913 页（P6）
