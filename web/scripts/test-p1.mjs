@@ -140,6 +140,22 @@ try {
     litJson(fromHome),
   );
 
+  // R18（2026-11-01）自选清单页＝详情页的**第五个**入口。这一对断言防的是同一个老坑：
+  // 新入口带出去的 `?from=watchlist` 若没进 `FROM_KEYS` 白名单，`parseFrom` 会把它读成
+  // "没有来路" ⇒ 从自选进详情后既不高亮、按钮也只会写「← 返回」并回首页。
+  const watchlistHtml = await (await fetch(`${BASE}/watchlist`)).text();
+  check(
+    "自选页点亮「自选」恰好一处（新一级入口在导航里真的可点亮）",
+    litJson(watchlistHtml) === '["/watchlist"]',
+    litJson(watchlistHtml),
+  );
+  const fromWatch = await (await fetch(`${BASE}/product/stock/600519?from=watchlist`)).text();
+  check(
+    "产品页 from=watchlist → 点亮「自选」且按钮写「← 返回自选」",
+    litJson(fromWatch) === '["/watchlist"]' && fromWatch.includes("← 返回自选"),
+    litJson(fromWatch),
+  );
+
   const productHtml = await (await fetch(`${BASE}/product/stock/600519`)).text();
   check(
     "详情页无面包屑且有「← 返回」入口（CR8-5/CR8-6）",

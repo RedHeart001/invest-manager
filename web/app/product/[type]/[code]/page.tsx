@@ -17,15 +17,9 @@ import { detectPhases } from "@/lib/phases";
 import { buildProfile, isExchangeTradedFund, type QuoteEnriched } from "@/lib/profile";
 import { prisma } from "@/lib/prisma";
 import { parseTags } from "@/lib/score";
-
-const TYPE_LABEL: Record<string, string> = {
-  stock: "股票",
-  fund: "基金",
-  bond: "债券",
-  crypto: "虚拟币",
-  hk: "港股",
-  us: "美股",
-};
+// R18（2026-11-01）：类名表抽到 `lib/type-label.ts` 单一来源
+// （此前本文件与搜索页各硬写一份逐字相同的表）。
+import { TYPE_LABEL } from "@/lib/type-label";
 
 function fmtVolume(v: number | null | undefined): string {
   if (v == null || !Number.isFinite(v)) return "--";

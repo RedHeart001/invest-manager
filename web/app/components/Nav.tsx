@@ -17,9 +17,13 @@ import {
 // 产品页有四个入口、分属三个一级（见 `lib/provenance.ts` 的说明），前缀派生的"父级"
 // 只能对其中一个说实话。产品页点亮哪一项由**来路**（`?from=`）决定，
 // 没有来路时退回本会话上一次的来路，两者都没有就不点亮。
+//
+// 2026-11-01（R18）：新增「自选」一级＋第五个产品页入口。`key` 必须能在
+// `FROM_KEYS`／`FROM_LABEL` 里找到，否则 `lib/provenance.test.ts` 会红。
 const ITEMS: { key: FromKey; href: string; label: string }[] = [
   { key: "home", href: "/", label: "首页" },
   { key: "search", href: "/search", label: "搜索" },
+  { key: "watchlist", href: "/watchlist", label: "自选" },
   { key: "chat", href: "/chat", label: "智能助手" },
 ];
 

@@ -33,6 +33,7 @@
 | R15 | **多源自动降级 + 请求频率控制**：同类数据源主备链（主源失败/熔断 → 自动切备源，响应标注来源与降级状态）；按"源族"令牌桶限速（东财多域名共享额度，因封禁为 IP 级）+ 连续失败熔断冷却；**目标是用户侧永不空白**，无可用备源时显式缺口说明 | P2 收尾（2026-09-12 批准） | provider 主备链 + `app/utils/limiter.py` + 腾讯/新浪备源 provider |
 | R16 | **异常/失败终态必须如实呈现**：服务端失败必须以失败形态呈现，**不得回落为"成功/中性"等假象**（如研报失败不得渲染成"已完成·中性评级"）；降级与数据缺口一律显式标注，不粉饰 | CR5 审查（2026-09-17） | 各前端消费点（`ChatUI` 研报推送、`ResearchPanel` 等） |
 | R17 | **长时运行态必须可退出**：异步任务/轮询在到达上限或判定陈旧（执行方疑似重启）时，必须给出**可操作出口**（重新发起/重试入口），不允许用户停留在无出口的等待态 | CR5 审查（2026-09-17） | `ResearchPanel` 轮询 + `lib/research-stale.ts` |
+| R18 | **自选清单页**：`Watchlist` 此前只有「加自选」写入入口（G5）与搜索排序的读取，**没有任何页面把它列出来** ⇒ 加完无处核对。要求：`/watchlist` 一级路由＋导航入口；按类型分组展示（代码/名称/现价/涨跌幅），支持逐条移除；行情与详情页同口径（含币种），取不到价显示 `--` 并**不猜成因**（R16） | **2026-11-01 主人改口**（原 10-22 拍板「不做」，见下条口径说明） | `web/app/watchlist/`（page＋loading＋WatchRemoveButton）、`web/lib/watchlist.ts`、`web/lib/type-label.ts`；`lib/provenance.ts` 的 `FROM_KEYS` 增 `watchlist`（详情页第五个入口）；`lib/quote-enrich.ts` 补分批（见下条） |
 
 > R16/R17 是 R5（加载反馈）的收尾对应项：R5 管"等待开始时必须有反馈"，R16/R17 管"等待结束时必须如实、且有出口"。三条共同构成完整的加载/等待体验约定。
 
@@ -126,6 +127,10 @@
 - 兜底：FTS 无结果时 LLM 提取意图关键词再查（**G4 落地 2026-09-19**：`lib/search.ts` 的 `llmFallback` + `lib/llm.ts` 的 `chatJson`；失败静默降级不阻塞搜索）
 - UI：搜索框 + 类别 Tab + 结果列表（代码、名称、最新价、涨跌幅、标签），点击进详情（点击行为落 `SearchClickLog`）
 - **自选（Watchlist）可写（G5 落地 2026-09-19）**：`/api/watchlist`（GET/POST/DELETE）+ 详情页「加自选」按钮；此前该表只被搜索加权**读取**、无写入入口
+- **自选清单页（R18 落地 2026-11-01）**：`/watchlist` 一级路由 + 导航「自选」入口，按类型分组展示（代码/名称/现价/涨跌幅 + 逐条移除）。**这推翻了 10-22 那次「Watchlist 已拍板＝不做」**——那是当时的产品判断，11-01 主人改口要做，按"需求变更"处置：本条是需求本体，`FIX-LEDGER` 10-22 那行**原样不改**（只增不改），其现值更正在账本内另起一行指向本条。
+  - **为什么是 Server Component**：C32 要求"在途请求必须可取消、过期响应不得写入状态"。服务端渲染完才下发 ⇒ 天然没有在途请求，C32 全部约束不适用。若做成客户端组件（为实时刷新），就得自建 `AbortController` ＋ 请求序号守卫，成本翻倍还要过 C32 验收，而清单页**不需要实时性**。
+  - **不为此新增 BFF `/api/quotes` 路由**：BFF 路由的意义是给浏览器提供接口，而本页在服务端、直接走 `lib/data-service.ts`（与 `browseProducts` 同形）。多开一条没有浏览器调用方的路由，只会多一份要守 C33 白名单的面。
+  - **补了一处静默截断**（`lib/quote-enrich.ts`）：ds `/quotes` 对 `codes` 有硬上限 **100** 且**静默截断**（`data-service/app/main.py` 的 `code_list[:100]`）。`search.ts`／`browse.ts` 每页 ≤50 条碰不到，但清单页**按类型送全量** ⇒ 自选超 100 只时第 101 只起会安静地没有价格（屏上一串 `--`，看着像上游没数据）。现按上限分批顺序发；`DS_QUOTES_MAX_CODES` 是**镜像 ds 的常量**，ds 改上限时这里要跟着改。
 - **分类浏览（R14，2026-09-12）**：空关键词 + 分类标签 → 浏览模式（20 条/页，覆盖全部 3.4 万产品）；排序支持涨幅（快照列全局排序 + 当前页实时富集展示）/名称（拼音序）/代码；行情快照随每日同步自动刷新，亦可 `POST /api/market/refresh` 手动触发；快照缺失时退化为代码序并在行情列显示实时值
 - **结果价格富集（覆盖全部产品类型，单次批量请求）**：
   - 股票 / 场内基金（ETF、LOF）/ 可转债 → 东财实时行情（`ulist.np` 批量接口）
@@ -498,7 +503,7 @@ US_LIST_PAGES=15                 # 美股名单每次取几页（CR9-59／甲）
 | **G2** | 产品主数据无自动同步 | **实现**（已闭环） | `data-service/app/sync_scheduler.py` + `/sync/status`、`/sync/run`；默认每日 02:00（北京时间），含启动补跑 |
 | **G3** | R13 双源交叉验证未落地 | **✅ 已落地（2026-09-25，`d4c9703`；方案 2026-09-24 拍板 = 详情页按需核对 B1 方案 ①）** | `providers/chain.py#verify_metric` + `/quote/verified`（按需端点，不叠加普通 /quote，避免放大外部请求）；接入 = 详情页现状区「双源核对」按钮 → BFF `GET /api/quote/verify`（**实落路由名**，非最初计划的 `?verify=1` 查询参数形态）→ `/quote/verified`，偏差在 `note` 显式标注（R16：备源不可用时如实展示，不静默）。执行记录见 [FIX-LEDGER.md](FIX-LEDGER.md) 批次 B；遗留（手测未跑 / `crossChecked` 语义）见 R13 行与 CR9-11 |
 | **G4** | M2 FTS 无结果时 LLM 兜底召回未实现 | **实现** | `lib/search.ts#llmFallback` + `lib/llm.ts#chatJson`；LLM 未配置/失败时静默降级 |
-| **G5** | Watchlist 只读不通写 | **实现** | `/api/watchlist`（GET/POST/DELETE）+ `app/components/WatchButton.tsx`（详情页） |
+| **G5** | Watchlist 只读不通写 | **实现** | `/api/watchlist`（GET/POST/DELETE）+ `app/components/WatchButton.tsx`（详情页）。**2026-11-01 补上另一半**＝清单页缺失（"能存不能看"），见 R18 |
 | **G6** | `hk` 类型无 provider | **取数侧实现 + 补备源**；消费侧部分闭环 ⚠️ | ① `data-service/app/providers/hk_provider.py`（东财直连 + **多 host 降级**，非 akshare 封装）；② **腾讯港股备源**（扩展 `tencent_provider`：`_hk_symbol`/`_symbol_for` + `register_chain(["hk"], …, position=1)`）；③ web 侧 `SYNC_TYPES`、搜索 Tab、行情富集、快照白名单纳入 hk。**消费侧仍有断链**（CR7-4） |
 | **G7** | 写接口无鉴权 | **部分实现** ⚠️ | B4 已加 Origin/Referer 校验（拦浏览器跨站简单表单）；**完整身份鉴权留待上云前**补齐 |
 

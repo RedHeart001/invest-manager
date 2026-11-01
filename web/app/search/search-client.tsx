@@ -8,6 +8,7 @@ import { getCachedSearch, getLastSearch, setCachedSearch } from "@/lib/search-ca
 import { priceWithCurrency } from "@/lib/currency";
 import type { StaleNote } from "@/lib/freshness";
 import { beijingStamp } from "@/lib/time";
+import { TYPE_LABEL } from "@/lib/type-label";
 import type { SearchResult } from "@/lib/search";
 
 const TABS = [
@@ -22,14 +23,8 @@ const TABS = [
 
 type Result = SearchResult;
 
-const TYPE_LABEL: Record<string, string> = {
-  stock: "股票",
-  fund: "基金",
-  bond: "债券",
-  crypto: "虚拟币",
-  hk: "港股",
-  us: "美股",
-};
+// R18（2026-11-01）：类名表抽到 `lib/type-label.ts` 单一来源。
+// 此前本文件与产品详情页各硬写一份逐字相同的表，两处无任何交叉约束。
 
 // 三种成因各说各的话（CR9-57）。`pending` 刻意不写"未更新"——它不是陈旧；也刻意不写
 // "正在刷新"——刷新腿可能整晚没跑，那会变成第二种谎。它只说用户自己核对得到的两件事：

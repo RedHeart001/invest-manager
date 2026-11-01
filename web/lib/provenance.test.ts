@@ -17,7 +17,12 @@ import {
 describe("parseFrom（白名单）", () => {
   it("① 三个合法来路各自通过，标签齐全", () => {
     expect(["search", "home", "chat"].map(parseFrom)).toEqual(["search", "home", "chat"]);
-    expect(Object.keys(FROM_LABEL).sort()).toEqual(["chat", "home", "search"]);
+    expect(Object.keys(FROM_LABEL).sort()).toEqual(["chat", "home", "search", "watchlist"]);
+  });
+
+  it("①b 自选来路（2026-11-01 R18 新增第五个入口）在册", () => {
+    expect(parseFrom("watchlist")).toBe("watchlist");
+    expect(FROM_LABEL.watchlist).toBe("自选");
   });
 
   it("② 🔁 反向：白名单外一律当作「没有来路」（不得被当成一级去点亮）", () => {
@@ -45,6 +50,13 @@ describe("hrefForFrom（无历史时的确定目标）", () => {
 
   it("③c home→首页、chat→智能助手", () => {
     expect([hrefForFrom("home", null), hrefForFrom("chat", null)]).toEqual(["/", "/chat"]);
+  });
+
+  it("③d 自选→/watchlist（R18）。🔁 反向：这是新增 FROM_KEYS 时最容易漏的那个分支——漏了会静默落进 `/`，屏上写「返回自选」却回首页", () => {
+    expect(hrefForFrom("watchlist", null)).toBe("/watchlist");
+    // `q` 对自选无意义，不许被拼进去造出 /watchlist?q=…
+    expect(hrefForFrom("watchlist", "茅台")).toBe("/watchlist");
+    expect(planBack("watchlist", null)).toEqual({ label: "← 返回自选", href: "/watchlist" });
   });
 });
 

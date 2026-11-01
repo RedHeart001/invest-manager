@@ -537,6 +537,76 @@ async function main() {
     }
   }
 
+  // ---------- [12] 自选清单页（R18，2026-11-01） ----------
+  // 这一节锁的是「Watchlist 能存不能看」这个缺口被补上之后，**屏上真的出来了**。
+  // [11] 判的是 API 回环（看不见 UI 就照样绿）；本节判 SSR 产物。
+  // 形态：合成一行 → 打开 /watchlist 看得到 → 删掉 → 再打开看不到。
+  // 零额外出网口径：合成行是 stock，页面富集按类型批量 ⇒ 只发 **1 次** ds /quotes
+  // （与 test-p2 既有的 stock 行情断言同族，不新增额度档）。
+  console.log("\n[12] 自选清单页 SSR（R18，合成行回环，收尾必删）");
+  {
+    const CODE = "zzz-watch-page";
+    const NAME = "自选清单页自检";
+    const drop = () =>
+      retry500(() => fetch(`${BASE}/api/watchlist?type=stock&code=${CODE}`, { method: "DELETE" }));
+
+    try {
+      // 先清一遍：上一轮若异常中断可能留残行，留着会让"页面上有它"这条断言假绿
+      await drop().catch(() => {});
+      const add = await retry500(() =>
+        fetch(`${BASE}/api/watchlist`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ type: "stock", code: CODE, name: NAME }),
+        }),
+      );
+      ok("R18：合成自选写入 200", add.status === 200, `status=${add.status}`);
+
+      // dev 级瞬态（#31）：写库会让 next dev 重编译，落在窗口内的请求由 Next 自己抛空体 500
+      let page = await retry500(() => getText(`${BASE}/watchlist`));
+      if (page.status === 500) page = await getText(`${BASE}/watchlist`);
+      ok("R18：/watchlist 200（清单页存在且能渲染）", page.status === 200, `status=${page.status}`);
+      ok(
+        "R18：刚加的自选出现在页面上（名称＋代码都在）",
+        page.text.includes(NAME) && page.text.includes(CODE),
+        page.text.includes(CODE) ? "只有代码没有名称" : "整行都没出现",
+      );
+      ok(
+        "R18：分组标题是中文类名（stock ⇒ 「股票」），不是英文标识",
+        page.text.includes(">股票<") || page.text.includes("股票</h2>"),
+        "没找到「股票」分组标题",
+      );
+      ok(
+        "R18：每一行带「移除」入口（清单页不只是只读）",
+        page.text.includes("移除") && page.text.includes(`从自选移除 ${CODE}`),
+        "没找到移除按钮",
+      );
+      // R16：取不到价时价格列必须是 `--`，不许是 0、也不许整格消失
+      ok(
+        "R18：价格列有占位形态（数值或 --，不许空白格）",
+        page.text.includes("tabular-nums"),
+        "没找到价格列容器",
+      );
+
+      await drop();
+      const after = await retry500(() => getText(`${BASE}/watchlist`));
+      ok(
+        "R18🔁：删掉之后页面上不再出现这一行（读写同源，不是静态快照）",
+        after.status === 200 && !after.text.includes(CODE),
+        `status=${after.status} 仍含 CODE=${after.text.includes(CODE)}`,
+      );
+    } finally {
+      await drop().catch(() => {});
+      const leftover = await retry500(() => getJson(`${BASE}/api/watchlist`));
+      const rows = Array.isArray(leftover.body.items) ? leftover.body.items : [];
+      ok(
+        "R18：收尾自证 leftover=0（不管中间断言红绿，库里都不留这行）",
+        !rows.some((x) => x.code === CODE),
+        JSON.stringify(rows.filter((x) => x.code === CODE)),
+      );
+    }
+  }
+
   // ---------- 结果 ----------
   console.log(`\n== 结果：${passed} 通过 / ${failed} 失败 ==`);
   if (failures.length) {

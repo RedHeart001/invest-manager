@@ -5,13 +5,18 @@
 // ——旧实现把 `/product` 并入「搜索」，主人因此把"点去分析"误判成"跳到了搜索页"。
 // 来路是**每次访问**的属性，不是路由的静态属性，只能由入口显式带过来。
 
-export const FROM_KEYS = ["search", "home", "chat"] as const;
+// 2026-11-01（R18 自选清单页）：新增 `watchlist` 来路。加它的**唯一**原因是自选页
+// 成了详情页的第五个入口——不在这里登记，那一页带出去的 `?from=watchlist` 会被
+// `parseFrom` 的白名单挡成"没有来路"，于是从自选进详情后既不高亮、返回也回不去自选，
+// 正是 10-01 立这一层要消灭的那形。**白名单必须与"实际会带 from 的入口"同集**。
+export const FROM_KEYS = ["search", "home", "chat", "watchlist"] as const;
 export type FromKey = (typeof FROM_KEYS)[number];
 
 export const FROM_LABEL: Record<FromKey, string> = {
   search: "搜索",
   home: "首页",
   chat: "智能助手",
+  watchlist: "自选",
 };
 
 /**
@@ -43,10 +48,22 @@ export function storeFrom(from: FromKey): void {
   }
 }
 
-/** 由 `from`（＋搜索词）推导的跳转目标：拿不到 `back()` 许可证时、以及文案承诺那一页时的目的地。 */
+/**
+ * 由 `from`（＋搜索词）推导的跳转目标：拿不到 `back()` 许可证时、以及文案承诺那一页时的目的地。
+ *
+ * ⚠️ 2026-11-01：**每加一个 `FROM_KEYS` 就必须在这里给一个目标**。原来是
+ * `from === "chat" ? "/chat" : "/"` 的三元收尾，新增 `watchlist` 时会静默落进那个 "/"
+ * ——屏上按钮写着「← 返回自选」、点下去回首页，正是 10-08/10-09 反复踩过的
+ * "文案与目标取两个键"。改用穷举 `Record` 后，漏写会变成 **tsc 报错**而不是线上错位。
+ */
 export function hrefForFrom(from: FromKey, q: string | null): string {
   if (from === "search") return q ? `/search?q=${encodeURIComponent(q)}` : "/search";
-  return from === "chat" ? "/chat" : "/";
+  const fixed: Record<Exclude<FromKey, "search">, string> = {
+    home: "/",
+    chat: "/chat",
+    watchlist: "/watchlist",
+  };
+  return fixed[from];
 }
 
 /**
