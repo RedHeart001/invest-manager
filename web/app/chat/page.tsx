@@ -3,7 +3,15 @@ import ChatUI from "./ChatUI";
 // 智能助手（PLAN M4：统一会话入口 /chat，流式输出 + function calling）
 export const dynamic = "force-dynamic";
 
-export default function ChatPage() {
+export default async function ChatPage({
+  searchParams,
+}: {
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}) {
+  // R19（2026-11-02）：热点「去分析」入口带 ?prompt= 进来时只预填输入框、不自动发送
+  const params = await searchParams;
+  const raw = params.prompt;
+  const prompt = typeof raw === "string" ? raw : (raw?.[0] ?? "");
   return (
     <main className="mx-auto max-w-4xl px-6 py-8">
       <h1 className="text-2xl font-bold tracking-tight">智能助手</h1>
@@ -12,7 +20,7 @@ export default function ChatPage() {
       </p>
 
       <div className="mt-6">
-        <ChatUI />
+        <ChatUI initialInput={prompt || undefined} />
       </div>
 
       <p className="mt-6 text-xs text-zinc-400">

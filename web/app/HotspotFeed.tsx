@@ -7,6 +7,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { DigestRow } from "@/lib/hotspots";
+import { buildHotspotChatHref } from "@/lib/hotspot-prompt";
 
 // 北京时间 HH:mm（代码审查修复）：此前直接 slice(11,16) 解析 ISO（UTC），
 // 显示比北京时间早 8 小时。
@@ -351,12 +352,12 @@ export default function HotspotFeed({
               <div className="mt-4 flex flex-wrap items-center gap-3 text-xs">
                 {(r.related ?? []).length > 0 ? (
                   <Link
-                    href={`/product/${r.related[0].type}/${r.related[0].code}?from=home#research`}
+                    href={buildHotspotChatHref(r)}
                     className="rounded bg-zinc-900 px-3 py-1 font-medium text-white hover:bg-zinc-700"
                   >
-                    {/* CR8-2：原名「深度解读」名不副实——它只是跳 related[0] 详情页的
-                        #research 锚点，不触发分析、不带这条热点的上下文。拍板＝只改名，
-                        把目标标的写进按钮，接口与跳转一律不动。 */}
+                    {/* CR8-2（2026-09-30）曾定档「只改名、接口与跳转一律不动」；2026-11-02
+                        主人新字（PLAN R19）推翻其中跳转半句：改跳 /chat?prompt=（热点标题＋摘要），
+                        chat 页只预填输入框、不自动发送。按钮字面「去分析 <标的>」维持不变。 */}
                     去分析 {r.related[0].name}
                   </Link>
                 ) : (

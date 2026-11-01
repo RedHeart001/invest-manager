@@ -88,7 +88,7 @@ const mdComponents = {
   ),
 };
 
-export default function ChatUI() {
+export default function ChatUI({ initialInput }: { initialInput?: string }) {
   const [sessions, setSessions] = useState<SessionItem[]>([]);
   const [sessionId, setSessionId] = useState<string | null>(null);
   // 研报推送按发起会话过滤（代码审查修复）：用 ref 避免订阅 effect 随会话重建
@@ -97,7 +97,8 @@ export default function ChatUI() {
     sessionIdRef.current = sessionId;
   }, [sessionId]);
   const [items, setItems] = useState<ChatItem[]>([]);
-  const [input, setInput] = useState("");
+  // R19：?prompt= 入口的预填只发生在挂载时；不自动发送，发送仍由用户确认
+  const [input, setInput] = useState(initialInput ?? "");
   const [streaming, setStreaming] = useState(false);
   const [statusText, setStatusText] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
