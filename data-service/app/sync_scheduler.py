@@ -268,6 +268,19 @@ def _web_base() -> str:
     return os.environ.get("WEB_BASE_URL", "http://localhost:3000")
 
 
+def _write_headers() -> dict[str, str]:
+    """G7 最小版（CR10-7）：web 的 `requireWriteToken` 一旦配值，本文件这两条腿是它**唯一的
+    调用方**——不带头就是当晚同步腿＋链式刷新腿双双 401，而 `run_now` 在认领那一刻已把
+    当日 marker 落下（CR9-94），于是这一天不会再自动补跑。
+
+    未配＝返回 `{}`，与 `web/.env` 空值那一档同形（`guard.ts` 的 `?? ""` 放行），本机默认态
+    行为一字不变。照 `research/tasks.py:130` 的形状在**调用时**读 env，不 module-level 固化，
+    这样 `load_env()` 的先后不影响取值。⚠️ 值只进请求头，任何分支不得打印。
+    """
+    token = os.environ.get("WRITE_TOKEN", "")
+    return {"x-write-token": token} if token else {}
+
+
 def _refresh_progress() -> dict | None:
     """#33 甲（CR9-60）：刷新腿**被打断**时，进度只能去问 web。
 
@@ -319,7 +332,7 @@ def _refresh_leg(trigger: str, force: bool = False) -> dict:
     timeout_s = REFRESH_CALLBACK_TIMEOUT_S
     url = f"{_web_base()}{REFRESH_URL_PATH}" + ("&force=1" if force else "")
     try:
-        r = requests.post(url, timeout=timeout_s)
+        r = requests.post(url, timeout=timeout_s, headers=_write_headers())
         if r.status_code >= 300:
             out: dict = {
                 "ok": None,
@@ -444,7 +457,7 @@ def _execute(trigger: str, force: bool = False) -> dict:
     # 主人"今天就是要重刷一遍"会撞上自己的闸门（闸门的用途是防手滑，不是防他）。
     url = f"{_web_base()}/api/sync" + ("?force=1" if force else "")
     try:
-        r = requests.post(url, timeout=timeout_s)
+        r = requests.post(url, timeout=timeout_s, headers=_write_headers())
         if r.status_code >= 300:
             result = {
                 "ok": None,
