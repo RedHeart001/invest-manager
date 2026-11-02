@@ -31,6 +31,8 @@ docker-compose.override.yml
 
 # CR4（P3）：verify-all.mjs 的产物（跑测试时生成）
 verify-suites.txt
+# CR10-8③（11-02）：同一把尺另存的带时刻明细（防"下一把把上一把盖掉"），同为产物、不入库
+verify-suites-*.txt
 
 # 门禁实测的字面回执（`*.out`）：docs 引用其文件名作证据，故留在磁盘但永不入库。
 # 上面第 11 行的 `out/` 只匹配目录，挡不住 `xxx.out`——10-01 那轮 `git status` 里

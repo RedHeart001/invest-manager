@@ -334,6 +334,15 @@ def run_once(trigger: str = "scheduled", *, label: str | None = None) -> dict:
     result["tookMsTotal"] = int((time.time() - started) * 1000)
     # #29（10-03 断电实测）：内存那份随进程一起死，"昨晚到底备过没有"就不能只指望它
     # ⇒ 同一份结果落盘；**失败轮同样要落**，否则"没备"仍然不可见。
+    #
+    # CR10-8③（11-02）：`label` 的既有语义**一字不动**＝"这一把是哪条腿"，daily／manual 就是
+    # null（`:385` 那句注释说的正是这件事）。问题在它同时当过 **CR10-4 的验收凭据** ⇒ 于是每天
+    # 03:30 那把 daily 都把 startup 那一份擦掉：11-02 现测 `state.json` 的 `label=None`，
+    # 而账上 10-30 那个 `label:"startup"` 的读数早已不在盘上（凭据住在会被覆写的单文件里）。
+    # ⇒ 另开两枚位：只由"带 label 的那一把"刷新，其余情况**继承盘上那一份**。
+    # 这两一位只落文件、不进 `/health`（`health()` 按键取值，`:499-518` 不列它们＝`:282` 那条
+    # "不回显／不新增观测面"的既有决定自动保住，不需要额外守卫）。
+    prev = read_state(outdir) or {}
     result["stateWritten"] = _write_state(
         {
             "lastRun": last_run,
@@ -342,6 +351,8 @@ def run_once(trigger: str = "scheduled", *, label: str | None = None) -> dict:
             "runs": runs,
             "trigger": trigger,
             "label": label,
+            "startupLabel": label or prev.get("startupLabel"),
+            "startupAt": last_run if label else prev.get("startupAt"),
             "skippedReason": result.get("skippedReason"),
             "kept": result.get("kept"),
         },

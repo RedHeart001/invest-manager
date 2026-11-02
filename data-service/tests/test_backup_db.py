@@ -776,6 +776,94 @@ def test_backup_state_label_separates_the_two_catchup_entries() -> None:
             bs._state.update(orig_state)
 
 
+def test_backup_startup_evidence_survives_daily() -> None:
+    """CR10-8③（11-02）：`startup` 那一份证据**不许被下一把 daily 擦掉**。
+
+    触发读数＝11-02 现查 `backups/state.json`：`label=None`（`ok=True·lastRun=2026-11-02T03:30:01`）。
+    这不是回归——`label` 的语义本来就是"这一把是哪条腿"，daily／manual 理应为 null（上面那节
+    的 ③ 就是钉这件事的）。**问题是 CR10-4 当年拿它当验收凭据**，于是每天 03:30 那把 daily
+    都会把 `startup` 那份证据覆盖掉：账上 10-30 记的那个 `label:"startup"` 读数早已不在盘上。
+    ⇒ 另开 `startupLabel`／`startupAt` 两位：只由带 label 的那一把刷新，其余继承盘上那份。
+
+    四枚各有分工，② ③ 是这把尺的牙齿（少任何一条，"落了对的键但每次重写"也能蒙过去）：
+      ① 带 label 的那一把 ⇒ 两枚新位同时落；
+      ② 紧接着的 daily ⇒ `label` 仍为 null（不破坏上面那节的既有语义）**但**证据两位还在；
+      ③ 🔁 `startupAt` 不许等于 daily 的 `lastRun`（若把它无条件写成当把时刻 ⇒ 这枚红）；
+      ④ 🔁 全新目录、第一把就是 daily ⇒ 两位都在但值为 null（不许凭空造一份"起服务补过"）。
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        src = os.path.join(tmp, "dev.db")
+        _make_db(src, rows=3)
+        out = os.path.join(tmp, "backups")
+        keys = ("DB_PATH", "BACKUP_DIR", "BACKUP_KEEP", "BACKUP_STALE_HOURS", "BACKUP_MAX_AGE_DAYS")
+        orig_env = {k: os.environ.get(k) for k in keys}
+        orig_state = dict(bs._state)
+        try:
+            os.environ.update({"DB_PATH": src, "BACKUP_DIR": out, "BACKUP_KEEP": "7"})
+            os.environ.pop("BACKUP_STALE_HOURS", None)
+            os.environ.pop("BACKUP_MAX_AGE_DAYS", None)
+
+            r1 = bs.run_once("startup-catchup", label="startup")
+            d1 = bs.read_state(out) or {}
+            check("CR10-8③①：带 label 的那一把把证据落成两位（startupLabel＋startupAt）",
+                  r1.get("ok") is True and d1.get("startupLabel") == "startup"
+                  and bool(d1.get("startupAt")), str(d1))
+            first_at = d1.get("startupAt")
+
+            r2 = bs.run_once("daily")
+            d2 = bs.read_state(out) or {}
+            check("CR10-8③②：下一把 daily 之后 `label` 仍是 null（上面那节的既有语义没被动）",
+                  r2.get("ok") is True and d2.get("trigger") == "daily" and d2.get("label") is None,
+                  "%s｜%s" % (str(r2), str(d2)))
+            check("CR10-8③②：但 startup 那份证据还在（这就是 CR10-4 从前每天被擦掉的那一格）",
+                  d2.get("startupLabel") == "startup" and d2.get("startupAt") == first_at, str(d2))
+
+            # ③ 的样本要让两个时刻**必然分得开**：同一秒里连跑两把时，上面那条"不等"根本不成立
+            # （11-02 首跑我就这么假红了一次：startupAt 与 lastRun 都是 12:41:53）。
+            # ⇒ 先手工落一份带旧证据的 state，再跑一把 daily，判它有没有把旧时刻顶掉。
+            old_at = "2026-01-01T00:00:00+08:00"
+            bs._write_state({"lastRun": old_at, "ok": True, "outcome": "completed",
+                             "trigger": "startup-catchup", "label": "startup",
+                             "startupLabel": "startup", "startupAt": old_at}, out)
+            bs.run_once("daily")
+            d3 = bs.read_state(out) or {}
+            check("🔁 CR10-8③③：daily 之后 startupAt 仍是那份**旧**时刻（无条件写成当把 last_run ⇒ 这枚红）",
+                  d3.get("label") is None and d3.get("startupAt") == old_at
+                  and d3.get("startupAt") != d3.get("lastRun"),
+                  "startupAt=%s lastRun=%s" % (d3.get("startupAt"), d3.get("lastRun")))
+        finally:
+            for k, v in orig_env.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+            bs._state.clear()
+            bs._state.update(orig_state)
+
+    # ④ 第二枚牙齿要在**全新的盘**上判：同一目录里 prev 已经带着证据，判不出"凭空造"这件事
+    with tempfile.TemporaryDirectory() as tmp2:
+        src2 = os.path.join(tmp2, "dev.db")
+        _make_db(src2, rows=2)
+        out2 = os.path.join(tmp2, "backups")
+        orig_env2 = {k: os.environ.get(k) for k in ("DB_PATH", "BACKUP_DIR", "BACKUP_KEEP")}
+        orig_state2 = dict(bs._state)
+        try:
+            os.environ.update({"DB_PATH": src2, "BACKUP_DIR": out2, "BACKUP_KEEP": "7"})
+            r3 = bs.run_once("daily")
+            d3 = bs.read_state(out2) or {}
+            check("🔁 CR10-8③④：这台机从没起服务补过 ⇒ 两位都在、值为 null（键在场≠证据在场）",
+                  r3.get("ok") is True and "startupLabel" in d3 and d3.get("startupLabel") is None
+                  and d3.get("startupAt") is None, str(d3))
+        finally:
+            for k, v in orig_env2.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+            bs._state.clear()
+            bs._state.update(orig_state2)
+
+
 if __name__ == "__main__":
     test_backup_integrity_and_corrupt_cleanup()
     test_restore_rejects_invalid_backup()
@@ -788,6 +876,7 @@ if __name__ == "__main__":
     test_startup_catch_up_and_age_purge()
     test_startup_hook_is_wired_into_start_scheduler()
     test_backup_state_label_separates_the_two_catchup_entries()
+    test_backup_startup_evidence_survives_daily()
     fails = [x for x in results if not x[1]]
     print(f"\n===== {len(results) - len(fails)}/{len(results)} 通过 =====")
     if fails:

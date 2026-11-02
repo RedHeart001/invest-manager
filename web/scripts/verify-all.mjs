@@ -149,7 +149,26 @@ for (const s of suites) {
   );
   console.log(`${s}: exit=${r.status} 断言 ${ran}/${shapes.join("|")}${mark}`);
 }
-writeFileSync(join(WEB_DIR, "verify-suites.txt"), lines.join("\n"), "utf8");
+// CR10-8③（11-02）：这把尺此前每跑一次就把上一轮的逐套明细**原地盖掉**——11-01 那把的明细
+// 就是这么消失的，而我今早因此把 ④ 误读成"只有汇总行"（其实 stdout 本来只打三处汇总，
+// 见 `:113/:150/:170`；明细一直在这个文件里）。
+// 最新一把仍写 `verify-suites.txt`：docs 里那几处散文指路认的就是这个名字，改名会造出
+// 断链闸看不见的悬空引用（rules `:140` 那条已知限制）；同时另存一枚带北京时刻的件当历史。
+// 已知代价＝文件累积（约 6KB/把，全在 gitignored 里），不做轮转——轮转＝删证据。
+const bj = new Intl.DateTimeFormat("en-GB", {
+  timeZone: "Asia/Shanghai",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  hourCycle: "h23",
+}).formatToParts(new Date());
+const g = (t) => bj.find((x) => x.type === t)?.value ?? "00";
+const detailName = `verify-suites-${g("month")}${g("day")}-${g("hour")}${g("minute")}.txt`;
+const detail = lines.join("\n");
+writeFileSync(join(WEB_DIR, "verify-suites.txt"), detail, "utf8");
+writeFileSync(join(WEB_DIR, detailName), detail, "utf8");
+console.log(`逐套明细：最新＝web/verify-suites.txt｜本轮另存＝web/${detailName}（gitignored，不覆写历史）`);
 if (gaps.length) {
   // 不静默：绿色数字里混着"根本没跑"的断言，正是 CR9-25 要消灭的假闭环
   console.log(`\n!!! 断言缺口（全绿不等于全跑）：\n  - ${gaps.join("\n  - ")}`);
