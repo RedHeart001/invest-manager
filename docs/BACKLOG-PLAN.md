@@ -213,6 +213,8 @@ print(c.execute('select type,count(*) from Product group by type').fetchall())"
 | `/api/hotspots/run` | 同上 | ❌ **不带** |
 | `/api/research/start` | 同上 | ❌ **不带** |
 
+> **现值更正（11-02 14:3x，只增这一行；上面各格原句一律不回改）**＝`/api/research/start` 那格的「同上」**在 11-02 之前并不成立**＝该路由 `checkRequestOrigin` 从未挂过（盘点见 [FIX-LEDGER.md](FIX-LEDGER.md) 看板 **CR10-9**）；CR10-9 落码后这格才转真。末列「ds 调用时带 token？＝❌ 不带」**不变**＝浏览器端入口按设计不挂 `requireWriteToken`（挂上＝设值那一刻详情页按钮死）。
+
 #### ⚠️ 我第一版方案的错误（已修正）
 
 我原说「三处同改」，但**没说清漏了会怎样**：
