@@ -8,7 +8,7 @@
 > - [../PLAN.md](../PLAN.md) —— 需求与设计（唯一来源）
 > - [../PROGRESS.md](../PROGRESS.md) —— **状态总览**（P0–P7 ＋ 阻塞与问题）；**进度日志「同日续 N」已整体搬进本目录**，见下面 2026-10-08-progress 那一行
 > - [../CONSTRAINTS.md](../CONSTRAINTS.md) —— 不得回退的约束与数据源事实
-> - [../CODE-REVIEW.md](../CODE-REVIEW.md) —— **当前轮 CR9 的完整发现 ＋ 误报排除表**；已闭环轮次（CR1–CR8）的发现原文在本目录
+> - [../CODE-REVIEW.md](../CODE-REVIEW.md) —— **当前开放轮次**的完整发现 ＋ 误报排除表；已闭环轮次（CR1–CR9）的发现原文在本目录。轮次号与取号权威＝FIX-LEDGER 状态卡，此处不复述（11-03 批 B 把 CR9 本体 14 节搬进本目录，依据就是这条分工）
 > - [../FIX-LEDGER.md](../FIX-LEDGER.md) —— 每项修了没、怎么验的；未闭环看板＋待拍板＋状态卡
 
 ## 什么时候建归档
@@ -116,6 +116,7 @@ wc -l docs/history/*.md
 | [2026-11-03-code-review-已闭追加节归档-1103.md](2026-11-03-code-review-已闭追加节归档-1103.md) | CODE-REVIEW.md 的块搬迁（2026-11-03） | 整体搬迁，内容逐字保留 | 见 [../CODE-REVIEW.md](../CODE-REVIEW.md) |
 | [2026-11-03-code-review-CR9追加八九归档-1103.md](2026-11-03-code-review-CR9追加八九归档-1103.md) | CODE-REVIEW.md 的块搬迁（2026-11-03） | 整体搬迁，内容逐字保留 | 见 [../CODE-REVIEW.md](../CODE-REVIEW.md) |
 | [2026-11-03-code-review-CR9本体归档-1103.md](2026-11-03-code-review-CR9本体归档-1103.md) | CODE-REVIEW.md 的块搬迁（2026-11-03） | 整体搬迁，内容逐字保留 | 见 [../CODE-REVIEW.md](../CODE-REVIEW.md) |
+| [2026-11-03-code-review-轮次身份旧行归档-1103.md](2026-11-03-code-review-轮次身份旧行归档-1103.md) | CODE-REVIEW.md 的块搬迁（2026-11-03） | 整体搬迁，内容逐字保留 | 见 [../CODE-REVIEW.md](../CODE-REVIEW.md) |
 
 > **「同日续 N」的去处（10-08 重组留下的 19 处旧指针）**：上层文件里凡写「PROGRESS 同日续 N」的句子，其原文现在都在
 > [2026-10-08-progress-进度日志归档.md](2026-10-08-progress-进度日志归档.md)（该文件按「同日续 1…75」分节，编号与旧指针一一对得上，已逐号核对齐 75 段）。

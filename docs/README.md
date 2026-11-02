@@ -31,7 +31,7 @@
 | 改需求/设计 | [PLAN.md](PLAN.md) | 需求与设计**唯一来源**——要改行为先看这里是否已定稿 |
 | 改代码 | [CONSTRAINTS.md](CONSTRAINTS.md) | **改代码前必自查**：C1–C34 不得回退的约束、跨服务契约坑、数据源事实 |
 | 查某功能修了没 | [FIX-LEDGER.md](FIX-LEDGER.md) | 每项修了没、怎么验的；**未闭环看板置顶** |
-| 查某轮发现了什么 | [CODE-REVIEW.md](CODE-REVIEW.md) | 当前开放轮次 **CR10** 的发现（CR9 各节与「附录 · 已核验排除的误报」仍在同文件）；历史轮次在 [history/](history/) |
+| 查某轮发现了什么 | [CODE-REVIEW.md](CODE-REVIEW.md) | **当前开放轮次**的完整发现（轮次号与取号权威＝FIX-LEDGER 状态卡，此处不复述）＋「附录 · 已核验排除的误报」；**CR9 及更早轮次的发现原文已于 11-03 整节搬进 [history/](history/)**，本文件里只剩带标签的指针行 |
 | 回顾执行过程 | [history/](history/) | 按主题归档被压缩的过程材料，[history/README.md](history/README.md) 有索引 |
 | 评估「想做但还没做」的项 | [BACKLOG-PLAN.md](BACKLOG-PLAN.md) | 8 项待办的**可行性＋落地方案＋代价**；不是需求、不是账本，只答"能不能做、怎么落不出事" |
 | 收尾清单（历史快照） | [END_PLAN.md](END_PLAN.md) | 2026-10-23 那轮的收尾计划快照；**当时读数、不是现值**，现状一律看 FIX-LEDGER 与上表的 BACKLOG-PLAN |
