@@ -338,6 +338,11 @@ function main(argv) {
   const skip = new Set();
   const i = argv.indexOf("--skip");
   if (i >= 0) (argv[i + 1] || "").split(",").forEach((s) => s && skip.add(s.trim()));
+  // 这条定档本身**没有被推翻**：默认仍＝人工到场执行，理由（限流误读、重复买额度）一字不动。
+  // 现值更正（11-02）＝主人那句「我要求你自动化，因为我需要睡觉」只在**本机夜跑（机器保证不关）**
+  // 这一形上允许排一次性自动化；当晚跑的是 `data-service/runtime/full-night-1102.py`，件自带
+  // 「哨兵已 DONE 即拒跑」＋判据从回执字面导出（解析不出即 RED，不兜绿）。沿革与读数＝
+  // FIX-LEDGER 状态卡 11-02 12:0x 那行（其下指向 11-02 明细节的归档件）。
   if (argv.includes("--live")) {
     console.log("闸1 只有 --offline 这一档：③④ 要买上游额度，10-09 已定档＝人工到场执行（不排自动化）。");
     return 2;
