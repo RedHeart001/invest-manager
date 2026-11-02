@@ -4,12 +4,17 @@
 
 除 `--move`／`--baseline --register` 外都不写盘、零出网。
 
-  1. 体量读数：单文件 >120,000 字符／单行 >1,500 字符／单节 >30,000 字符 ⇒ 报警，不动笔。**行数不作闸**。
+  1. 体量读数：单文件 >120,000 字符／单行 >1,000 字符／单节 >30,000 字符 ⇒ 报警，不动笔。
+     **活跃区行数不作闸**（归档件是例外，见第 6 条）。
      单节按两把读数取并集：**叶节跨度 ∪ 容器自身体**（恒等式＝自身体＋Σ直接子节＝跨度，不重复计数）。
   2. 断链扫描：活跃工作区里每个「追加N」「第 N 项」「相对链接」「文末/见『节名』」都要能落地。
   3. 表格扫描（由 `data-service/runtime/` 三枚临时件并回本件，任何机器上都能跑）。
      列数＝去掉首尾定界符后按**未转义**竖线切分（`\\|` 算正文、不算列），与 GFM 渲染同口径。
   4. 速览尺 + TITLE 档：速览类区块非标题行 >500 ⇒ 报警；任意级标题行 >500 ⇒ 报警。
+  5. 现值链尺 SPEEDCHAIN（11-02 立）：同一速览区里「现值更正／现值换档」连通段 ≥2 枚 ⇒ 报警＝该重写了。
+  6. 围栏尺 FENCE ＋ 归档件尺 ARCHIVE（11-03 立）：整文件 ``` 为奇数 ⇒ 报警并指出未闭合那一行
+     （`--move` 另有围栏守卫，两种坏形状都拒，见 `fence_guard`）；`docs/history/*.md` 行数 ≥500 ⇒ 报警
+     ＝`history/README.md`「规模上限与压缩」那条阈第一次自己会响（此前只给一条没人自动跑的 `wc -l`）。
 
 用法：
     python scripts/docs-scan.py                          # 读数＋报警（逐条）＋表格＋断链
@@ -23,7 +28,9 @@
 口径（都按 `len(text)` 含换行，逐行和与它差「行数−1」，混用会让每轮对账多一个谜）：
     行区间的字符数 ＝ len("\\n".join(该区间各行))。
 
-范围：超标判定只看 `docs/*.md`（活跃工作区）；`docs/history/` 只进入断链扫描的目标集合。
+范围：**体量那几把尺（FILE/SECTION/LINE/SPEED/SPEEDCHAIN/TITLE）只看 `docs/*.md`（活跃工作区）**；
+`docs/history/` 进入断链扫描的目标集合，并自 11-03 起也进「归档区读数」＋受 FENCE／ARCHIVE 两把尺管
+（归档区继续长是正常态 ⇒ 不套体量那几把尺，只量它自己写下的 500 行阈与围栏配对）。
 """
 
 import glob
@@ -43,6 +50,11 @@ MAX_LINE_CHARS = 1000  # 10-22 从 1500 降下来：1500 时 FIX-LEDGER 只有 1
 MAX_SECTION_CHARS = 30000
 MAX_SPEED_CHARS = 500
 MAX_TITLE_CHARS = 500
+# 归档件的行阈＝`docs/history/README.md`「规模上限与压缩」那条自己写的 500 行
+# （此前只给了一条没人自动跑的 `wc -l`；11-03 起它自己会红）。
+# ⚠️ 口径差：本件所有行数都用 `len(text.split("\n"))` ＝ `wc -l` + 1（文件以 \n 收尾时），
+# 所以这把尺实际比 README 那条命令**严一行**（wc -l 499 就响）——宁严勿松。
+MAX_ARCHIVE_LINES = 500
 
 # 现值链尺（11-02 立；规则本体＝`.claude/rules/project.md` 文末「docs 现值块与压缩」节）。
 # 病名不是"某一行太长"，而是**同一个速览块里一行行叠「现值更正／现值换档、上面原句不回改」**：
@@ -300,6 +312,20 @@ def size_rows(paths):
     return rows
 
 
+def history_rows(paths):
+    """归档件读数：**不套用 FILE/SECTION/LINE/SPEED 那几把尺**（`:26` 明写超标判定只看 `docs/*.md`，
+    归档区继续长是正常态），只量两件此前完全没人量的事——行数（对着 history/README.md 那条 500 行阈）
+    与围栏配对（搬进去的代码块若不闭合，从那行起归档件自己的 Markdown 也读歪）。"""
+    rows = []
+    for path in paths:
+        text = read(path)
+        lines = lines_of(text)
+        fence_n, fence_open = fence_parity(lines)
+        rows.append({"path": path, "lines": len(lines), "chars": len(text),
+                     "fence_n": fence_n, "fence_open": fence_open})
+    return rows
+
+
 def table_scan(paths):
     result = {"tables": 0, "rows": 0, "mismatch": 0, "per_file": [], "mismatches": []}
     for path in paths:
@@ -336,6 +362,10 @@ def prefix60(s):
 
 
 def _disease_for(kind, sub):
+    if kind == "ARCHIVE":
+        return "归档件长过它自己写的行阈", ("「精炼」字（就地精炼该文件：保留背景／逐项做法／验证／改动文件清单"
+                                          "那套事件快照结构，删冗余过程明细；**不塌缩成索引一行、不删文件**"
+                                          "——history/README.md「规模上限与压缩」原话）")
     if kind == "FENCE":
         return "代码围栏没闭合", "「改」字（补上那行 ``` 或删掉多余的一行）——从那行起到 EOF 标题／表格／链接全读歪，而没有别的尺会红"
     if kind == "FILE":
@@ -357,7 +387,7 @@ def _disease_for(kind, sub):
     return "?", "?"
 
 
-def collect_alarms(root, rows, ts):
+def collect_alarms(root, rows, ts, hrows=None):
     alarms = []
     for r in rows:
         rel = relpath(root, r["path"])
@@ -408,6 +438,22 @@ def collect_alarms(root, rows, ts):
         alarms.append({"ruler": "TABLE", "file": rel, "line": ln, "anchor": anchor,
                        "detail": "表头 L%d／错位 L%d cols=%d != %d" % (hdr, ln, cols, exp),
                        "disease": d, "need": need})
+    # 归档件两把尺（11-03 加）：此前 docs/history/ 的 1,117,576 字符／67 个文件不进任何读数，
+    # 而 history/README.md「规模上限与压缩」自己写了 500 行阈、只给一条没人自动跑的 `wc -l`。
+    for h in (hrows or []):
+        rel = relpath(root, h["path"])
+        if h["lines"] >= MAX_ARCHIVE_LINES:
+            d, need = _disease_for("ARCHIVE", None)
+            alarms.append({"ruler": "ARCHIVE", "file": rel, "line": h["lines"], "anchor": rel,
+                           "detail": "lines=%d >= %d（本件口径 len(split)＝wc -l +1，比那条命令严一行）"
+                                     % (h["lines"], MAX_ARCHIVE_LINES),
+                           "disease": d, "need": need})
+        if h["fence_open"]:
+            d, need = _disease_for("FENCE", None)
+            alarms.append({"ruler": "FENCE", "file": rel, "line": h["fence_open"], "anchor": rel,
+                           "detail": "围栏行 %d 枚＝奇数，L%d 那处 ``` 到 EOF 都没闭合"
+                                     % (h["fence_n"], h["fence_open"]),
+                           "disease": d, "need": need})
     return alarms
 
 
@@ -420,7 +466,7 @@ def print_alarms(alarms, limit_line=10):
     by_ruler = {}
     for a in alarms:
         by_ruler.setdefault(a["ruler"], []).append(a)
-    for ruler in ("FENCE", "FILE", "SECTION", "LINE", "SPEED", "SPEEDCHAIN", "TITLE", "TABLE"):
+    for ruler in ("FENCE", "FILE", "SECTION", "LINE", "SPEED", "SPEEDCHAIN", "TITLE", "TABLE", "ARCHIVE"):
         group = by_ruler.get(ruler, [])
         if not group:
             continue
@@ -463,7 +509,7 @@ def save_baseline(root, alarms):
 def run_baseline(root, do_print=False, do_register=False):
     rows = size_rows(active_docs(root))
     ts = table_scan(active_docs(root))
-    alarms = collect_alarms(root, rows, ts)
+    alarms = collect_alarms(root, rows, ts, history_rows(history_docs(root)))
     current = {alarm_key(a): a for a in alarms}
     if do_register:
         p = save_baseline(root, alarms)
@@ -1059,8 +1105,23 @@ def report(root="."):
     for r in rows:
         print("%-26s lines=%-5d chars=%-8d big_line=%-3d max_line=%-6d"
               % (relpath(root, r["path"]), r["lines"], r["chars"], r["big_lines"], r["max_line"]))
+    hrows = history_rows(history_docs(root))
+    htot = sum(h["chars"] for h in hrows)
+    atot = sum(r["chars"] for r in rows)
+    longest = max(hrows, key=lambda h: h["lines"]) if hrows else None
+    over = [h for h in hrows if h["lines"] >= MAX_ARCHIVE_LINES]
+    print("== 归档区读数（docs/history/：不套 FILE/SECTION/LINE/SPEED 那几把尺，只量行数与围栏配对） ==")
+    if hrows:
+        print("文件=%d 总字符=%d（活区 %d ⇒ 归档区占 %.1f%%） 最长=%s %d 行（阈 %d，还差 %d 行） 超阈=%d 枚"
+              % (len(hrows), htot, atot, 100.0 * htot / (htot + atot),
+                 relpath(root, longest["path"]), longest["lines"], MAX_ARCHIVE_LINES,
+                 MAX_ARCHIVE_LINES - longest["lines"], len(over)))
+        for h in over:
+            print("  OVER %s lines=%d" % (relpath(root, h["path"]), h["lines"]))
+    else:
+        print("（空）")
     ts = table_scan(paths)
-    alarms = collect_alarms(root, rows, ts)
+    alarms = collect_alarms(root, rows, ts, hrows)
     print("== 超标报警（逐条；LINE 默认 top-10） ==")
     if alarms:
         print_alarms(alarms, limit_line=10)
@@ -1297,6 +1358,39 @@ def _test_fence_even_green():
     return _fence_alarms("# z\n\n```bash\ncmd\n```\n\n尾巴\n") == []
 
 
+def _archive_alarms(n_content_lines):
+    """造一个 n 行内容（＋收尾换行 ⇒ `len(lines)` ＝ n+1）的归档件，回 (ARCHIVE 报警, history 读数)。"""
+    root = tempfile.mkdtemp(prefix="docs-scan-arch-")
+    try:
+        os.makedirs(os.path.join(root, "docs", "history"))
+        _write(os.path.join(root, "docs", "Z.md"), "# z\n")
+        _write(os.path.join(root, "docs", "history", "2026-01-01-z.md"),
+               "\n".join("第 %d 行" % i for i in range(1, n_content_lines + 1)) + "\n")
+        hrows = history_rows(history_docs(root))
+        paths = active_docs(root)
+        return ([a for a in collect_alarms(root, size_rows(paths), table_scan(paths), hrows)
+                 if a["ruler"] == "ARCHIVE"], hrows)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def _test_archive_over_lines_red():
+    """归档件行数到阈必须红＝history/README.md「规模上限与压缩」那条 500 行阈第一次自己会响。
+
+    此前它只给了一条没人自动跑的 `wc -l docs/history/*.md`；11-03 现查 67 个归档件／1,117,576 字符
+    **不进任何读数**，最长那枚 448 行（距阈 52 行）也没有任何尺看着。
+    """
+    hits, hrows = _archive_alarms(MAX_ARCHIVE_LINES - 1)   # 499 内容行 ⇒ len(lines)=500＝正好到阈
+    return (hrows[0]["lines"] == MAX_ARCHIVE_LINES and len(hits) == 1
+            and "lines=500" in hits[0]["detail"] and "不塌缩成索引一行" in hits[0]["need"])
+
+
+def _test_archive_under_lines_green():
+    """差一行不许误报（红样本的另一半）。"""
+    hits, hrows = _archive_alarms(MAX_ARCHIVE_LINES - 2)   # ⇒ len(lines)=499
+    return hrows[0]["lines"] == MAX_ARCHIVE_LINES - 1 and hits == []
+
+
 def selftest():
     root = tempfile.mkdtemp(prefix="docs-scan-selftest-")
     try:
@@ -1356,6 +1450,9 @@ def selftest():
             "围栏·整块连围栏一起搬必须放行": _test_fence_whole_block_ok(),
             "围栏·奇数围栏必须红并指出行号": _test_fence_odd_alarms(),
             "围栏·配对完整不误报": _test_fence_even_green(),
+            # 归档件两枚（11-03 立：history/ 的 1,117,576 字符此前不进任何读数）
+            "归档·行数到阈必须红": _test_archive_over_lines_red(),
+            "归档·差一行不误报": _test_archive_under_lines_green(),
             # 新增红必须报出（㉒）
             "基线·NEW 必报且退出码为 1": _test_baseline_new(),
             # 表格尺·转义口径（10-11 那 7 处错位的归因）
