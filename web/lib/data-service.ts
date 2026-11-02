@@ -124,7 +124,28 @@ export type Quote = {
   timestamp?: string | null;
 };
 
-/** 批量行情（一次外部请求），失败返回空对象由调用方降级。
+/** 批次信封里的成因位（CR10-8，11-02）：这一批**为什么**一个价都没拿到。
+ *  三形各自独立、不许合成一个数——今夜 02:00 那轮的实况就是反例：crypto 的
+ *  `failedBatches=3` 里，1 批是 ds 回了 502（CoinGecko 那族不可达，detail 被旧 catch 扔掉），
+ *  另 2 批在 ds 的访问日志里**根本没有**（web 侧超时/连不上）。两种成因在状态位里长成了一个数字。 */
+export type QuotesFailKind =
+  /** ds 明确回了非 2xx（成因原文＝ds 的 `detail`，已在 `DataServiceError.message` 里） */
+  | "http"
+  /** 超时／连不上＝这一发没被 ds 回答 */
+  | "noAnswer"
+  /** 200 但一个可用报价都没有（`quotes` 空，或 ds 自己声明的降级） */
+  | "empty";
+
+export type QuotesEnvelope = {
+  quotes: Record<string, Quote>;
+  usesEastmoney: boolean | null;
+  failKind?: QuotesFailKind;
+  /** 成因原文：ds 的 502 detail／超时文案／ds 自己的 `note`。只进接口字段，不上屏。 */
+  failNote?: string;
+};
+
+/** 批量行情（一次外部请求）。失败时 `quotes` 仍回空对象由调用方降级，但从本行起**带得出成因**
+ *  （`failKind`＋`failNote`，CR10-8）——此前它把所有成因在这一层抹平，下游只数得出批次。
  *
  * `usesEastmoney`（丙／CR9-67）＝ds 对它说"这一批按**主源**路由会不会打东财 `ulist.np`"，
  * 刷新腿用它决定**这一批之后**要不要睡 5 秒。三态要说清：
@@ -136,16 +157,35 @@ export type Quote = {
 export async function fetchQuotes(
   type: string,
   codes: string[],
-): Promise<{ quotes: Record<string, Quote>; usesEastmoney: boolean | null }> {
+): Promise<QuotesEnvelope> {
   if (codes.length === 0) return { quotes: {}, usesEastmoney: null };
+  let data: {
+    quotes?: Record<string, Quote>;
+    usesEastmoney?: boolean | null;
+    note?: string | null;
+  };
   try {
-    const data = await dsGet<{
-      quotes?: Record<string, Quote>;
-      usesEastmoney?: boolean | null;
-    }>("/quotes", { type, codes: codes.join(",") }, 20_000);
-    const flag = typeof data.usesEastmoney === "boolean" ? data.usesEastmoney : null;
-    return { quotes: data.quotes ?? {}, usesEastmoney: flag };
-  } catch {
-    return { quotes: {}, usesEastmoney: null };
+    data = await dsGet<typeof data>("/quotes", { type, codes: codes.join(",") }, 20_000);
+  } catch (e) {
+    // 此前这里是裸 `catch { return {quotes:{}, ...} }`——ds 的 502 detail 明明已经被 `dsGet`
+    // 变成异常消息带回来了（本文件 `:62-66`），却在这一层被整条丢掉，下游只能数批次。
+    const answered = e instanceof DataServiceError && typeof e.status === "number";
+    return {
+      quotes: {},
+      usesEastmoney: null,
+      failKind: answered ? "http" : "noAnswer",
+      failNote: e instanceof Error ? e.message : String(e),
+    };
   }
+  const quotes = data.quotes ?? {};
+  const flag = typeof data.usesEastmoney === "boolean" ? data.usesEastmoney : null;
+  if (Object.keys(quotes).length === 0) {
+    return {
+      quotes,
+      usesEastmoney: flag,
+      failKind: "empty",
+      failNote: data.note ?? "data-service 回 200，但 quotes 为空（这一批没有匹配到任何报价）",
+    };
+  }
+  return { quotes, usesEastmoney: flag };
 }

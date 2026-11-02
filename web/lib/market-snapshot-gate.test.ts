@@ -169,3 +169,110 @@ describe("刷新腿的当日幂等闸门（#23）", () => {
     expect(lastCompletedAt).not.toHaveBeenCalled();
   });
 });
+
+// ---------- CR10-8（11-02）：失败批次要分得出**为什么**失败 ----------
+// 触发读数＝11-02 02:00 那轮的 crypto 那一格：`failedBatches=3` 而 `error`/`note` 皆 None。
+// 直连 ds 的访问日志才分得开——1 批回 502（CoinGecko 那族不可达），2 批在日志里根本没有
+// （没被回答）；库里 crypto 250 行的 `snapshotAt` 全为 None ⇒ 这一类从未有过快照。
+// 旧形状把两种成因压成同一个数字，所以这一节钉的是**分形本身**，不是"有没有失败"。
+
+describe("刷新腿的成因分形（CR10-8）", () => {
+  beforeEach(() => {
+    findMany.mockReset().mockResolvedValue(codes(2));
+    executeRawUnsafe.mockReset().mockResolvedValue(1);
+    fetchQuotes.mockReset();
+    snapshotRefreshedToday.mockReset().mockResolvedValue(null); // 放行
+    hasCompletionLedger.mockReset().mockReturnValue(true);
+    completedToday.mockReset().mockReturnValue(false);
+    lastCompletedAt.mockReset().mockReturnValue(null);
+  });
+
+  it("ds 回了非 2xx ⇒ failedHttp 记这一形，且 ds 的 detail 原文被带到状态位", async () => {
+    fetchQuotes.mockResolvedValue({
+      quotes: {},
+      usesEastmoney: false,
+      failKind: "http",
+      failNote: "coingecko unreachable on all hosts",
+    });
+    const r = await refreshSnapshot("crypto");
+    expect(r.failedBatches).toBe(1);
+    expect([r.failedHttp, r.failedNoAnswer, r.failedEmpty, r.failedWrite]).toEqual([1, 0, 0, 0]);
+    expect(r.failNote).toBe("coingecko unreachable on all hosts");
+    expect(r.updated).toBe(0);
+    expect(r.snapshotAt).toBeNull(); // 刀 1/#22(b)：一批都没写 ⇒ 不许自称刚刷过
+  });
+
+  it("压根没被回答（超时／连不上）⇒ 记 failedNoAnswer，不与『ds 明确拒绝』混为一形", async () => {
+    fetchQuotes.mockResolvedValue({
+      quotes: {},
+      usesEastmoney: null,
+      failKind: "noAnswer",
+      failNote: "data-service timeout after 20000ms（服务在跑但未及时响应）",
+    });
+    const r = await refreshSnapshot("crypto");
+    expect([r.failedHttp, r.failedNoAnswer]).toEqual([0, 1]);
+    expect(String(r.failNote)).toContain("20000ms");
+  });
+
+  it("200 但回来的每一条都没有价格 ⇒ failedEmpty，并自己说清「回了几条」", async () => {
+    fetchQuotes.mockResolvedValue({
+      quotes: { BTC: { type: "crypto", code: "BTC", price: null, changePct: null } },
+      usesEastmoney: false,
+    });
+    const r = await refreshSnapshot("crypto");
+    expect([r.failedHttp, r.failedNoAnswer, r.failedEmpty]).toEqual([0, 0, 1]);
+    expect(String(r.failNote)).toContain("没有一条带得出价格");
+  });
+
+  it("写库抛 ⇒ 第四形 failedWrite（此前那个裸 catch 把它与取数失败混在一起）", async () => {
+    fetchQuotes.mockResolvedValue(quoteMap(codes(2)));
+    executeRawUnsafe.mockRejectedValue(new Error("database is locked"));
+    const r = await refreshSnapshot("crypto");
+    expect([r.failedWrite, r.failedHttp, r.failedEmpty]).toEqual([1, 0, 0]);
+    expect(String(r.failNote)).toContain("database is locked");
+  });
+
+  it("🔁 反向：正常轮五个成因位一个都不写（缺省＝没有失败，与「写了四个 0」不同形）", async () => {
+    fetchQuotes.mockResolvedValue(quoteMap(codes(2)));
+    const r = await refreshSnapshot("crypto");
+    expect(r.failedBatches).toBe(0);
+    expect(r.failedHttp).toBeUndefined();
+    expect(r.failedNoAnswer).toBeUndefined();
+    expect(r.failedEmpty).toBeUndefined();
+    expect(r.failedWrite).toBeUndefined();
+    expect(r.failNote).toBeUndefined();
+    expect(r.snapshotAt).not.toBeNull();
+  });
+
+  it("11-02 crypto 那一形：三批三种成因各归各位，且 failedBatches == 四形之和", async () => {
+    findMany.mockResolvedValue(codes(250)); // BATCH=100 ⇒ 三批；crypto 不在东财族 ⇒ 不睡批间隔
+    fetchQuotes
+      .mockResolvedValueOnce({
+        quotes: {},
+        usesEastmoney: false,
+        failKind: "http",
+        failNote: "HTTP 502: coingecko unreachable",
+      })
+      .mockResolvedValueOnce({
+        quotes: {},
+        usesEastmoney: null,
+        failKind: "noAnswer",
+        failNote: "data-service timeout after 20000ms（服务在跑但未及时响应）",
+      })
+      .mockResolvedValueOnce({
+        quotes: {},
+        usesEastmoney: null,
+        failKind: "noAnswer",
+        failNote: "data-service unreachable（连接被拒绝/网络不可达）",
+      });
+    const r = await refreshSnapshot("crypto");
+    expect([r.failedHttp, r.failedNoAnswer, r.failedEmpty, r.failedWrite]).toEqual([1, 2, 0, 0]);
+    expect(r.failedBatches).toBe(3);
+    expect(r.failedBatches).toBe(
+      (r.failedHttp ?? 0) + (r.failedNoAnswer ?? 0) + (r.failedEmpty ?? 0) + (r.failedWrite ?? 0),
+    );
+    expect(r.failNote).toBe("HTTP 502: coingecko unreachable"); // 取第一条，后面的形同义不重复抄
+    expect(r.batches).toBe(3);
+    expect(fetchQuotes).toHaveBeenCalledTimes(3);
+  });
+});

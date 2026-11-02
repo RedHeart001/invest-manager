@@ -87,6 +87,18 @@ export type SnapshotResult = {
   /** 本轮**实际睡了** 5 秒的批次数（＝批间隔的全部代价，`× EM_BATCH_DELAY_MS` 就是秒数）。
    *  被 #23 挡下的轮次记 0：那一批一次都没发，说 0 比留空更准。 */
   pacedBatches?: number;
+  /** 成因分形（CR10-8，11-02）：`failedBatches` 只说"几批没拿到价"，说不出**为什么**。
+   *  11-02 02:00 那轮 crypto 的 3 批失败里，1 批是 ds 回 502（CoinGecko 那族不可达）、
+   *  2 批在 ds 访问日志里根本没有（没被回答）——旧形状把两种成因压成一个数字。
+   *  四形各自计数、恒有 `failedBatches == 四者之和`（用例钉住，防止日后又被合并）。
+   *  ⚠️ 只进接口字段，不上屏（10-05 定档：比率／分母／逐源计数属面向开发者的数）。 */
+  failedHttp?: number;
+  failedNoAnswer?: number;
+  failedEmpty?: number;
+  /** 写库等非取数环节抛出的批次（此前那个裸 `catch {}` 把它们与取数失败混在一起） */
+  failedWrite?: number;
+  /** 第一条成因原文（ds 的 502 detail／超时文案／ds 自己的 note）；成功轮不留这一位 */
+  failNote?: string;
 };
 
 function sleep(ms: number): Promise<void> {
@@ -261,6 +273,9 @@ async function refreshSnapshotInner(type: string): Promise<SnapshotResult> {
   let failedBatches = 0;
   let batches = 0;
   let pacedBatches = 0;
+  // CR10-8：成因按形各记各的，第一条形成的原文留着（后面的形同义，重复抄只增体量）
+  const fails = { http: 0, noAnswer: 0, empty: 0, write: 0 };
+  let failNote: string | undefined;
   for (let i = 0; i < total; i += BATCH) {
     const codes = products.slice(i, i + BATCH).map((p) => p.code);
     // 丙／CR9-67：这一批之后睡不睡，问的是**这一批打不打东财**（ds 在 `/quotes` 里给
@@ -287,12 +302,23 @@ async function refreshSnapshotInner(type: string): Promise<SnapshotResult> {
         // 会静默返回空对象，此前直接跳过 → "updated=0 failedBatches=0" 被
         // 当成正常成功，分类浏览的排序数据长期陈旧却无任何标注。
         failedBatches += 1;
+        // CR10-8：三形分开落位。`got.failKind` 缺省而仍然一行都没有＝ds 真回了报价、
+        // 只是这批里每一条的价格与涨跌幅都是 null ⇒ 那是 `empty`，不是"没回答"。
+        const kind = got.failKind ?? "empty";
+        fails[kind] += 1;
+        failNote ??=
+          got.failNote ??
+          `data-service 回了 ${Object.keys(quotes).length} 条报价，但整批没有一条带得出价格`;
       } else {
         await updateChunk(type, rows, snapshotAt);
         updated += rows.length;
       }
-    } catch {
+    } catch (e) {
+      // 取数那一层已经把错误编码进信封（`fetchQuotes` 不再抛），所以走到这里的
+      // 只有写库与本地逻辑＝与上游可达性**不同成因**，不许再混进上面三形。
       failedBatches += 1;
+      fails.write += 1;
+      failNote ??= `写库/本地环节异常：${e instanceof Error ? e.message : String(e)}`;
     }
     if (shouldPaceBatch(type, usesEastmoney) && i + BATCH < total) {
       await sleep(EM_BATCH_DELAY_MS);
@@ -308,6 +334,17 @@ async function refreshSnapshotInner(type: string): Promise<SnapshotResult> {
     snapshotAt: updated > 0 ? snapshotAt.toISOString() : null,
     batches,
     pacedBatches,
+    // CR10-8🔁：成功轮**一个成因位都不写**（缺省＝这一轮没有失败，与"写了四个 0"不同形），
+    // 否则这把尺会像 CR9-103 那样长成恒真的键。
+    ...(failedBatches === 0
+      ? {}
+      : {
+          failedHttp: fails.http,
+          failedNoAnswer: fails.noAnswer,
+          failedEmpty: fails.empty,
+          failedWrite: fails.write,
+          failNote,
+        }),
   };
 }
 
