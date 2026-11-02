@@ -44,6 +44,18 @@ MAX_SECTION_CHARS = 30000
 MAX_SPEED_CHARS = 500
 MAX_TITLE_CHARS = 500
 
+# 现值链尺（11-02 立；规则本体＝`.claude/rules/project.md` 文末「docs 现值块与压缩」节）。
+# 病名不是"某一行太长"，而是**同一个速览块里一行行叠「现值更正／现值换档、上面原句不回改」**：
+# 11-02 实测三本活区文件共 25 枚（FIX-LEDGER 状态卡 10／README 当前状态 11／PROGRESS 状态总览 4），
+# 读者要自己解一条更正链才知道"现在是什么"，而且过期句留在活区会持续产误报（#90／#74(a) 连着两轮）。
+# 判据取**固定字样**（沿"归一判据取固定前缀"那条纪律）：这两种写法是上面 25 枚的全集；
+# 换成别的写法这把尺就看不见——这一半是它的诚实边界，靠规则里"新块不许再写追加式字样"兜。
+# 为什么按**连通段**计而不是按区内总数：门槛区里 ①②④ 与 ④ 各自单独一枚现值行是两件事，
+# 相隔 280 行，按总数会当场误报；相隔 ≤6 行才算同一条链（一枚更正行常带若干 `> ` 续行）。
+MAX_SPEED_CHAIN = 2
+SPEED_CHAIN_GAP = 6
+SPEED_CHAIN_PAT = re.compile(r"现值更正|现值换档")
+
 # 单文件字符阈的**按角色覆盖**（10-22 加）。
 # 为什么不再用同一个数：FIX-LEDGER 是只增的账本，逼它搬是有效的；CODE-REVIEW 是"一轮一节"的
 # 发现记录（852 行 / 零巨行 / 结构健康），同样 114k 却读得动 —— 对它用同一个阈，只会逼着把
@@ -62,6 +74,10 @@ def file_char_limit(path):
     return MAX_FILE_CHARS
 
 SPEED_TITLES = ("状态卡", "当前状态", "速览", "状态总览")
+# ⚠️ 11-02 试过把「权威现值」也加进来（FIX-LEDGER 的「### 验证门槛（权威现值）」节里同样在叠
+# 现值行），当场拖出 **11 枚既有 SPEED 红**（L430/L443/L486… 都是 >500 字的判据本体与沿革行，
+# 不是现值链）⇒ 本轮撤回：那一节要治得单独一轮压缩判据本体，不能靠把它挂进速览尺顺带做。
+# 门槛节的现值行改由规则管（那节里已写明"下次重写本节时一并归档"）。
 BASELINE_PATH = os.path.join("scripts", "docs-scan-baseline.json")
 
 HEAD = re.compile(r"^\s*>*\s*(#{1,6})\s+(.*)$")
@@ -165,6 +181,18 @@ def speed_scope(lines, secs):
     return scope
 
 
+def chain_runs(lines, scope):
+    """速览区里的「现值链」连通段：命中行按 ≤SPEED_CHAIN_GAP 行间隔聚段，只回 ≥MAX_SPEED_CHAIN 枚的段。"""
+    hits = [i for i in sorted(scope) if SPEED_CHAIN_PAT.search(lines[i - 1])]
+    runs = []
+    for i in hits:
+        if runs and i - runs[-1][-1] <= SPEED_CHAIN_GAP:
+            runs[-1].append(i)
+        else:
+            runs.append([i])
+    return [r for r in runs if len(r) >= MAX_SPEED_CHAIN]
+
+
 def size_rows(paths):
     rows = []
     for path in paths:
@@ -184,6 +212,7 @@ def size_rows(paths):
         scope = speed_scope(lines, secs)
         speed_hits = [(i, len(lines[i - 1])) for i in sorted(scope)
                       if i not in heading_lines and len(lines[i - 1]) > MAX_SPEED_CHARS]
+        chain_hits = [(r[0], len(r), r[-1]) for r in chain_runs(lines, scope)]
         title_hits = [(s["line"], len(lines[s["line"] - 1]), s["title"]) for s in secs
                       if len(lines[s["line"] - 1]) > MAX_TITLE_CHARS]
         big_nums = [n for n, x in enumerate(lines, 1) if len(x) > MAX_LINE_CHARS]
@@ -192,6 +221,7 @@ def size_rows(paths):
             "max_line": max([len(x) for x in lines] or [0]),
             "big_lines": len(big_nums), "big_nums": big_nums,
             "sec_hits": sec_hits, "speed_hits": speed_hits, "title_hits": title_hits,
+            "chain_hits": chain_hits,
         })
     return rows
 
@@ -242,6 +272,8 @@ def _disease_for(kind, sub):
         return "这一行内本体与沿革同行", "「搬」字（整段挪进同文件小节、行内留指针，见 rules :138）"
     if kind == "SPEED":
         return "该搬", "「搬」字（速览只写指向，明细进 history）"
+    if kind == "SPEEDCHAIN":
+        return "现值块长成了更正链", "「重写」字（旧块走 --move 进归档、活区只留最新一层；rules 文末那节）"
     if kind == "TITLE":
         return "该改白", "「改」字（标题行>500，沿革搬进正文）"
     if kind == "TABLE":
@@ -275,6 +307,11 @@ def collect_alarms(root, rows, ts):
             alarms.append({"ruler": "SPEED", "file": rel, "line": ln, "anchor": prefix60(lines[ln - 1]),
                            "detail": "len=%d > %d" % (chars, MAX_SPEED_CHARS),
                            "disease": d, "need": need})
+        for ln, n, end in r.get("chain_hits", []):
+            d, need = _disease_for("SPEEDCHAIN", None)
+            alarms.append({"ruler": "SPEEDCHAIN", "file": rel, "line": ln, "anchor": prefix60(lines[ln - 1]),
+                           "detail": "现值链 %d 枚（L%d–L%d）>= %d" % (n, ln, end, MAX_SPEED_CHAIN),
+                           "disease": d, "need": need})
         for ln, chars, title in r["title_hits"]:
             d, need = _disease_for("TITLE", None)
             alarms.append({"ruler": "TITLE", "file": rel, "line": ln, "anchor": prefix60(lines[ln - 1]),
@@ -300,7 +337,7 @@ def print_alarms(alarms, limit_line=10):
     by_ruler = {}
     for a in alarms:
         by_ruler.setdefault(a["ruler"], []).append(a)
-    for ruler in ("FILE", "SECTION", "LINE", "SPEED", "TITLE", "TABLE"):
+    for ruler in ("FILE", "SECTION", "LINE", "SPEED", "SPEEDCHAIN", "TITLE", "TABLE"):
         group = by_ruler.get(ruler, [])
         if not group:
             continue
@@ -971,6 +1008,38 @@ def _test_speed_out():
     return len(_speed_hits_for(["# t", "## 正常节", "y" * 600])) == 0
 
 
+def _chain_runs_for(lines):
+    secs = build_sections(lines)
+    return chain_runs(lines, speed_scope(lines, secs))
+
+
+def _test_chain_red():
+    # 同块里叠三枚＝该重写（11-02 实测 FIX-LEDGER 状态卡 10 枚就是这个形）
+    runs = _chain_runs_for(["# t", "## 状态卡",
+                            "> 现值更正（一）", "> 现值更正（二）", "> 现值换档（三）"])
+    return len(runs) == 1 and len(runs[0]) == 3
+
+
+def _test_chain_green_single():
+    # 单独一枚不红：那是一条现值，不是一条链
+    return _chain_runs_for(["# t", "## 状态卡", "> 现值更正（只有一枚）"]) == []
+
+
+def _test_chain_green_far_apart():
+    # 隔太远＝两件不同的事，不许并成一条链（门槛区里 ①②④ 与 ④ 各自那枚现值行就是这个形，
+    # 相隔 280 行；按"区内总数"计会当场误报，这正是判据取连通段的理由）
+    far = ["x"] * (SPEED_CHAIN_GAP + 1)
+    lines = ["# t", "## 状态卡", "> 现值换档（甲）"] + far + ["> 现值换档（乙）"]
+    return _chain_runs_for(lines) == []
+
+
+def _test_chain_nested_child():
+    # 量程按**节跨度**算，子节里的链也计入（若改成只量"自身体"，这一枚必须翻绿 ⇒ 它有牙齿）
+    lines = ["# t", "## 当前状态", "### 子节",
+             "> 现值更正（一）", "> 现值更正（二）"]
+    return len(_chain_runs_for(lines)) == 1
+
+
 def _test_baseline_new():
     root = tempfile.mkdtemp(prefix="docs-scan-bt-")
     buf = io.StringIO()
@@ -1059,6 +1128,11 @@ def selftest():
             # 速览一对（㉒）
             "速览·白名单块内 600 字行该红": _test_speed_in(),
             "速览·同一行落在块外不该红": _test_speed_out(),
+            # 现值链四枚（11-02 立 SPEEDCHAIN：现值块不许再叠更正链）
+            "现值链·同块三枚必须红": _test_chain_red(),
+            "现值链·单独一枚不该红": _test_chain_green_single(),
+            "现值链·隔太远不并成一条": _test_chain_green_far_apart(),
+            "现值链·子节里的链也计入": _test_chain_nested_child(),
             # 新增红必须报出（㉒）
             "基线·NEW 必报且退出码为 1": _test_baseline_new(),
             # 表格尺·转义口径（10-11 那 7 处错位的归因）
