@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { startResearch } from "@/lib/research";
+import { checkRequestOrigin } from "@/lib/request-origin";
 import { CODE_SET, QUOTE_TYPES } from "@/lib/validate";
 
 // CR4（P3）：研报支持的类型白名单 + code 字符集约束
@@ -9,6 +10,13 @@ const TYPES = QUOTE_TYPES;
 
 // 提交深度研究任务（P5 / M5）：详情页按钮与聊天 L2 工具共用入口
 export async function POST(req: NextRequest) {
+  // CR10-9：本端点同族里此前唯一"既烧上游／LLM、又不校验来源"的 POST。
+  // 覆盖面按字面＝只拦浏览器跨站那一形；无 Origin/Referer 的本机脚本（curl、
+  // web/scripts/test-p5.mjs）照旧放行（`request-origin.ts:48`）。
+  const blocked = checkRequestOrigin(req);
+  if (blocked) {
+    return NextResponse.json({ error: blocked }, { status: 403 });
+  }
   const body = (await req.json().catch(() => ({}))) as {
     type?: string;
     code?: string;
