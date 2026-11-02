@@ -131,13 +131,31 @@ def span_chars(lines, start, end):
     return len("\n".join(lines[start - 1:end]))
 
 
+def heading_hits(lines):
+    """标题行命中，**跳过代码围栏内的行**（11-03 修）。
+
+    此前围栏里的 `# 注释` 被当成 H1：全仓 32 枚假标题／7 个文件，节跨度因此少报到 58%
+    （实测 BACKLOG-PLAN「2.2 备份 restore」真身 1,911 字符、报 795）。
+    ⚠️ 围栏数为奇数的文件会从那一行起一路吞到 EOF ⇒ 那本文件的标题树全废；
+    这一形由 FENCE 尺负责红，不在这里兜。
+    """
+    infence = False
+    for i, l in enumerate(lines):
+        if FENCE.match(l):
+            infence = not infence
+            continue
+        if infence:
+            continue
+        m = HEAD.match(l)
+        if m:
+            yield i + 1, m
+
+
 def build_sections(lines):
     """标题树。恒等式：span ＝ 标题行 ＋ body ＋ Σ 直接子节 span ⇒ body ＝ span − Σ子节 span。"""
     hs = []
-    for i, l in enumerate(lines):
-        m = HEAD.match(l)
-        if m:
-            hs.append({"line": i + 1, "level": len(m.group(1)), "title": m.group(2).strip()})
+    for ln, m in heading_hits(lines):
+        hs.append({"line": ln, "level": len(m.group(1)), "title": m.group(2).strip()})
     n = len(hs)
     for k in range(n):
         end = len(lines)
@@ -422,10 +440,7 @@ def iter_labels(text):
 def heading_labels(paths):
     labels = set()
     for path in paths:
-        for line in lines_of(read(path)):
-            m = HEAD.match(line)
-            if not m:
-                continue
+        for _ln, m in heading_hits(lines_of(read(path))):
             for lab in iter_labels(m.group(2)):
                 labels.add(lab)
     return labels
@@ -434,10 +449,8 @@ def heading_labels(paths):
 def all_heading_texts(paths):
     out = set()
     for path in paths:
-        for line in lines_of(read(path)):
-            m = HEAD.match(line)
-            if m:
-                out.add(m.group(2).strip())
+        for _ln, m in heading_hits(lines_of(read(path))):
+            out.add(m.group(2).strip())
     return out
 
 
@@ -1083,6 +1096,23 @@ def _test_table_extra_col_red():
     return ts["mismatch"] == 1 and ts["rows"] == 4
 
 
+def _test_fence_heading_suppressed():
+    # 围栏内的 `# 注释` 不许生成节。
+    # 🔁 摘掉 heading_hits 里那个 infence 判断，这枚立刻红（假标题会进 titles、且把 H1 的 end 截到 3）。
+    lines = ["# 真标题", "", "```bash", "# 假标题：env 注释", "echo 1", "```", "",
+             "## 围栏之后的真节", "正文"]
+    secs = build_sections(lines)
+    titles = [s["title"] for s in secs]
+    return (titles == ["真标题", "围栏之后的真节"] and secs[0]["end"] == len(lines))
+
+
+def _test_fence_heading_span_restored():
+    # 假标题此前会把真节的跨度截断（实测 BACKLOG-PLAN「2.2」真 1,911 字符报 795）；修完必须量到围栏里那些行。
+    lines = ["## 节", "前言", "```bash", "# 步骤一", "cmd", "```", "尾巴"]
+    secs = build_sections(lines)
+    return len(secs) == 1 and secs[0]["span"] == span_chars(lines, 1, len(lines))
+
+
 def selftest():
     root = tempfile.mkdtemp(prefix="docs-scan-selftest-")
     try:
@@ -1133,6 +1163,9 @@ def selftest():
             "现值链·单独一枚不该红": _test_chain_green_single(),
             "现值链·隔太远不并成一条": _test_chain_green_far_apart(),
             "现值链·子节里的链也计入": _test_chain_nested_child(),
+            # 围栏盲区两枚（11-03 立：标题识别跳过代码围栏，此前全仓 32 枚假标题／7 个文件）
+            "围栏·围栏内假标题不生成节": _test_fence_heading_suppressed(),
+            "围栏·真节跨度不再被假标题截断": _test_fence_heading_span_restored(),
             # 新增红必须报出（㉒）
             "基线·NEW 必报且退出码为 1": _test_baseline_new(),
             # 表格尺·转义口径（10-11 那 7 处错位的归因）
