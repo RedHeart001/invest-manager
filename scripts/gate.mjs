@@ -133,6 +133,36 @@ const tail = (text, n = 3) =>
     .slice(-n)
     .join(" ⏎ ");
 
+/** 失败套件的逐枚 NG 行（CR10-8②，11-02）。
+ *
+ * 触发的那次读数：11-02 11:58 那把闸1 报「ds 离线逐套 29 套 1092/1094 红：
+ * `test_backup_db.py：exit=1＋87/89`」——**那两枚是谁，回执里永远读不出来**，
+ * 因为这一格只攒计数串。此后我单跑 3 次、按原序复跑 1 次都不再现，于是那枚红
+ * 只能记成"未归因"。问题不在被测件，在这把尺。
+ *
+ * 口径不是新造的，抄同仓两处既有形状：`web/scripts/verify-all.mjs:130-134`
+ * （NG 行与失败清单一律全保、**不参与 `slice(-14)` 截断**，理由写在 `:124-129`）
+ * ＋`test-script/run-offline-ds-1018.py:37-38`。先 `stripAnsi`——10-12 那次就是
+ * ANSI 色把汇总读成假红的。
+ *
+ * `ng` 全留到 40 枚为止，超出部分靠 `ngTotal` 说话（截断必须可见，
+ * 违 C34 的那一形是"清单被静默变短"）。摘不到名字时至少交回 `tail`：
+ * 「恒返回空的清单也算绿」是同一族病，反过来"红而空手"也不能出现。 */
+export function failureExcerpt(output) {
+  const lines = stripAnsi(String(output ?? ""))
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+  const ng = lines.filter(
+    (l) =>
+      /^(NG|FAIL|FAILED)\s/.test(l) ||
+      /^[✗×]\s/.test(l) ||
+      l.startsWith("[FAIL]") || // ds 那批离线套件的失败清单就是这个形（test_backup_db.py 末尾）
+      /^- \S/.test(l), // verify-all 认的另一形：逐条失败清单
+  );
+  return { ng: ng.slice(0, 40), ngTotal: ng.length, tail: lines.slice(-3).join(" ⏎ ") };
+}
+
 /** 北京时刻（回执命名与抬头都用它——全站账面的钟点口径） */
 export function beijingStamp(d = new Date()) {
   const parts = new Intl.DateTimeFormat("en-GB", {
@@ -211,13 +241,28 @@ export function runOffline({ skip = new Set() } = {}) {
     for (const f of offline) {
       const r = exec(PY, [path.join("tests", f)], { cwd: path.join(ROOT, "data-service") });
       const p = parseSuiteSummary(stripAnsi(r.stdout));
-      per.push({ file: f, exit: r.exit, passed: p?.passed ?? null, total: p?.total ?? null });
       // 三种红各自点名，不互相遮蔽（10-12 实钻：exit≠0 与"解析不出"会同时发生）
       const reasons = [];
       if (r.exit !== 0) reasons.push(`exit=${r.exit}`);
       if (!p) reasons.push("汇总解析不出");
       else if (p.passed !== p.total) reasons.push(`${p.passed}/${p.total}`);
-      if (reasons.length) bad.push(`${f}：${reasons.join("＋")}`);
+      // CR10-8②：红的那一把才摘 NG 名（成功套件不摘＝不往回执里塞无关行）
+      const ex = reasons.length ? failureExcerpt(r.output) : null;
+      per.push({
+        file: f,
+        exit: r.exit,
+        passed: p?.passed ?? null,
+        total: p?.total ?? null,
+        ...(ex ? { ng: ex.ng, ngTotal: ex.ngTotal, tail: ex.tail } : {}),
+      });
+      if (reasons.length) {
+        const who = ex
+          ? ex.ng.length
+            ? ` 红枚：${ex.ng.slice(0, 6).join(" ／ ")}`
+            : ` 没摘到 NG 行，末三行：${ex.tail}`
+          : "";
+        bad.push(`${f}：${reasons.join("＋")}${who}`);
+      }
       if (!p) unparsedCount += 1;
       if (p) {
         sum += p.passed;
@@ -314,6 +359,29 @@ export function selftest() {
       parseVitestSummary("Tests  374 passed (374)")?.total === 374);
   ck("docs 读数：NEW／KNOWN／表格三枚都摘出来",
     parseDocsReadings("== 基线对账：NEW=0／KNOWN=21/21 ==\n== 表格扫描：表=43 数据行=443 错位=0 ==").newAlarms === 0);
+
+  // ---------- CR10-8②：这把尺自己的牙齿（红而无名＝等于没红过） ----------
+  ck("失败套件的 NG 行与 [FAIL] 清单全留、色已剥（此前只留计数，11-02 那两枚永远读不出）",
+    (() => {
+      const ex = failureExcerpt(
+        "\u001b[31mNG \u001b[39m备份份数==1\nNG ② runs==1\n[FAIL] 目录里快照份数==1  <- 2\n" +
+          "  - test_x 那条也是失败清单\n===== 87/89 通过 =====",
+      );
+      return (
+        ex.ng.length === 4 &&
+        ex.ngTotal === 4 &&
+        ex.ng.every((l) => !l.includes("\u001b")) &&
+        ex.ng.some((l) => l.startsWith("[FAIL]")) &&
+        ex.ng.some((l) => l.startsWith("- test_x"))
+      );
+    })());
+  ck("🔁 反向：正文里一枚 NG 都摘不到、但仍判红时，至少交回末三行（红不许空手）",
+    (() => {
+      const ex = failureExcerpt("Traceback (most recent call last):\nsqlite.OperationalError: locked\n===== 87/89 通过 =====");
+      return ex.ng.length === 0 && ex.tail.includes("87/89") && ex.tail.includes("locked");
+    })());
+  ck("🔁 反向：成功套件不许顺手交出 NG 清单（否则「红」与「绿而有害」同形）",
+    failureExcerpt("OK 一切正常\n===== 89/89 通过 =====").ng.length === 0);
 
   const list = offlineSuites(["test_p0.py", "test_p1.py", "test_g6_hk.py"]);
   ck("③ 的两套绝不进离线清单", !list.offline.includes("test_p0.py") && list.offline.length === 1);
