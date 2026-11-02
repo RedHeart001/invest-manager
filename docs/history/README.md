@@ -117,6 +117,7 @@ wc -l docs/history/*.md
 | [2026-11-03-code-review-CR9追加八九归档-1103.md](2026-11-03-code-review-CR9追加八九归档-1103.md) | CODE-REVIEW.md 的块搬迁（2026-11-03） | 整体搬迁，内容逐字保留 | 见 [../CODE-REVIEW.md](../CODE-REVIEW.md) |
 | [2026-11-03-code-review-CR9本体归档-1103.md](2026-11-03-code-review-CR9本体归档-1103.md) | CODE-REVIEW.md 的块搬迁（2026-11-03） | 整体搬迁，内容逐字保留 | 见 [../CODE-REVIEW.md](../CODE-REVIEW.md) |
 | [2026-11-03-code-review-轮次身份旧行归档-1103.md](2026-11-03-code-review-轮次身份旧行归档-1103.md) | CODE-REVIEW.md 的块搬迁（2026-11-03） | 整体搬迁，内容逐字保留 | 见 [../CODE-REVIEW.md](../CODE-REVIEW.md) |
+| [2026-11-03-progress-钉死体量行归档-1103.md](2026-11-03-progress-钉死体量行归档-1103.md) | PROGRESS.md 的块搬迁（2026-11-03） | 整体搬迁，内容逐字保留 | 见 [../PROGRESS.md](../PROGRESS.md) |
 
 > **「同日续 N」的去处（10-08 重组留下的 19 处旧指针）**：上层文件里凡写「PROGRESS 同日续 N」的句子，其原文现在都在
 > [2026-10-08-progress-进度日志归档.md](2026-10-08-progress-进度日志归档.md)（该文件按「同日续 1…75」分节，编号与旧指针一一对得上，已逐号核对齐 75 段）。
