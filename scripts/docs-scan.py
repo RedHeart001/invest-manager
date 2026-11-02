@@ -131,6 +131,60 @@ def span_chars(lines, start, end):
     return len("\n".join(lines[start - 1:end]))
 
 
+def fence_parity(lines):
+    """围栏配对：回 (围栏行总数, 未闭合的那一行行号 or None)。
+
+    奇数＝有一处 ``` 没闭合 ⇒ 从那行起到 EOF 的 Markdown 语义全废（标题／表格／链接都读歪），
+    而且**没有任何别的尺会红**——所以这一形自己得有一把尺（FENCE），`--move` 也得有一道守卫。
+    """
+    n = 0
+    stack = []
+    for i, l in enumerate(lines):
+        if FENCE.match(l):
+            n += 1
+            if stack:
+                stack.pop()
+            else:
+                stack.append(i + 1)
+    return n, (stack[0] if stack else None)
+
+
+def fence_regions(lines):
+    """回 [(开栏行, 闭栏行)]；文件尾仍未闭合的那一枚闭栏记为 None。"""
+    regions = []
+    open_at = None
+    for i, l in enumerate(lines):
+        if FENCE.match(l):
+            if open_at is None:
+                open_at = i + 1
+            else:
+                regions.append((open_at, i + 1))
+                open_at = None
+    if open_at is not None:
+        regions.append((open_at, None))
+    return regions
+
+
+def fence_guard(lines, start, end):
+    """块必须"围栏干净"。回 None＝通过，否则回拒绝理由。
+
+    两种坏形状，缺一不可（11-03 实测踩过第二种，第一版守卫只挡了第一种）：
+      ① 块内 ``` 为奇数 ⇒ 搬完活区与归档件**各留一个不闭合的围栏**（数据损坏级）。
+      ② 块边界切进某个围栏**内部** ⇒ 两侧都仍配对，但代码块被挖掉一段，而归档件里那几行
+         没有围栏包裹 ⇒ 会被当成 Markdown 渲染（`# ① 保险…` 变成 H1、`|` 行变成表格）。
+    """
+    n, open_at = fence_parity(lines[start - 1:end])
+    if n % 2:
+        return ("块内 ``` 共 %d 行＝奇数（块内 L%d 那处未闭合）⇒ 搬完活区与归档件各留一个不闭合的围栏"
+                % (n, open_at))
+    for a, b in fence_regions(lines):
+        hi = b if b is not None else len(lines)
+        if a < start < hi or a < end < hi:
+            return ("块边界切进围栏 L%d..L%d 内部 ⇒ 代码块被挖掉一段，"
+                    "且归档件里那几行没有围栏包裹、会被当成 Markdown 标题／表格渲染" % (a, hi))
+    return None
+
+
 def heading_hits(lines):
     """标题行命中，**跳过代码围栏内的行**（11-03 修）。
 
@@ -234,12 +288,14 @@ def size_rows(paths):
         title_hits = [(s["line"], len(lines[s["line"] - 1]), s["title"]) for s in secs
                       if len(lines[s["line"] - 1]) > MAX_TITLE_CHARS]
         big_nums = [n for n, x in enumerate(lines, 1) if len(x) > MAX_LINE_CHARS]
+        fence_n, fence_open = fence_parity(lines)
         rows.append({
             "path": path, "lines": len(lines), "chars": len(text),
             "max_line": max([len(x) for x in lines] or [0]),
             "big_lines": len(big_nums), "big_nums": big_nums,
             "sec_hits": sec_hits, "speed_hits": speed_hits, "title_hits": title_hits,
             "chain_hits": chain_hits,
+            "fence_n": fence_n, "fence_open": fence_open,
         })
     return rows
 
@@ -280,6 +336,8 @@ def prefix60(s):
 
 
 def _disease_for(kind, sub):
+    if kind == "FENCE":
+        return "代码围栏没闭合", "「改」字（补上那行 ``` 或删掉多余的一行）——从那行起到 EOF 标题／表格／链接全读歪，而没有别的尺会红"
     if kind == "FILE":
         return "该搬", "「搬」字（把已闭环整节搬进 history）"
     if kind == "SECTION":
@@ -304,6 +362,13 @@ def collect_alarms(root, rows, ts):
     for r in rows:
         rel = relpath(root, r["path"])
         lines = lines_of(read(r["path"]))
+        if r.get("fence_open"):
+            d, need = _disease_for("FENCE", None)
+            alarms.append({"ruler": "FENCE", "file": rel, "line": r["fence_open"],
+                           "anchor": prefix60(lines[r["fence_open"] - 1]),
+                           "detail": "围栏行 %d 枚＝奇数，L%d 那处 ``` 到 EOF 都没闭合"
+                                     % (r["fence_n"], r["fence_open"]),
+                           "disease": d, "need": need})
         if r["chars"] > file_char_limit(r["path"]):
             limit = file_char_limit(r["path"])
             d, need = _disease_for("FILE", None)
@@ -355,7 +420,7 @@ def print_alarms(alarms, limit_line=10):
     by_ruler = {}
     for a in alarms:
         by_ruler.setdefault(a["ruler"], []).append(a)
-    for ruler in ("FILE", "SECTION", "LINE", "SPEED", "SPEEDCHAIN", "TITLE", "TABLE"):
+    for ruler in ("FENCE", "FILE", "SECTION", "LINE", "SPEED", "SPEEDCHAIN", "TITLE", "TABLE"):
         group = by_ruler.get(ruler, [])
         if not group:
             continue
@@ -815,6 +880,19 @@ def move(root, spec, do_go=False):
         if tg:
             print("MOVE 拒绝：块 L%d–L%d 表格守卫：%s" % (start, end, tg))
             return 1
+        # 围栏守卫（11-03 加，两种坏形状见 fence_guard 的 docstring）。
+        # 🔁 反向牙齿＝11-03 00:3x 探针实测：没有这道守卫时，BACKLOG-PLAN `L161..168`
+        # （围栏在 L160..174，块内一枚围栏行都没有＝形状②）被全部守卫放行。
+        fg = fence_guard(lines, start, end)
+        if fg:
+            print("MOVE 拒绝：块 L%d–L%d 围栏守卫：%s" % (start, end, fg))
+            return 1
+    # 剩余侧同判：块内都偶数不等于搬完活区还配对（例如整文件本来就是奇数）
+    kept = [l for i, l in enumerate(lines, 1) if not any(s <= i <= e for s, e in blocks)]
+    rn, ropen = fence_parity(kept)
+    if rn % 2:
+        print("MOVE 拒绝：搬走这些块后活区剩余 ``` 共 %d 行＝奇数（剩余侧 L%s 未闭合）" % (rn, ropen))
+        return 1
     # 抽出待搬内容（按行区间，从后往前以便原地删除）
     moved_lines = []
     proofs = []
@@ -1113,6 +1191,112 @@ def _test_fence_heading_span_restored():
     return len(secs) == 1 and secs[0]["span"] == span_chars(lines, 1, len(lines))
 
 
+_FENCE_DOC = "# z\n\n## 节\n\n前言\n\n```bash\n# 步骤一\ncmd1\ncmd2\n```\n\n尾巴\n"
+
+
+def _fence_move_root():
+    root = tempfile.mkdtemp(prefix="docs-scan-fence-")
+    os.makedirs(os.path.join(root, "docs", "history"))
+    _write(os.path.join(root, "docs", "history", "README.md"), "# idx\n\n## 时间线索引\n\n")
+    _write(os.path.join(root, "docs", "Z.md"), _FENCE_DOC)
+    return root
+
+
+def _test_fence_split_rejected():
+    """形状①：块内 ``` 为**奇数** ⇒ 搬完活区与归档件各留一个不闭合的围栏（数据损坏级）。
+
+    样本取 L11..L13＝**拿走闭栏那一行却不拿开栏**（现实中真会这么切：块首行恰好是 ```）。
+    这一枚刻意只踩形状①——它的两个边界都不在围栏 L7..L11 **内部**（`7<11<11` 与 `7<13<11` 都假），
+    所以摘掉奇偶判断它就会放行 ⇒ 与形状②那枚各自独立有牙齿（11-03 实测过：
+    第一版样本取 L7..L10 同时踩两种形状，摘掉奇偶判断仍被边界判断挡下＝证不到①）。
+    """
+    root = _fence_move_root()
+    buf = io.StringIO()
+    old_stdout = sys.stdout
+    try:
+        sys.stdout = buf
+        rc = move(root, {"file": "docs/Z.md", "lines": "11..13",
+                         "date": "2026-01-01", "slug": "z-fence", "reason": "test"}, do_go=True)
+        out = buf.getvalue()
+        sys.stdout = old_stdout
+        left = read(os.path.join(root, "docs", "Z.md"))
+        return (rc == 1 and "围栏守卫" in out and "奇数" in out and "切进围栏" not in out
+                and "尾巴" in left and fence_parity(lines_of(left))[1] is None
+                and not os.path.exists(os.path.join(root, "docs", "history", "2026-01-01-z-fence.md")))
+    finally:
+        sys.stdout = old_stdout
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def _test_fence_interior_rejected():
+    """形状②：块**整个躺在围栏内部**（一枚围栏行都不含）也必须拒。
+
+    🔁 这一枚才是 11-03 00:3x 那发探针的真形状（BACKLOG-PLAN `L161..168`，围栏 `L160..174`）：
+    两侧都仍配对 ⇒ 奇偶判断放行；害处＝代码块被挖掉一段，而归档件里那几行没有围栏包裹
+    ⇒ 被当成 Markdown 渲染（`# 步骤一` 变 H1）。第一版守卫只挡奇偶，被这发复验打出来。
+    """
+    root = _fence_move_root()
+    buf = io.StringIO()
+    old_stdout = sys.stdout
+    try:
+        sys.stdout = buf
+        rc = move(root, {"file": "docs/Z.md", "lines": "8..10",
+                         "date": "2026-01-01", "slug": "z-inner", "reason": "test"}, do_go=True)
+        out = buf.getvalue()
+        sys.stdout = old_stdout
+        return (rc == 1 and "切进围栏" in out
+                and "# 步骤一" in read(os.path.join(root, "docs", "Z.md"))
+                and not os.path.exists(os.path.join(root, "docs", "history", "2026-01-01-z-inner.md")))
+    finally:
+        sys.stdout = old_stdout
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def _test_fence_whole_block_ok():
+    """整块连围栏一起搬＝两侧都仍配对 ⇒ 守卫不许误伤合法搬动（红样本的另一半）。"""
+    root = _fence_move_root()
+    buf = io.StringIO()
+    old_stdout = sys.stdout
+    try:
+        sys.stdout = buf
+        rc = move(root, {"file": "docs/Z.md", "lines": "7..11",
+                         "date": "2026-01-01", "slug": "z-fence-ok", "reason": "test"}, do_go=True)
+        sys.stdout = old_stdout
+        arch = read(os.path.join(root, "docs", "history", "2026-01-01-z-fence-ok.md"))
+        left = read(os.path.join(root, "docs", "Z.md"))
+        # ⚠️ 判据不许写成「left 里不含 ```bash」：块首行就是围栏时，指针行的 label 取该行前 30 字面
+        # ⇒ 活区那枚指针字面上就带着 "```bash"（11-03 实测踩过）。正确判据＝活区围栏行数为 0。
+        return (rc == 0 and "```bash" in arch and "cmd2" in arch
+                and fence_parity(lines_of(left)) == (0, None)
+                and fence_parity(lines_of(arch))[1] is None)
+    finally:
+        sys.stdout = old_stdout
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def _fence_alarms(text):
+    root = tempfile.mkdtemp(prefix="docs-scan-fenceodd-")
+    try:
+        os.makedirs(os.path.join(root, "docs", "history"))
+        _write(os.path.join(root, "docs", "Z.md"), text)
+        paths = active_docs(root)
+        return [a for a in collect_alarms(root, size_rows(paths), table_scan(paths))
+                if a["ruler"] == "FENCE"]
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def _test_fence_odd_alarms():
+    """整文件围栏为奇数 ⇒ FENCE 尺必须红，并指出没闭合的那一行（这一形此前没有任何尺会响）。"""
+    hits = _fence_alarms("# z\n\n```bash\ncmd\n\n尾巴\n")
+    return len(hits) == 1 and hits[0]["line"] == 3 and "奇数" in hits[0]["detail"]
+
+
+def _test_fence_even_green():
+    """配对完整 ⇒ 不许误报（红样本的另一半）。"""
+    return _fence_alarms("# z\n\n```bash\ncmd\n```\n\n尾巴\n") == []
+
+
 def selftest():
     root = tempfile.mkdtemp(prefix="docs-scan-selftest-")
     try:
@@ -1166,6 +1350,12 @@ def selftest():
             # 围栏盲区两枚（11-03 立：标题识别跳过代码围栏，此前全仓 32 枚假标题／7 个文件）
             "围栏·围栏内假标题不生成节": _test_fence_heading_suppressed(),
             "围栏·真节跨度不再被假标题截断": _test_fence_heading_span_restored(),
+            # 围栏守卫与 FENCE 尺四枚（11-03 立：--move 此前会把代码块劈开且没有任何尺会红）
+            "围栏·劈开代码块的搬动必须被拒": _test_fence_split_rejected(),
+            "围栏·只挖代码块内部一段也必须被拒": _test_fence_interior_rejected(),
+            "围栏·整块连围栏一起搬必须放行": _test_fence_whole_block_ok(),
+            "围栏·奇数围栏必须红并指出行号": _test_fence_odd_alarms(),
+            "围栏·配对完整不误报": _test_fence_even_green(),
             # 新增红必须报出（㉒）
             "基线·NEW 必报且退出码为 1": _test_baseline_new(),
             # 表格尺·转义口径（10-11 那 7 处错位的归因）
