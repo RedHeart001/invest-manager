@@ -27,12 +27,12 @@
 
 > **验证基线**：现值只读 [FIX-LEDGER.md](FIX-LEDGER.md)「验证门槛（权威现值）」。
 
-> **当前阶段（11-02 23:5x 重写；旧块 8 行／2,069 字符已整块进下面那枚指针所指的归档件）**＝P0–P7 全部完成；CR1–CR9 已收尾；**当前开放轮次＝CR10**，下一可用 **CR10-10**（-7／-8／-9 已取走）；**真未闭＝CR10-6**（P3，11-01 19:2x 实机结论 `inconclusive`，真闭判据＝等下次上游真陈旧时窄窗是否仍含当日）。
-> 活跃观察项＝hk 覆盖面 2809 vs 东财约 4700 未归因；crypto 快照整类为零（CR10-8①，判据等 11-03 02:00 自然轮）。服务＝web 3000 node **24876**／ds 8000 python **13004**（判据按名字＋StartTime，11-02 21:3x）。逐项读数与回执一律见 [FIX-LEDGER.md](FIX-LEDGER.md) 状态卡与看板节，本块不复述。
+> **当前阶段（11-03 09:2x 重写；旧块 8 行／2,069 字符已整块进下面那枚指针所指的归档件）**＝P0–P7 全部完成；CR1–CR9 已收尾；**当前开放轮次＝CR10**，下一可用 **CR10-11**（-10 已被 watchlist 那枚取走＝看板已立行、尚未落码）；**真未闭＝CR10-6**（P3，11-01 19:2x 实机结论 `inconclusive`，真闭判据＝等下次上游真陈旧时窄窗是否仍含当日）。
+> 活跃观察项＝**hk 覆盖面** 2806（11-03 自然轮）vs 东财约 4700 未归因｜**`bond` 311/1066 而 `failedBatches=0`**＝"没更到"不是"更失败"，快照腿那套成因位管不到它｜~~crypto 快照整类为零~~ **已由 11-03 自然轮作废**＝库里 246/250 非空。服务＝web 3000 node **24876**／ds 8000 python **13004**（判据按名字＋StartTime；11-03 09:2x 现查仍是这两棵）。逐项读数与回执一律见 [FIX-LEDGER.md](FIX-LEDGER.md) 状态卡与看板节，本块不复述。
 > **结项口径（甲档）＝"结束"的五格**（10-22 11:2x 主人的字＝「按推荐路线推进」；**定义逐字保留**，读数只留最新一层）＝**①** 生产码零欠项（`#1–#94` 全闭）**②** 门槛①②全绿现值 **③** 日腿自然轮读数入账（02:00 那轮六判据）**④** docs 收口 **⑤** push 已闭。
 > **结项后唯一运维前提**＝本机无自启，开机后要人起两棵（先 web 后 ds），否则 02:00／03:30／08:30／16:30 四条腿全不在场。**不算欠工**＝门槛③④与 `window_contract --live --write`（归到场）／屏上 `diverged`·`stale`（不可按需制造）／hk 现场那一夜（CR9-26②）。
-> **五格最新读数（11-02 23:5x）**＝**①** 生产码欠项：`#1–#94` 里活口只剩 **#81／#90／#91** 三枚待字（明细见 FIX-LEDGER 待拍板节）｜**②** 门槛①②最新全绿＝11-02 15:05 那把 `verdict=GREEN`（分母与逐套读数见 FIX-LEDGER 门槛节那一行）。
-> **③** 11-02 02:00 自然轮＝`outcome=completed`、`ok=true`、`lastAttemptDate=2026-11-02`｜**④** docs 收口＝本轮三块现值块重写（FIX-LEDGER／README／PROGRESS）＋新尺 SPEEDCHAIN｜**⑤** push＝现查 `git rev-list --count origin/dev..HEAD`（**push 要主人当轮给字**）。
+> **五格最新读数（11-03 09:2x）**＝**①** 生产码欠项：`#1–#95` 里在册待字＝**#81／#90／#91／#95** 四枚（#95＝今夜新登记＝crypto 列表腿 `UNIQUE constraint`，推荐甲＝只登记不立案；明细见 FIX-LEDGER 待拍板节）｜**②** 门槛①②最新全绿＝11-02 15:05 那把 `verdict=GREEN`（分母与逐套读数见 FIX-LEDGER 门槛节那一行）。
+> **③** 11-03 02:07:39 自然轮＝`lastAttemptOutcome=partial_failed`、`lastAttemptDate=2026-11-03`、`legStaleness.verdict=fresh`、六类快照腿五类 `failedBatches=0`（唯一有失败的是 `fund`=2＝`failedEmpty`；列表腿失败的是 crypto＝见 #95）｜**④** docs 收口＝11-03 那批体量治理九笔（批 A＋批 B 共净 −80,223 字符、CODE-REVIEW 880→253 行）＋三块现值块重写｜**⑤** push＝现查 `git rev-list --count origin/dev..HEAD`（本轮主人已给字＝只覆盖 push 那一刻现存的笔数）。
 
 > **【已搬归档】** > **当前阶段**：P0–P7 全部完成；**CR1–CR —— 正文见 [2026-11-02-progress-状态总览现值链归档-1102.md](history/2026-11-02-progress-状态总览现值链归档-1102.md)（体量治理：整块搬迁，原地只留指针）。
 
@@ -136,6 +136,15 @@ O1–O12 全量落地，明细见 [history/2026-09-13-cr1-全项目审查与O系
   - **preflight（只读探两棵在场，未重启任何服务）**＝件内字面 `{"ds": {"up": true, "status": "ok"}, "web": {"up": true, "status": "ok"}}`；两棵监听 PID 由 `Get-NetTCPConnection` 现查（不拄 json）＝**3000 → 10728**、**8000 → 23948**。④ 回执抬头照抄＝`（#78 起跑前）树戳：HEAD=9a53da9 dirty=0/0 ds=2026-11-02T01:36:38+08:00 appCommit=2026-11-02T12:45:56+08:00 appMtime=2026-11-02T12:43:26+08:00 装载=旧码` ⇒ 现场 ds 仍是 01:36 那一棵，本把读的是它的既有行为；**① 的成因位判据仍等今夜 02:00 自然轮**（装载与否归主人，本把没碰）。
   - **回执文件清单**＝`data-service/runtime/full-1102-1505.log`（件自身 stdout）／`gate3-p0-1102pm.out`／`gate3-p1-1102pm.out`／`verify-all-1102pm.out`／`full-1102-1505.json`（逐枚 checks）／哨兵 `full-1102-1505.done`。
   - `docs/FIX-LEDGER.md` 本轮未动＝它的体量与登记归主人单独批字；读数只落 PROGRESS 与 README 这两枚。
+
+> **现值更正（11-03 09:2x，只增这一段；上面 12:4x／15:0x 各段原句一律不回改）＝今夜 02:07 自然轮的读数已由 07:30 那枚只读件交回，逐格落位如下**
+> **① 判据「`lastRefresh.results[crypto]` 要带得出成因位」＝落档③**：今夜 crypto 快照腿那行 `failedBatches==0` ⇒ 四枚成因位按码面**设计上不写**（`web/lib/market-snapshot.ts:339-347`；反向用例 `market-snapshot-gate.test.ts:235-245` 钉住"成功轮五个位一个都不写"）⇒ **既不是修复被证伪，也不是到手**；这一格要等一次**真有失败**的轮，而失败不可按需制造（沿 C1／C3／C4＝出现即记录、不设截止、不重试、不再排自动化）。
+> **② 仪器本身这次在真生产数据上读全了**＝同一把尺读 `fund` 那行：`total=28240`／`updated=23608`／`failedBatches=2`，四枚成因位**全部在场**＝`failedHttp=0`·`failedNoAnswer=0`·`failedEmpty=2`·`failedWrite=0`，`failNote`＝`data-service 回了 60 条报价，但整批没有一条带得出价格`，**恒等式 `failedBatches(2) == 四形之和(2)` 成立** ⇒ 上面那句「剩下两形（上游瞬时不可达 vs 与批大小相关）由今夜那一轮的成因位自己分开」对 **fund 已经分开**＝上游答了但整批无价；且 fund 那 **4,632 行** `snapshotAt` 为空从此有归因＝`failedEmpty`，不是我们没接住。
+> **③ 判据「若仍为 0 而成因是 502 ⇒ 属上游态」这一支今夜没走到**：crypto 今夜非空 **246/250**（`MAX(snapshotAt)`＝2026-11-03 02:21:33.505 +0800，与进程内 `updated=246／batches=3` 互证）⇒ **「crypto 快照整类为零」自本作废**（12:4x 那段第一枚"现查"读数是当时的真值，不回改）。逐类非空覆盖率现查（只读 SQL，六类同落 02:07–02:24 这一夜窗）＝us 505/505｜crypto 246/250｜hk 2682/2806｜stock 5572/5576｜**bond 311/1066**｜fund 23608/28240 ⇒ **新空白换成了 `bond`**：311/1066 却 `failedBatches=0`＝**没更到 ≠ 更失败**，这套仪器对它没有读数，另案、不在本条里立案。**币值不值得投归主人判，本段只报数据面。**
+> **④ CR10-4 现场证据＋CR10-8③ 落盘两格同时结清**＝`backups/state.json` 现测 `startupLabel="startup"`＋`startupAt="2026-11-02T16:09:43+08:00"` **在场且都非空**，而写它的那把正是今夜 03:30 的 daily（mtime 03:30:01、`trigger` 由 `startup-catchup` 变 `daily`、`label=null`＝daily 的设计形、`runs=1` 只作字面抄录不参与归因）＋`backups/dev-20261103-033000.db`（72,597,504 B）在场 ⇒ **继承成立、daily 没擦掉 startup**＝上面 ③ 那句「另开 `startupLabel`/`startupAt`…其余继承盘上那份」在现场被读到。`/health` 的 `dbBackup.nextRun` 已前移到 **11-04 03:30** ⇒ 调度没停在这一夜。
+> **⑤ CR10-5 的现场判据今夜又读到一次**（`lastResult.results[hk].note`＝`list degraded source=sina-hk-spot：东财港股列表不可用（ProviderError: hk eastmoney request failed on all hosts: RemoteDisconnected）`、`count=2806`、快照腿 `updated=2682`）＝**不重开、不重复闭账**（该条 11-01 02:4x 已翻 ✅）；⚠️ **同段自纠＝我 11-02 23:0x 在对话里把它说成"CR10-5 到手了"是用词错了**，那是已闭条的**第二枚独立读数**、不是第一次到手，账上以本行为准。
+> **⑥ 一枚未在册的字面异常本轮第一次入账**＝今夜列表腿 crypto 那条只有 `error`/`tookMs`（列表腿那一形，所以**不算** ① 那一格的读数），`error`＝`Raw query failed. Code: 2067. Message: UNIQUE constraint failed: Product.type, Product.code`、顶层 `failedTypes=["crypto"]` ⇒ 已登记为待拍板 **#95**（推荐甲＝只登记不立案），**本轮零行 `sync.ts` 改动**。
+> **出处与限制**＝`data-service/runtime/morning-1103-0730.out`（188 行，`.gitignore:50` 下＝**未入库**）＋同名 `.json`＋`health-1103-0730.json`；这三份是本轮唯一出处件，读的是 **11-02 20:46 那一棵进程**（装载＝新码，epoch 1793623574 ＞ 1793594606）。本轮零出网、未跑 ③④、未重启任何服务。
 
 ### 🟡 东财链接/限流问题（记录搁置，P5 后已集中测试；缓解措施已落地）
 
