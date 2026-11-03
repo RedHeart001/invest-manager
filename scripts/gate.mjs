@@ -15,6 +15,9 @@
  *
  * 不做的事（别把它读成"门禁自动化了"）：
  *   · ③（p0/p1）与 ④（verify-all 七套）不在这里——它们要买上游额度，10-09 已定档＝人工到场；
+ *     ⚠️ 11-03 现查更正：本文件此前自称"四道**零出网**门禁"，而 `LIVE_SUITES` 只摘了 p0/p1，
+ *     于是 ③ 的逐套清单里一直含着 `test_p6_mcp.py` 那枚会买真报价的套件（**每跑一次闸1 买一发，
+ *     且哪本账都读不到**）。现在它进了名单，"零出网"这句才与实现同源；防漏的牙齿在 `--selftest`。
  *   · 不挂 CI、不挂 git hook：`.git/hooks` 不在版本管理里、`--no-verify` 一道口就绕过，
  *     而绕开本就违纪律（理由抄在 FIX-LEDGER 的 OPT-4 行）。
  *   ⇒ 它省下的是"手敲四条＋手抄读数"，仍然要我（或你）按下回车。
@@ -37,8 +40,12 @@ const PY = process.env.PY || (fs.existsSync(VENV_PY) ? VENV_PY : "python");
 const WEB = path.join(ROOT, "web");
 const TSC_JS = path.join(WEB, "node_modules", "typescript", "bin", "tsc");
 const VITEST_JS = path.join(WEB, "node_modules", "vitest", "vitest.mjs");
-/** 要买额度的那两套（③）：不在离线闸里跑，也不许被静默算进 ② 的合计 */
-export const LIVE_SUITES = new Set(["test_p0.py", "test_p1.py"]);
+/** 要买额度的套件：不在离线闸里跑，也不许被静默算进 ② 的合计。
+ * `test_p6_mcp.py` 也进这一列（CR10-11，11-03）＝它 `:93` 那枚 `get_quote(600519)` 是**无条件**
+ * 真出网（成功失败都算通过，只记一条 `[网络项]` note ⇒ 套件 7/7 绿也照样买了），而 `:24-25`
+ * （CR9-100）又把 `LIMITER_STATE_FILE` 指进临时目录 ⇒ 那一发不落任何一本账
+ * （`test_leg_staleness.py:221` 就管这叫「账外账」）。所以「durable 读数是 0」证明不了没买。 */
+export const LIVE_SUITES = new Set(["test_p0.py", "test_p1.py", "test_p6_mcp.py"]);
 
 const VITEST_RE = [
   /Tests[^\n]*?(\d+) failed[^\n]*?(\d+) passed[^\n]*?\((\d+)\)/,
@@ -162,6 +169,13 @@ export function failureExcerpt(output) {
   );
   return { ng: ng.slice(0, 40), ngTotal: ng.length, tail: lines.slice(-3).join(" ⏎ ") };
 }
+
+/** ⑦（11-03）：`docs-scan.py --selftest` 的读数是**开头那行汇总**，不是末行——
+ * 它汇总之后还会逐条打 `样本断链: …`（那是尺自己的样本，共 5 条），而 `tail(...,1)`
+ * 取的是最后一条非空行，于是回执里那格永远写着「样本断链: … history/gone.md」＝一条假读数。
+ * 判定一直用 exit（是对的），坏的只是被抄进账的那句字。找不到汇总行才退回末行。 */
+const selftestReading = (text) =>
+  /^SELFTEST\s+(?:PASS|FAIL).*$/m.exec(stripAnsi(text))?.[0]?.trim() ?? tail(text, 1);
 
 /** 北京时刻（回执命名与抬头都用它——全站账面的钟点口径） */
 export function beijingStamp(d = new Date()) {
@@ -301,7 +315,7 @@ export function runOffline({ skip = new Set() } = {}) {
           : `NEW=${read.newAlarms}／KNOWN=${read.known}/${read.baselineTotal}` +
             (read.tables ? `｜表格 ${read.tables.tables}·${read.tables.rows}·错位 ${read.tables.misaligned}` : ""),
     });
-    push({ name: "docs selftest", exit: s.exit, reading: tail(s.output, 1) });
+    push({ name: "docs selftest", exit: s.exit, reading: selftestReading(s.output) });
     push({ name: "docs 断链", exit: l.exit, reading: read.linkLine ? `引用 ${read.linkLine.slice(0, 60)}` : tail(l.output, 1) });
   }
 
@@ -359,6 +373,17 @@ export function selftest() {
       parseVitestSummary("Tests  374 passed (374)")?.total === 374);
   ck("docs 读数：NEW／KNOWN／表格三枚都摘出来",
     parseDocsReadings("== 基线对账：NEW=0／KNOWN=21/21 ==\n== 表格扫描：表=43 数据行=443 错位=0 ==").newAlarms === 0);
+  // ---------- ⑦（11-03）：selftest 那格的取行 ----------
+  const ST_OUT =
+    "SELFTEST PASS（41 判据）  broken=5 refs={'append': 4}\n" +
+    "  样本断链: docs/CODE-REVIEW.md: 「追加九百九十九」在任何标题里都不存在\n" +
+    "  样本断链: docs/FIX-LEDGER.md: 链接目标不存在 history/gone.md\n";
+  ck("⑦ selftest 读数取开头那行汇总（不是尺自己那五条样本的末条）",
+    selftestReading(ST_OUT) === "SELFTEST PASS（41 判据）  broken=5 refs={'append': 4}");
+  ck("🔁 反向：旧写法（`tail(...,1)`）在这份输出上确实交出样本行＝证明上面那枚断言不是白给的",
+    tail(ST_OUT, 1) === "样本断链: docs/FIX-LEDGER.md: 链接目标不存在 history/gone.md");
+  ck("🔁 汇总行不在时退回末行（不许读成空字符串＝静默丢读数）",
+    selftestReading("some error\nno summary line\n") === "no summary line");
 
   // ---------- CR10-8②：这把尺自己的牙齿（红而无名＝等于没红过） ----------
   ck("失败套件的 NG 行与 [FAIL] 清单全留、色已剥（此前只留计数，11-02 那两枚永远读不出）",
@@ -383,16 +408,25 @@ export function selftest() {
   ck("🔁 反向：成功套件不许顺手交出 NG 清单（否则「红」与「绿而有害」同形）",
     failureExcerpt("OK 一切正常\n===== 89/89 通过 =====").ng.length === 0);
 
-  const list = offlineSuites(["test_p0.py", "test_p1.py", "test_g6_hk.py"]);
-  ck("③ 的两套绝不进离线清单", !list.offline.includes("test_p0.py") && list.offline.length === 1);
-  ck("tests/ 里少了名单上的套件要说出来",
-    offlineSuites(["test_g6_hk.py"]).liveListedButAbsent.join(",") === "test_p0.py,test_p1.py");
+  // ⚠️ 11-03（CR10-11）：下面这三枚旧断言把名单的**内容**（"两套"＝p0＋p1）写死了，
+  // 于是"往名单里补一枚付费套件"这件事本身会让 selftest 假红——尺不该钉住自己的输入。
+  // 换成按性质判：名单里的每一枚都不许出现在离线清单里，少了谁要逐枚点名。
+  const paidList = [...LIVE_SUITES].sort();
+  const mixed = offlineSuites([...LIVE_SUITES, "test_g6_hk.py"]);
+  ck("付费名单里的每一枚都绝不进离线清单（名单里有几枚都算）",
+    mixed.offline.length === 1 &&
+      mixed.offline[0] === "test_g6_hk.py" &&
+      paidList.every((f) => !mixed.offline.includes(f)));
+  ck("🔁 `test_p6_mcp.py` 必须在付费名单里——漏出去＝每跑一次闸1 白买一发真报价（且读不到账）",
+    LIVE_SUITES.has("test_p6_mcp.py"));
+  ck("tests/ 里少了名单上的套件要逐枚说出来",
+    offlineSuites(["test_g6_hk.py"]).liveListedButAbsent.slice().sort().join(",") === paidList.join(","));
 
   ck("清单为空＝红（恒返 0 的批跑器那一形）", aggregate([{ name: "ds", exit: 0, empty: true }]).exit === 1);
   ck("exit≠0＝红", aggregate([{ name: "tsc", exit: 2 }]).exit === 1);
   ck("汇总解析不出来＝红，哪怕 exit=0", aggregate([{ name: "vitest", exit: 0, unparsed: true }]).exit === 1);
-  ck("③ 名单里的文件不见了＝红，不静默少跑两套",
-    offlineSuites(["test_g6_hk.py"]).liveListedButAbsent.length === 2);
+  ck("名单里的文件不见了＝红，不静默少跑（名单有几枚就点名几枚）",
+    offlineSuites(["test_g6_hk.py"]).liveListedButAbsent.length === LIVE_SUITES.size);
   ck("全绿时整体 0", aggregate([{ name: "tsc", exit: 0 }, { name: "ds", exit: 0, empty: false }]).exit === 0);
   ck("抬头只报 bool/长度意义上的 dirty 数",
     treeStamp({ sha: "abc", branch: "dev", dirty: ["a", "b"] }).dirtyPaths === 2);
