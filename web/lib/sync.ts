@@ -47,6 +47,12 @@ export type SyncResult = {
    *  刻意不算 `error`——web 的 `ok` 是 `results.every(r => !r.error)`，跳过不是失败；
    *  data-service 侧则按"整轮都是 skipped"给出 `outcome="skipped"`（第六态）。 */
   skipped?: boolean;
+  /** CR10-13（`#95` 的甲＋）：这批列表载荷里**同一 `(type,code)` 出现两次以上**的那几枚，
+   *  形如 `"crypto:BTCUSDT"`，最多点 20 枚。下面那条 `INSERT … SELECT` 不带 `ON CONFLICT`，
+   *  所以重复码必然把整轮打成回滚——此前账上只有一枚裸 `error` 字符串，谁重复了读不出来。
+   *  **只点名、不改取舍、不碰唯一键**；刻意不住 `note` 里＝`note` 会被 `HotspotFeed.tsx:259` 上屏，
+   *  而"哪几枚 code 重复"是开发者向的数。 */
+  dupCodes?: string[];
 };
 
 const CHUNK = 500;
@@ -156,9 +162,23 @@ async function _syncTypeGated(type: string, force: boolean): Promise<SyncResult>
   return _syncTypeInner(type);
 }
 
+/** CR10-13：列表载荷里同 `(type,code)` 出现两次以上的键（按首次出现序，最多 20 枚），没有重复返回 `undefined`。 */
+const DUP_CODES_MAX = 20;
+export function findDuplicateCodes(rows: { type: string; code: string }[]): string[] | undefined {
+  const seen = new Map<string, number>();
+  for (const r of rows) {
+    const key = `${r.type}:${r.code}`;
+    seen.set(key, (seen.get(key) ?? 0) + 1);
+  }
+  const dups = [...seen.entries()].filter(([, n]) => n > 1).map(([key]) => key);
+  return dups.length > 0 ? dups.slice(0, DUP_CODES_MAX) : undefined;
+}
+
 async function _syncTypeInner(type: string): Promise<SyncResult> {
   const started = Date.now();
   let stageTableName: string | null = null;
+  // 挂在 try 外面＝失败路径也要把点名结果交出去（`#95` 那一发恰恰是**失败**那一格读到的）
+  let dupCodes: string[] | undefined;
   try {
     // 超时说明（2026-09-20）：港股列表必须分页（东财 `clist/get` 对港股忽略大分页参数，
     // 固定 100 条/页；约 4700 只 → 48 页），且每页经源族限速器（最小间隔 5s）
@@ -196,6 +216,8 @@ async function _syncTypeInner(type: string): Promise<SyncResult> {
       lastChangePct: null,
       updatedAt: new Date(),
     }));
+    // CR10-13：重复即点名（只数不改）。放在判空与缩水闸之前＝那两条早退也带着这笔读数走。
+    dupCodes = findDuplicateCodes(rows);
 
     // 空载荷保护（C1）：全量替换前必须判空——上游返回空列表时保留旧数据
     if (rows.length === 0) {
@@ -232,6 +254,7 @@ async function _syncTypeInner(type: string): Promise<SyncResult> {
           error:
             `payload shrunk (${rows.length} < ${existingCount} 的 70%)，` +
             `${cause}，已保留现有数据`,
+          dupCodes,
           tookMs: Date.now() - started,
         };
       }
@@ -303,11 +326,12 @@ async function _syncTypeInner(type: string): Promise<SyncResult> {
     if (shrinkByDeclaration) {
       note = note ? `${note}；${shrinkByDeclaration}` : shrinkByDeclaration;
     }
-    return { type, count: rows.length, note, tookMs: Date.now() - started };
+    return { type, count: rows.length, note, dupCodes, tookMs: Date.now() - started };
   } catch (e) {
     return {
       type,
       error: e instanceof Error ? e.message : String(e),
+      dupCodes,
       tookMs: Date.now() - started,
     };
   } finally {
