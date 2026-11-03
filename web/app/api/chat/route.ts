@@ -7,6 +7,7 @@ import { appendMessage, createSession, getMessages } from "@/lib/chat";
 import { repairToolPairing } from "@/lib/chat-history";
 import { startResearch } from "@/lib/research";
 import { extractResearchTarget } from "@/lib/research-target";
+import { checkRequestOrigin } from "@/lib/request-origin";
 import { trimContext } from "@/lib/context-budget";
 import { prisma } from "@/lib/prisma";
 
@@ -19,6 +20,14 @@ const MAX_TOOL_ROUNDS = 4;
 const INTENT_RE = /深度分析|深度研究|研报|全面评估/;
 
 export async function POST(req: NextRequest) {
+  // CR10-12：POST 是简单请求 ⇒ 外站页面用 `sendBeacon`／`no-cors`＋`text/plain` 装 JSON
+  // 就能把这一发打进来（`Request.json()` 不看 Content-Type），而一发＝一次真 LLM 调用，
+  // 正文命中 `INTENT_RE` 还会 `startResearch` 起整轮研报。守卫只拦浏览器跨站那一形，
+  // 无 Origin/Referer 的本机脚本照旧放行（`request-origin.ts:48`）。
+  const blocked = checkRequestOrigin(req);
+  if (blocked) {
+    return NextResponse.json({ error: blocked }, { status: 403 });
+  }
   let body: { sessionId?: string; message?: string };
   try {
     body = (await req.json()) as { sessionId?: string; message?: string };

@@ -18,12 +18,27 @@ vi.mock("@/lib/prisma", () => ({
 }));
 
 import { DELETE, GET, POST } from "./route";
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
-function postReq(body: unknown) {
-  return { json: async () => body } as unknown as Parameters<typeof POST>[0];
+const ROUTE_SRC = readFileSync(
+  path.join(path.dirname(fileURLToPath(import.meta.url)), "route.ts"),
+  "utf-8",
+);
+
+function postReq(body: unknown, headers: Record<string, string> = {}) {
+  return {
+    json: async () => body,
+    headers: new Headers(headers),
+    nextUrl: { origin: "http://localhost:3000", searchParams: new URLSearchParams() },
+  } as unknown as Parameters<typeof POST>[0];
 }
-function delReq(url: string) {
-  return { nextUrl: { searchParams: new URLSearchParams(url.split("?")[1] ?? "") } } as unknown as Parameters<typeof DELETE>[0];
+function delReq(url: string, headers: Record<string, string> = {}) {
+  return {
+    nextUrl: { searchParams: new URLSearchParams(url.split("?")[1] ?? "") },
+    headers: new Headers(headers),
+  } as unknown as Parameters<typeof DELETE>[0];
 }
 
 describe("watchlist API（G5）", () => {
@@ -70,5 +85,37 @@ describe("watchlist API（G5）", () => {
     const body = (await res.json()) as { items: unknown[] };
     expect(res.status).toBe(200);
     expect(body.items).toHaveLength(1);
+  });
+
+  // ---- CR10-12：来源守卫（看板那枚「watchlist 两枚写腿」的 POST 那半） ----
+  it("🔁 尺自己的牙齿＝在内存里摘掉守卫行，两条字面判据必须同时失效", () => {
+    const stripped = ROUTE_SRC.split("\n")
+      .filter((line) => !line.includes("blocked") && !line.includes("request-origin"))
+      .join("\n");
+    expect(stripped.indexOf("checkRequestOrigin(req)")).toBe(-1);
+    expect(stripped).not.toContain("{ status: 403 }");
+    expect(ROUTE_SRC).toContain("checkRequestOrigin(req)");
+  });
+
+  it("接线＝守卫排在读 body 之前", () => {
+    expect(ROUTE_SRC.indexOf("checkRequestOrigin(req)")).toBeLessThan(ROUTE_SRC.indexOf("req.json("));
+  });
+
+  it("POST 跨站 Origin → 403 且不 upsert", async () => {
+    const res = await POST(postReq({ type: "stock", code: "600519" }, { origin: "http://evil.example" }));
+    expect(res.status).toBe(403);
+    expect(upsert).not.toHaveBeenCalled();
+  });
+
+  it("🔁 POST 无 Origin（本机脚本那一形）→ 放行，守卫不许把它们打死", async () => {
+    const res = await POST(postReq({ type: "stock", code: "600519", name: "贵州茅台" }));
+    expect(res.status).toBe(200);
+    expect(upsert).toHaveBeenCalledTimes(1);
+  });
+
+  it("🔁 DELETE 本轮刻意没挂＝跨站 Origin 的 DELETE 仍走 200 那一档（账上「没做」那半的读数）", async () => {
+    const res = await DELETE(delReq("?type=stock&code=600519", { origin: "http://evil.example" }));
+    expect(res.status).toBe(200);
+    expect(deleteMany).toHaveBeenCalledTimes(1);
   });
 });

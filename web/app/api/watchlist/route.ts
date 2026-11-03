@@ -11,6 +11,7 @@ import { prisma } from "@/lib/prisma";
 
 // C5（2026-09-25）：改用 lib/validate.ts 单一来源（原字面量硬写删除）
 import { CODE_SET, QUOTE_TYPES } from "@/lib/validate";
+import { checkRequestOrigin } from "@/lib/request-origin";
 
 const TYPES = QUOTE_TYPES;
 
@@ -29,6 +30,13 @@ export async function GET() {
 }
 
 export async function POST(req: NextRequest) {
+  // CR10-12：本枚是看板上最早登记的那一枚（`#74`／CR10-10 的 POST 那半），本轮与其余
+  // 三枚可被外站驱动的 POST 一起补。下方 `DELETE` **没挂**＝非简单请求，浏览器必先预检，
+  // 而全站零 CORS 头 ⇒ 外站驱动不到（属纵深防御缺口，不是补漏项；账＝FIX-LEDGER 看板 CR10-12 行）。
+  const blocked = checkRequestOrigin(req);
+  if (blocked) {
+    return NextResponse.json({ error: blocked }, { status: 403 });
+  }
   const body = (await req.json().catch(() => ({}))) as {
     type?: string;
     code?: string;

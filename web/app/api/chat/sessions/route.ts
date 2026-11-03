@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { appendMessage, createSession, listSessions } from "@/lib/chat";
+import { checkRequestOrigin } from "@/lib/request-origin";
 import { prisma } from "@/lib/prisma";
 
 // 会话列表 / 新建会话
@@ -9,6 +10,12 @@ export async function GET() {
 }
 
 export async function POST(req: NextRequest) {
+  // CR10-12：POST＝简单请求，外站 `sendBeacon` 就能打进来白造会话行（body 解析失败也照建，
+  // 因为下面那句 `catch` 把"没有 body"当默认标题）。只拦浏览器跨站那一形。
+  const blocked = checkRequestOrigin(req);
+  if (blocked) {
+    return NextResponse.json({ error: blocked }, { status: 403 });
+  }
   let title = "新会话";
   try {
     const body = (await req.json()) as { title?: string };
