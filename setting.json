@@ -1,0 +1,221 @@
+{
+  "workbench.iconTheme": "material-icon-theme",
+  "vetur.validation.template": false,
+  "editor.mouseWheelZoom": true,
+  //js-beautify-html格式化配置，属性强制换行
+  "vetur.format.defaultFormatterOptions": {
+    "js-beautify-html": {
+      "wrap_attributes": "force-aligned"
+    }
+  },
+  //根据文件后缀名定义vue文件类型
+  "files.associations": {
+    "*.vue": "vue",
+    "*.cjson": "jsonc",
+    "*.wxss": "css",
+    "*.wxs": "javascript",
+    "*.jsx": "javascriptreact",
+    "*.tsx": "typescriptreact",
+    "*.conf": "nginx"
+  },
+  //编辑器默认的代码检查规则关闭
+  "javascript.format.enable": true,
+
+  //autoFixedOnSave 设置已废弃，采用如下新的设置
+
+  "eslint.format.enable": true,
+  //autoFix默认开启，只需输入字符串数组即可
+  "eslint.validate": ["javascript", "javascriptreact", "vue", "html"],
+  // #让prettier使用eslint的代码格式进行校验
+  "prettier.eslintIntegration": true,
+  // #去掉代码结尾的分号
+  "prettier.semi": false,
+  "emmet.includeLanguages": {
+    "wxml": "html"
+  },
+  "minapp-vscode.disableAutoConfig": true,
+  "editor.suggestSelection": "first",
+  "vsintellicode.modify.editor.suggestSelection": "automaticallyOverrodeDefaultValue",
+  "javascript.updateImportsOnFileMove.enabled": "always",
+  "javascript.format.insertSpaceAfterOpeningAndBeforeClosingNonemptyBraces": true,
+  "vscode_custom_css.policy": true,
+  "terminal.integrated.rendererType": "dom",
+  "python.pythonPath": "/usr/local/bin/python3",
+  "python.jediEnabled": false,
+  "files.exclude": {
+    "**/.classpath": true,
+    "**/.project": true,
+    "**/.settings": true,
+    "**/.factorypath": true
+  },
+  "eslint.autoFixOnSave": true,
+  "[javascriptreact]": {
+    "editor.defaultFormatter": "vscode.typescript-language-features"
+  },
+  // ko头部注释
+  "fileheader.configObj": {
+    "prohibitAutoAdd": ["json", "md"], // 禁止.json .md文件，自动添加头部注释
+    "language": {
+      // 普通后缀文件
+      "java": {
+        "head": "/$$",
+        "middle": " $ @",
+        "end": " $/"
+      },
+      // 一次匹配多种文件后缀文件 不用重复设置
+      "h/hpp/cpp": {
+        "head": "/*** ", // 统一增加几个*号
+        "middle": " * @",
+        "end": " */"
+      },
+      // 针对有特殊要求的文件如：test.blade.php
+      "blade.php": {
+        "head": "<!--",
+        "middle": " * @",
+        "end": "-->"
+      }
+    },
+
+    "autoAdd": true // 默认开启
+  },
+  "fileheader.customMade": {
+    "Author": "LiAo",
+    "Date": "Do not edit", // 文件创建时间(不变)
+    "LastEditors": "LiAo", // 文件最后编辑者
+    "LastEditTime": "Do not edit", // 文件最后编辑时间
+    "FilePath": "Do not edit" // 文件在项目中的相对路径 自动更新
+  },
+  "vetur.format.defaultFormatter.js": "vscode-typescript",
+  "vetur.format.defaultFormatter.ts": "prettier",
+  "[vue]": {
+    "editor.defaultFormatter": "octref.vetur"
+  },
+  "editor.codeActionsOnSave": {
+    "source.fixAll.eslint": "explicit",
+    "source.fixAll.tslint": "explicit",
+    "source.fixAll.stylelint": "explicit"
+  },
+
+  // 字体类型
+  "editor.fontFamily": "JetBrains Mono",
+  "terminal.integrated.fontFamily": "monospace",
+  "terminal.integrated.fontSize": 20,
+  "terminal.integrated.rightClickCopyPaste": true,
+  "editor.fontLigatures": null,
+  "highlight-matching-tag.styles": {
+    "opening": {
+      "left": {
+        "custom": {
+          "borderWidth": "0 0 0 2px",
+          "borderStyle": "solid",
+          "borderColor": "yellow",
+          "borderRadius": "5px",
+          "overviewRulerColor": "white"
+        }
+      },
+      "right": {
+        "custom": {
+          "borderWidth": "0 2px 0 0",
+          "borderStyle": "solid",
+          "borderColor": "yellow",
+          "borderRadius": "5px",
+          "overviewRulerColor": "white"
+        }
+      }
+    }
+  },
+
+  "[nginx]": {},
+  // 不格式化
+  "markdownFormatter.codeAreaToBlock": "",
+  // 自动格式化标点
+  "markdownFormatter.fullWidthTurnHalfWidth": "auto",
+  // 中文标点格式化为英文
+  // "markdownFormatter.fullWidthTurnHalfWidth": "，：；！“”‘’（）？。",
+  "markdownFormatter.formatOpt": {
+    // "indent_size": 2,
+  },
+  "[markdown]": {
+    // 自动保存
+    "editor.formatOnSave": true,
+    // 显示空格
+    "editor.renderWhitespace": "all",
+    // 快速补全
+    "editor.quickSuggestions": {
+      "other": true,
+      "comments": true,
+      "strings": true
+    },
+    // snippet 提示优先
+    "editor.snippetSuggestions": "top",
+
+    "editor.tabCompletion": "on",
+    // 使用enter 接受提示
+    "editor.acceptSuggestionOnEnter": "on",
+    // 默认格式化工具为本工具
+    "editor.defaultFormatter": "mervin.markdown-formatter"
+  },
+  "cSpell.userWords": ["Plugindefine"],
+  "python.languageServer": "Default",
+
+  "[jsonc]": {
+    "editor.defaultFormatter": "esbenp.prettier-vscode"
+  },
+  "[javascript]": {
+    "editor.defaultFormatter": "vscode.typescript-language-features"
+  },
+  "gitlens.gitCommands.closeOnFocusOut": true,
+  "[json]": {
+    "editor.defaultFormatter": "esbenp.prettier-vscode"
+  },
+  "editor.fontSize": 22,
+  "screencastMode.verticalOffset": 30,
+  "screencastMode.fontSize": 70,
+  "explorer.confirmDragAndDrop": false,
+  "explorer.confirmDelete": false,
+  "workbench.welcomePage.hiddenCategories": ["Setup", "Beginner"],
+  "security.workspace.trust.untrustedFiles": "open",
+  "remote.SSH.remotePlatform": {
+    "39.100.26.51": "linux",
+    "redHeartServer": "linux"
+  },
+  "editor.parameterHints.enabled": false,
+  // "editor.defaultFormatter": "ms-vscode.vscode-typescript-tslint-plugin",
+  "workbench.editor.empty.hint": "hidden",
+  "git.openRepositoryInParentFolders": "always",
+  "files.autoSave": "afterDelay",
+  "editor.formatOnPaste": true,
+  "editor.formatOnType": true,
+  "editor.fontWeight": "normal",
+  // "[vue]": {
+  //   "editor.defaultFormatter": "esbenp.prettier-vscode"
+  // }
+  // "[jsonc]": {
+  //   "editor.defaultFormatter": "esbenp.prettier-vscode"
+  // }
+  // 1. 开启保存时自动格式化
+  "editor.formatOnSave": true,
+  // 2. 设置默认的格式化工具为 Prettier (适用于大部分文件)
+  "editor.defaultFormatter": "esbenp.prettier-vscode",
+  // 4. (可选) 失败时依然保存，防止因格式化报错导致文件无法写入
+  "editor.formatOnSaveMode": "file",
+  "comments.openView": "never",
+  "editor.tabSize": 4,
+  "editor.insertSpaces": true,
+  "editor.detectIndentation": false,
+  "files.trimTrailingWhitespace": true,
+  "[python]": {
+    "diffEditor.ignoreTrimWhitespace": false,
+    "editor.defaultColorDecorators": "never"
+  },
+  "http.proxy": "http://127.0.0.1:7897",
+  "claudeCode.preferredLocation": "panel",
+  "explorer.confirmPasteNative": false,
+  "editor.largeFileOptimizations": false,
+  "python.terminal.useEnvFile": true,
+  "python.envFile": "${workspaceFolder}/.env",
+  "js/ts.updateImportsOnFileMove.enabled": "always",
+  "python.analysis.typeCheckingMode": "basic",
+  "git.autofetch": true,
+  "git.confirmSync": false
+}
