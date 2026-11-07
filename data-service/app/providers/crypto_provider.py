@@ -55,6 +55,39 @@ def _overseas_session() -> requests.Session:
     return _session
 
 
+def _unique_by_symbol(items: list[dict]) -> tuple[list[dict], list[str]]:
+    """按 `symbol` 留**首次出现**那一条，返回 (去重后, 被丢掉的 symbol)。
+
+    为什么必须去重（CR10-15，2026-11-08 实测）：CoinGecko 的 `/coins/markets` 按
+    `market_cap_desc` 排，前 250 里**出现过同 symbol 的不同币**——实测 `USDF` 两条
+    （第 49 位 Falcon USD、第 247 位 Aster USDF）。而 web 侧 `Product` 上有
+    `@@unique([type, code])` ⇒ 整张名单**一行都写不进**（`Raw query failed. Code: 2067`），
+    crypto 类长期 0 行。CR10-13 的 `dupCodes` 把那两枚点出来了，这里是把"留哪一条"落成代码：
+    **留首次出现**＝留市值排名靠前的那一条（列表本身就按市值降序，两种说法同义）。
+
+    为什么留首次而不是留末次：`_market_item()`（单发报价）本来就在 `for` 里
+    `return` 第一个匹配 ⇒ 首次出现是**既有语义**。若这里改留末次，名单与报价会各说各话
+    （实测 `get_quote` 给 Falcon USD、而当时 `get_quotes` 给 Aster USDF——后者是
+    `out[symbol] = ...` 的覆盖副作用，见下面 `get_quotes`）。"同一 code 两处两个解"
+    比少一行严重得多。
+
+    空 symbol 一并跳过（上游脏行），与被去重的 symbol 分开记账。
+    """
+    seen: set[str] = set()
+    out: list[dict] = []
+    dropped: list[str] = []
+    for item in items:
+        symbol = str(item.get("symbol", "")).upper()
+        if not symbol:
+            continue
+        if symbol in seen:
+            dropped.append(symbol)
+            continue
+        seen.add(symbol)
+        out.append(item)
+    return out, dropped
+
+
 class CoinGeckoProvider(BaseProvider):
     source = "coingecko"
 
@@ -62,6 +95,9 @@ class CoinGeckoProvider(BaseProvider):
         self._markets: list[dict] | None = None
         self._markets_ts = 0.0
         self._markets_fail_ts = 0.0
+        # CR10-15：上一轮去重丢掉了哪些 symbol（供 `list_products` 的 `note` 转述）。
+        # 空表＝没丢过；每次 `_fetch_markets` 成功都整体覆写，不会累积陈旧读数。
+        self._dropped: list[str] = []
 
     def _request(self, path: str, params: dict) -> dict:
         last_err = None
@@ -106,6 +142,12 @@ class CoinGeckoProvider(BaseProvider):
         except Exception:
             self._markets_fail_ts = time.time()
             raise
+        # CR10-15：**去重放在缓存这一层**，而不是放在 `list_products` 里。
+        # 三个消费方（`_market_item` 单发／`get_quotes` 批量／`list_products` 名单）
+        # 读的都是这一份缓存 ⇒ 只在名单上去重会让"名单留 Falcon USD、批量报价给
+        # Aster USDF"各行其是（那正是 2026-11-08 实测到的既有缺陷：`get_quotes`
+        # 原先用 `out[symbol] = …` 逐条覆盖，同一个 symbol 后者赢）。一处去重＝三处同解。
+        markets, self._dropped = _unique_by_symbol(markets or [])
         self._markets = markets
         self._markets_ts = time.time()
         self._markets_fail_ts = 0.0
@@ -201,7 +243,12 @@ class CoinGeckoProvider(BaseProvider):
         out: dict[str, dict] = {}
         for item in self._fetch_markets():
             symbol = str(item.get("symbol", "")).upper()
-            if symbol in want:
+            # CR10-15：`symbol not in out` ＝**首次出现优先**，与 `_market_item`（单发报价）
+            # 和 `list_products`（名单）三处同解。缓存层已经去过重，这里再判一次是有意的
+            # 冗余：万一哪天有人把那层去重摘掉，批量报价也不会悄悄换成另一枚币
+            # （2026-11-08 实测过的既有缺陷：这里原先是裸覆盖，USDF 交出 Aster USDF，
+            # 而同一时刻 `/quote` 交出 Falcon USD）。
+            if symbol in want and symbol not in out:
                 out[symbol] = {
                     "type": "crypto",
                     "code": symbol,
@@ -212,7 +259,24 @@ class CoinGeckoProvider(BaseProvider):
                 }
         return out
 
-    def list_products(self, type_: str) -> list[dict]:
+    def list_products(self, type_: str) -> list[dict] | tuple[list[dict], dict]:
+        """CR10-15：去重后可能是裸 list（没丢过）或 `(items, meta)`（丢过 ⇒ 带 note）。
+
+        两种形状 `list_products_with_meta` 都认（`base.py:115` 按 tuple 分派），
+        与 `akshare_provider.list_products`／`hk_provider.list_products` 同一写法。
+
+        为什么要带 meta：去重不是零信息量的动作。上游 250 条里有一对同 symbol 的币，
+        我们只留了前一条 ⇒ **送去落库的是 249 条**。这份差异必须说得出是"我们丢了一条"
+        而不是"上游只给了 249 条"，否则下一次看到 `count=249` 只能靠猜。
+
+        ⚠️ 刻意**不**声明 `degraded`：那个键在账上的语义是"这批不是主源那批／上游劣化"
+        （R16、CR9-31），而 CoinGecko 完全正常、一条都没少给——丢的那条是 web 侧
+        `Product.@@unique([type,code])` 强制的。挂 `degraded` 会让 `sync.ts:321` 每晚
+        拼一句"list degraded source=coingecko"上屏，那是**撒谎**（把我们的唯一键
+        说成上游降级）。代价：`sync.ts` 只在 degraded 时才转述 note ⇒ 这句 note 的
+        读者是直接看 `/products` 的人与 MCP 的 `list_products`（`**meta` 原样透传），
+        同步回执里读不到它；同步侧能读到的是 `count=249 < 250` 这个事实本身。
+        """
         products = []
         for item in self._fetch_markets():
             symbol = str(item.get("symbol", "")).upper()
@@ -230,7 +294,17 @@ class CoinGeckoProvider(BaseProvider):
                     "tags": ["加密货币"],
                 }
             )
-        return products
+        if not self._dropped:
+            return products
+        uniq = sorted(set(self._dropped))
+        return products, {
+            "note": (
+                f"上游 {TOP_N} 条里 {len(uniq)} 个 symbol 重复（{', '.join(uniq)}）"
+                f"⇒ 按首次出现（市值靠前）留一条、丢 {len(self._dropped)} 条，"
+                f"本次 {len(products)} 条。丢的那几条不是上游缺数据，是本侧 "
+                f"Product 的 (type,code) 唯一键装不下两个同码币种"
+            ),
+        }
 
 
 _crypto = CoinGeckoProvider()

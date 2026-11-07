@@ -49,9 +49,20 @@ async function main() {
     // 跨天（北京时间 00:00 后）首次运行时当日尚无研报，属**预期的环境状态**，
     // 而非功能缺陷——此时 [3] 会触发新建（合法），下方按实际状态分流断言。
     reportDoneToday = body.status === "done" && body.date === beijingToday;
+    // ⚠️ 2026-11-08（CR10-17 收尾轮实测）：下面这条原本**不接受 `none`**，于是
+    // `ResearchReport` 空表时（11-08 01:34 全量测试首跑就是这样）`/api/research` 如实回
+    // `{status:"none"}` ⇒ 本断言判红、[1] 的 7 条结构与 [2] 的 5 条整段跳过 ⇒ 实跑 11 条，
+    // 既不在 `verify-all.mjs` 的登记形态 `[18,21,22]` 内（判「断言缺口」）又非零退出。
+    // 也就是说：**冷启动（空库／新克隆）跑 verify-all 必然红**，而红的理由与产品无关——
+    // 上面这段注释早就写明"属预期的环境状态"，只是断言没跟着认。现在把 `none` 认进来
+    // （第四态：还没跑过），并把冷启动的实跑条数 11 登记进 `PLANNED`。
     ok(
       "存在已完成研报（当日或最近一次）",
-      body.status === "done" || body.status === "running" || body.status === "failed",
+      body.status === "done" ||
+        body.status === "running" ||
+        body.status === "failed" ||
+        // 第四态：这一类/这一个标的**一次都没跑过**（空库冷启动的正常读数，不是缺陷）
+        body.status === "none",
       `status=${body.status} date=${body.date} today=${beijingToday}`,
     );
     if (body.status !== "done") {

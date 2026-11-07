@@ -70,9 +70,20 @@ PROBES: list[dict[str, Any]] = [
      "egress": "2–3 发（`akshare_provider.py` 的 `fund_announcement_report_em` 公告 1 发＋`fund_portfolio_industry_allocation_em` 按年份循环 1–2 发；6h TTL）"},
     {"path": "/bond/yieldcurve", "params": {"days": "90"}, "egress": "1 发（内存缓存 30 分钟）"},
     {"path": "/hotspots/status", "params": {}, "egress": "0 发（读调度器状态，本地内存、零上游、零副作用）"},
-    {"path": "/products", "params": {"type": "stock"}, "timeout": 180.0,
-     "egress": "整张列表＝分页多发，本窗最贵的一条（要点名才跑；客户端预算 180s＝CR9-124 抬的，"
-               "30s 等不到 ds 侧 `ak.stock_zh_a_spot` 那 120s 看门狗答完＝10-19 00:29 实测 TimeoutError）"},
+    # CR10-16（11-08）：客户端预算 180s → **600s**，与 BFF 同值（`web/lib/sync.ts:197` 的
+    # `dsGet("/products", { type }, 600_000)`）。为什么是"对齐"而不是"又抬一档"：
+    # 180s 是 CR9-124（10-19）按 `ak.stock_zh_a_spot` 那条**备源**的 120s 看门狗推的，
+    # 而 11-07 深夜实测 A 股主数据腿走的是**东财 `clist/get` 分页**（~60 页 × 5s 桶）
+    # ⇒ 同步腿 `stock tookMs=309136`、直连 ds 实测 **435.8s**，那个 120s 前提已不成立。
+    # 探测预算小于业务预算的那一刻，这条探针就不再是在测契约、而是在测自己的耐心
+    # （超时会被读成"上游挂了"——11-07 那天就是这么误读的）。
+    # ⚠️ 代价要说清：一次 `--live --only /products` 会占住东财桶 5~7 分钟，而 `Fuse` 是
+    # 连续 2 发非 200 就停 ⇒ 这条探针失败会连带吃掉本窗后续探针的机会。所以它仍在
+    # `EXPENSIVE` 里、仍要点名才跑（默认计划排除），别把它塞回默认集。
+    {"path": "/products", "params": {"type": "stock"}, "timeout": 600.0,
+     "egress": "整张列表＝分页多发（~60 页 × 5s 桶），本窗最贵的一条（要点名才跑）；"
+               "客户端预算 600s ＝ 与 BFF 的 `sync.ts:197` 同值，不是随手抬的："
+               "11-07 实测直连 435.8s、同步腿 309136ms，旧值 180s 结构性不够"},
 ]
 
 
@@ -261,6 +272,14 @@ def selftest() -> int:
     ck("/products 不进默认计划", all(p["path"] != "/products" for p in picks) and held == ["/products"])
     ck("点名才跑：--only /products 会把它取回来",
        [p["path"] for p in plan({"/products"})[0]] == ["/products"])
+    # CR10-16（11-08）定的一枚牙齿：`/products` 的客户端预算必须**大于**业务侧那条
+    # 真预算（`sync.ts` 的 600_000ms），否则探针测的是自己的耐心、超时还会被读成
+    # "上游挂了"——11-07 深夜就是这么误读的（180s vs 实测 435.8s）。
+    # 钉死成"≥600s"而不是"==600"：允许往上调，不许往下调回 180 那一档。
+    products_probe = next(p for p in PROBES if p["path"] == "/products")
+    ck("/products 探测预算 ≥ 600s（与 BFF 的 `sync.ts:197` 同值；CR10-16 之前是 180s，"
+       "结构性小于实测 435.8s）",
+       float(products_probe.get("timeout", 30.0)) >= 600.0)
     ck("硬上限存在且不超（CAP 数的是 ds 请求数）",
        CAP_REQUESTS >= len(picks) and len(picks) == len(denominator()) - 1)
 
