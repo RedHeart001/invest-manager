@@ -71,7 +71,7 @@ curl http://localhost:3000/api/tools/status
 cp .env.example .env         # 填 INGEST_TOKEN（openssl rand -hex 24）、LLM_*、TAVILY_API_KEY
 docker compose build         # 首次约 10~20 分钟（npm ci + pip 依赖树）
 docker compose up -d
-node scripts/smoke.mjs       # 冒烟 5 项（BFF 四项 + 容器内 health）
+node scripts/smoke.mjs       # 冒烟 6 段 / 基础 7 条断言（库内已同步时 8 条）；详见脚本抬头
 
 docker compose ps            # 双服务应均为 healthy
 docker compose logs -f web

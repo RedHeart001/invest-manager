@@ -4,7 +4,7 @@
 #   cp .env.example .env        # 填 INGEST_TOKEN / LLM_* / TAVILY_API_KEY（可含代理）
 #   docker compose build
 #   docker compose up -d
-#   node scripts/smoke.mjs      # 冒烟（5 项）
+#   node scripts/smoke.mjs      # 冒烟（6 段 / 7~8 条断言，见脚本抬头）
 #
 # 端口与暴露面：仅 web 对外（${WEB_PORT:-3000}）；data-service 只在 compose 网络内；
 #              MCP HTTP 为可选的 mcp profile，仅绑宿主机 127.0.0.1。

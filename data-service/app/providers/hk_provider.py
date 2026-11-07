@@ -432,7 +432,13 @@ class HkProvider(BaseProvider):
                 else:
                     stalled = 0
                 if time.monotonic() - t0 >= HK_SINA_SOFT_BUDGET_S:
-                    return "budget", page  # **主动停在调用侧 120s 预算之内**，别让客户端掐掉
+                    # **主动停在调用侧预算之内**，别让客户端掐掉。
+                    # ⚠️ 2026-11-07 更正：这里原写「调用侧 120s」＝10-22 之前的错锚，真值是
+                    # **600s**（`web/lib/sync.ts` 的 `dsGet("/products", { type }, 600_000)`，全仓
+                    # `/products` 只有这一个运行期调用方；`sync.ts` 里那个 120_000 是 Prisma
+                    # `$transaction` 的 timeout）。本轮没改数值，只把话说准——soft 300 / whole 420
+                    # 仍都 < 600，所以"主动停"这条语义不变。
+                    return "budget", page
                 time.sleep(HK_SINA_PAGE_INTERVAL_S)
             return "ceiling", HK_SINA_PAGE_CEILING
 
@@ -477,7 +483,10 @@ class HkProvider(BaseProvider):
                 f"东财港股列表不可用（{em_reason}），已降级至新浪 getHKStockData（node=qbgg_hk）："
                 f"本次 {len(products)} 只、翻页 {pages} 页后{'取尽' if complete else f'主动停（{stop}）'}、"
                 f"耗时 {elapsed}s（每页硬顶 {HK_SINA_PAGE_ROWS} 行——服务端无视 `num`；soft budget "
-                f"{HK_SINA_SOFT_BUDGET_S}s ⇔ 调用侧 120s）；新浪的名称列是短名（实测 00001＝「长和」）、"
+                # ⚠️ 2026-11-07 更正：这里原写「调用侧 120s」＝10-22 之前的错锚，真值 **600s**
+                # （`web/lib/sync.ts` 的 `dsGet("/products", …, 600_000)`；120_000 那处是 Prisma
+                # `$transaction`）。这句会经 `note` 上屏，所以说错等于对主人报错数。
+                f"{HK_SINA_SOFT_BUDGET_S}s，调用侧预算 600s）；新浪的名称列是短名（实测 00001＝「长和」）、"
                 "与东财 `f14` 不同形 ⇒ 换源那夜会有整批名字被改写；响应里没有 total ⇒ 覆盖面无法与上游盘子对账"
             ),
         }
