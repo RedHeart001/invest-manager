@@ -1,6 +1,43 @@
 // data-service 调用封装（BFF 内部使用）
+//
+// ⚠️ **本文件是"同构"的**：`lib/events.ts` 被 `"use client"` 的 `ProductCharts.tsx`
+// import，而 events.ts 又 import 本文件 ⇒ 本模块会进**浏览器 bundle**。
+// 因此这里只许有 fetch/AbortSignal 这类两端都有的东西；
+// 任何 `node:` 内置或仅服务端的包（如 `undici`）都必须在**函数体内**延迟 require，
+// 或搬到只跑在服务端的入口（见 `web/instrumentation.ts`）。
+// 2026-11-07 的教训：把 `import { Agent } from "undici"` 写在顶层，webpack 立刻顺着
+// `undici → node:assert` 报 `UnhandledSchemeError`，整站编译失败。
 
 const DATA_SERVICE_URL = process.env.DATA_SERVICE_URL ?? "http://localhost:8000";
+
+/** 传输层上限（ms）——**不是**业务预算，是"这条连接最多能被拖多久"的兜底。
+ *
+ * 为什么需要这一层（2026-11-07 实测，此前一直是潜伏雷）：
+ * Node 内置 `fetch`（undici）自带 `headersTimeout`，**默认 300s**，它在
+ * `AbortSignal.timeout(N)` 之前触发 ⇒ 任何 N > 300_000 的预算都是**假的**。
+ * 现场证据：`sync.ts` 给 `GET /products?type=stock` 的预算是 600_000，而实测该请求
+ * 要 **435.8s**（5927 只 × 东财 `clist/get` 每页硬截 100 行 × `eastmoney` 桶 5s/页）；
+ * 结果 303155ms 就被掐断，且抛的是 `TypeError` + `cause.code=UND_ERR_HEADERS_TIMEOUT`
+ * ——`name` 不匹配 `TimeoutError`/`AbortError`，于是被下面 `unreachableMessage` 译成
+ * 「连接被拒绝/网络不可达」（违 R16：失败原因不如实）。
+ * 离线对照实验（`.tmp/undici-probe/`，Node v26.13.0 / undici 8.12.2）：
+ *   服务端 4s 才回，`headersTimeout=2500` ⇒ 3061ms 断；`headersTimeout=6000` ⇒ 4022ms 成功
+ *   ⇒ 这个旋钮**按设定值线性生效**，调大即可越过默认 300s。
+ *
+ * **不变量（改任何一侧前先读这条）**：`TRANSPORT_CEILING_MS` 必须 **大于** 全仓最大的
+ * 单次 ds 预算。现值最大者＝`sync.ts` 打 `/products` 的 600_000 ⇒ 900_000 留 1.5 倍。
+ * 反过来，业务预算必须是**更小**的那一个：这样超时时先到期的是 `AbortSignal`，
+ * 抛 `TimeoutError`（语义准确、文案说得出"预算多少"），传输层只是永不先开的保险。
+ *
+ * 常量住在这里（谁 import 都安全，纯数字），**安装动作**住在 `web/instrumentation.ts`。
+ */
+export const TRANSPORT_CEILING_MS = 900_000;
+
+/** 供 `instrumentation.ts` 与测试共用的**纯值**，安装逻辑不在这里（避免把 undici 拖进浏览器）。
+ *  返回 undefined 表示当前运行时没有 undici（浏览器）；调用方应当跳过。 */
+export function shouldInstallTransportCeiling(): boolean {
+  return typeof window === "undefined" && typeof process !== "undefined";
+}
 
 /**
  * #63（2026-10-12）：BFF 侧 `/quote` 的预算（ms）＝30s，全站既有口径
@@ -18,11 +55,33 @@ export const QUOTE_TIMEOUT_MS = 30_000;
  *  `AbortSignal.timeout` 触发的 TimeoutError 语义被吞掉，排查时无法定位。
  *
  *  #63（2026-10-12）：导出供 `/api/quote` 的裸 fetch catch 复用——那条是唯一
- *  没分「超时 vs 连不上」的 ds 调用臂，R16 要求失败原因如实。 */
+ *  没分「超时 vs 连不上」的 ds 调用臂，R16 要求失败原因如实。
+ *
+ *  **2026-11-07 补第三档（`UND_ERR_*`）**：此前只认 `name`，而 undici 自己的传输层
+ *  超时抛的是 `TypeError('fetch failed')` + `cause.code='UND_ERR_HEADERS_TIMEOUT'`
+ *  ——`name` 是 `TypeError`，落进了 else ⇒ **超时被报成「连接被拒绝/网络不可达」**。
+ *  现场代价：stock 列表那轮的真实成因（435.8s 的请求被 300s 传输层上限掐断）在回执里
+ *  完全看不出来。三档都归"超时"是对的：它们的共同语义是**对端可能还在算，只是我们不等了**；
+ *  而 `ECONNREFUSED`/`ENOTFOUND` 仍是"连不上"，不该混。
+ *  文案要带出 code（排查时它是唯一能区分"我们的上限"与"预算到期"的线索）。
+ */
+const UNDICI_TIMEOUT_CODES = new Set([
+  "UND_ERR_HEADERS_TIMEOUT",
+  "UND_ERR_BODY_TIMEOUT",
+  "UND_ERR_CONNECT_TIMEOUT",
+]);
+
 export function unreachableMessage(e: unknown, timeoutMs: number): string {
-  const name = (e as { name?: string } | null)?.name;
+  const err = e as { name?: string; cause?: { code?: string } } | null;
+  const name = err?.name;
   if (name === "TimeoutError" || name === "AbortError") {
     return `data-service timeout after ${timeoutMs}ms（服务在跑但未及时响应）`;
+  }
+  const code = err?.cause?.code;
+  if (code && UNDICI_TIMEOUT_CODES.has(code)) {
+    // 这一档刻意**不**说 timeoutMs：掐断它的是传输层上限（`TRANSPORT_CEILING_MS`），
+    // 不是调用方给的预算。把预算数写在这里等于谎报"我们等了 timeoutMs 才放弃"。
+    return `data-service transport timeout（${code}，请求已发出但未在上限内得到响应；不是连接被拒）`;
   }
   return "data-service unreachable（连接被拒绝/网络不可达）";
 }

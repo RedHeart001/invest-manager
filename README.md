@@ -13,6 +13,8 @@
 | [docs/FIX-LEDGER.md](docs/FIX-LEDGER.md) | 每项修了没、怎么验的；未闭环看板置顶 |
 | [docs/history/](docs/history/) | 归档：逐项做法、改动文件清单、一次性操作记录 |
 
+> **现值更正（2026-11-07，只增这一行；上面表格里「C1–C34」那句原样不回改）**＝约束已增至 **C35**（传输层上限必须高于业务预算，CR10-14 立；见 [docs/CONSTRAINTS.md](docs/CONSTRAINTS.md)）⇒ 现读「C1–C35」。同轮新增一个服务端入口文件 `web/instrumentation.ts`（Next 启动钩子，只做一件事：装 undici 的传输层上限），它不是页面也不是路由，`pnpm dev`／`next build` 会自动加载，**不需要**改启动命令。
+
 ## 结构
 
 ```

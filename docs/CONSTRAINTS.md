@@ -75,6 +75,18 @@
 - **C34 缓存窗口/计数必须与成功路径对称记账**：任何"失败负缓存 / 限流计数 / 熔断计数 / 复查窗口"的写入点，**必须与成功路径成对存在**——只写成功、不写失败的守卫会因此恒假而**静默失效**（代码看起来有防护，实际是死代码）。本次两例：① CR5-1 CoinGecko `_markets_fail_ts` 仅在 `__init__` 与成功路径置 0、失败路径从不写入 → 守卫 `now - fail_ts < COOLDOWN` 恒真失效，不可达时每请求空烧 ~41s；② C28 的 kline `lastFailed`/`lastChecked` 头部缺口分支漏写（CR4-4）。
   **验收要求**：此类修复必须附**反向验证**（临时回退修复，确认对应断言会失败），防止"声称已修实则失效"再次发生。
 
+> **C35 传输层上限必须高于业务预算（2026-11-07 立，CR10-14；来源＝A 股主数据腿每逢真跑必失败）**
+>
+> **约束**：BFF 侧任何 `fetch` 的**传输层超时**（undici 的 `headersTimeout`／`bodyTimeout`）必须**严格大于**它要保护的**业务预算**（`AbortSignal.timeout(N)`）。
+>
+> **为什么**：Node 内置 `fetch` 默认 `headersTimeout=300s`，它**先于**调用方的 `AbortSignal` 触发，且抛的是 `TypeError('fetch failed')` + `cause.code=UND_ERR_HEADERS_TIMEOUT`——`name` 既不是 `TimeoutError` 也不是 `AbortError`。两个后果同时发生：**① 任何 N > 300_000 的业务预算都是假的**（`web/lib/sync.ts` 给 `/products` 的 600_000 从未生效过）；**② 超时被误报成「连接被拒绝/网络不可达」**（违 R16）。现场样本＝2026-11-07 stock 腿：`tookMs=303155` 报 unreachable，而同刻直连 ds 是 `HTTP 200 / 5927 只 / 435.8s`。
+>
+> **落地**：`web/lib/data-service.ts` 的 `TRANSPORT_CEILING_MS = 900_000`（> 全仓最大 ds 预算 600_000，留 1.5 倍）；安装动作住 `web/instrumentation.ts`（Next 服务端启动钩子）。**调大任何一个业务预算时，必须同步看 `TRANSPORT_CEILING_MS`**——`data-service.test.ts` 有一枚断言把它钉死（`expect(TRANSPORT_CEILING_MS).toBeGreaterThan(600_000)`），改小会红。
+>
+> **三条实现坑（改这个区域前必读）**：① 安装动作**不能**住 `lib/data-service.ts`——该文件同构（`"use client"` 的 `ProductCharts.tsx` → `lib/events.ts` → 它），顶层 `import undici` 会让 webpack 顺着 `undici → node:assert` 报 `UnhandledSchemeError`，整站编译失败；② `instrumentation.ts` **被 edge 与 nodejs 各编译一次**，里面不许出现任何 `node:` 前缀的 import（连 `await import("node:module")` 都不行——edge 那个编译单元在 bundler 阶段就炸，`NEXT_RUNTIME` 的运行期判断来不及跑）；③ `serverExternalPackages: ["undici"]` **救不了 instrumentation**（它有独立编译单元），必须用 `process.getBuiltinModule()` + `createRequire` 这类**运行期**解析。
+>
+> **验收要求**：断言不许只验"装了没报错"，必须用**本地慢 server + 真 dispatcher** 双向验证（上限调小 ⇒ 在上限处断且成因码正确；上限调大 ⇒ 撑过延迟成功）。参照 `web/lib/data-service.test.ts` 的「传输层上限真的生效」那组。
+
 > **C28 现值更正（2026-10-30，只增这一段；上面 C26–C33 表里 C28 那行原句不回改）**＝C28 正文那句
 > 「头部缺口补齐分支与尾部增量分支**都必须同时判断** `lastFailed` 与 `lastChecked`」按现行代码应读成
 > **头部专用**：`web/lib/kline.ts:311-340` 的头部缺口分支确实双判（成功写 `lastChecked`、失败/空响应写 `lastFailed`）；
