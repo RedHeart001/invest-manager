@@ -123,6 +123,10 @@ wc -l docs/history/*.md
 | [2026-11-08-fix-ledger-状态卡现值块归档-1108.md](2026-11-08-fix-ledger-状态卡现值块归档-1108.md) | FIX-LEDGER.md 的块搬迁（2026-11-08） | 整体搬迁，内容逐字保留 | 见 [../FIX-LEDGER.md](../FIX-LEDGER.md) |
 | [2026-11-08-progress-状态总览现值链归档-1108.md](2026-11-08-progress-状态总览现值链归档-1108.md) | PROGRESS.md 的块搬迁（2026-11-08） | 整体搬迁，内容逐字保留 | 见 [../PROGRESS.md](../PROGRESS.md) |
 | [2026-11-08-readme-当前状态块归档-1108.md](2026-11-08-readme-当前状态块归档-1108.md) | README.md 的块搬迁（2026-11-08） | 整体搬迁，内容逐字保留 | 见 [../README.md](../README.md) |
+| [2026-11-08-fix-ledger-状态卡1108下午轮归档.md](2026-11-08-fix-ledger-状态卡1108下午轮归档.md) | FIX-LEDGER.md 的块搬迁（2026-11-08） | 整体搬迁，内容逐字保留 | 见 [../FIX-LEDGER.md](../FIX-LEDGER.md) |
+| [2026-11-08-code-review-轮次身份旧行1108归档.md](2026-11-08-code-review-轮次身份旧行1108归档.md) | CODE-REVIEW.md 的块搬迁（2026-11-08） | 整体搬迁，内容逐字保留 | 见 [../CODE-REVIEW.md](../CODE-REVIEW.md) |
+| [2026-11-08-readme-当前状态块1108下午轮归档.md](2026-11-08-readme-当前状态块1108下午轮归档.md) | README.md 的块搬迁（2026-11-08） | 整体搬迁，内容逐字保留 | 见 [../README.md](../README.md) |
+| [2026-11-08-progress-状态总览现值链1108下午轮归档.md](2026-11-08-progress-状态总览现值链1108下午轮归档.md) | PROGRESS.md 的块搬迁（2026-11-08） | 整体搬迁，内容逐字保留 | 见 [../PROGRESS.md](../PROGRESS.md) |
 
 > **「同日续 N」的去处（10-08 重组留下的 19 处旧指针）**：上层文件里凡写「PROGRESS 同日续 N」的句子，其原文现在都在
 > [2026-10-08-progress-进度日志归档.md](2026-10-08-progress-进度日志归档.md)（该文件按「同日续 1…75」分节，编号与旧指针一一对得上，已逐号核对齐 75 段）。

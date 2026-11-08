@@ -44,6 +44,7 @@ import json
 import logging
 import os
 import re
+import sqlite3
 import threading
 import time
 from datetime import datetime, timedelta
@@ -174,6 +175,67 @@ def _name_time(name: str) -> datetime | None:
         return datetime.strptime(m.group(1) + m.group(2), "%Y%m%d%H%M%S").replace(tzinfo=TZ)
     except ValueError:
         return None
+
+
+def _product_rows(db: str, *, immutable: bool) -> int | None:
+    """读一个库里 `Product` 的行数；读不出来一律 `None`，**绝不抛**。
+
+    两种打开的差别是实测出来的（2026-11-08，本机）：
+    - 快照用 `immutable=1`：**不产生 `-wal`/`-shm`**（`mode=ro` 会给只读库也造出这两个
+      sidecar ⇒ 在 `backups/` 里凭空多两件，`rotate()` 只按主文件名删、于是它们会留下来）。
+    - 源库用普通 `mode=ro`：它是活 WAL 库（web 正在写），`immutable=1` 会读到过期快照。
+
+    观测判据不许把主功能拖下水（CR9-45 同族）⇒ 库不存在、没 `Product` 表、被写锁挡住，
+    三种都只回 `None`。
+    """
+    if not os.path.exists(db):
+        return None
+    uri = "file:%s?mode=ro%s" % (db.replace("\\", "/"), "&immutable=1" if immutable else "")
+    try:
+        con = sqlite3.connect(uri, uri=True)
+        try:
+            return con.execute('SELECT COUNT(*) FROM "Product"').fetchone()[0]
+        finally:
+            con.close()
+    except sqlite3.Error as e:
+        log.warning("backup check could not read %s: %s", os.path.basename(db), e)
+        return None
+
+
+def snapshot_defect(outdir: str, src: str) -> str | None:
+    """最新那份快照有没有"时刻新鲜、内容却是空壳"这一形；没有就回 `None`。
+
+    来路（2026-11-08 实测，见 FIX-LEDGER 那一轮）：`web/prisma/dev.db` 建于 11-07 20:38，
+    21:00 那次起服务补跑排在首次同步（11-08 00:13）**之前** ⇒ 快照 `integrity_check=ok`
+    而 `Product=0`；两条既有判据都过，`state.json` 照写 `ok:true`。而 `startup_catch_up()`
+    判落后**只看 `lastRun` 时刻** ⇒ 这份空壳在 26 小时内一律 `fresh`，**没有任何机器会
+    纠正它**，而它是盘上唯一一份（03:30 那班因为进程不在场没跑）。
+
+    回值：`"empty-snapshot"`＝源库有行、最新快照 0 行；`None`＝其余全部情况。
+
+    ⚠️ **刻意不同时判"state 说备过、盘上一个文件都没有"**（`missing-snapshot` 那一支）：
+    本函数只回答"已有的那份能不能用"。多判一支的代价实测到了——套件里有几处
+    `start_scheduler()` 的用例会**预写一份新鲜 state.json 但不放快照**（`test_backup_db.py`
+    的 ② 与 `test_startup_hook_is_wired_into_start_scheduler`），多出来的那一支让它们
+    在 fresh 分支里投出一条**异步补跑线程**，而线程比 test 的 env 还原活得更久 ⇒ 它带着
+    已还原的 `BACKUP_DIR` 落进仓库真的 `backups/`，覆写 `state.json`（2026-11-08 本轮实测：
+    多出一份 49,500,160 字节的快照＋`state.json` 被改成 `runs:1`）。"快照全没了"是另一件事，
+    要靠轮换/删除那条链去查，不在这枚判据里。
+    """
+    if not os.path.isdir(outdir):
+        return None
+    names = sorted(f for f in os.listdir(outdir) if SNAPSHOT_NAME.match(f))
+    if not names:
+        return None
+    snap_rows = _product_rows(os.path.join(outdir, names[-1]), immutable=True)
+    if snap_rows is None or snap_rows > 0:
+        return None
+    src_rows = _product_rows(src, immutable=False)
+    # 源库读不出（写锁／坏库）⇒ 不据此判定。下一次每小时复查会重试，代价只是晚一小时。
+    # 源库本来就空（新克隆首次启动）⇒ 空壳是如实快照，不许凭空造备份。
+    if src_rows is None or src_rows == 0:
+        return None
+    return "empty-snapshot"
 
 
 def purge_old(outdir: str, max_age_days: int) -> list[str]:
@@ -400,6 +462,10 @@ def startup_catch_up(*, label: str = "startup") -> dict:
     **后两种一律按落后处理**：漏一次备份的代价是不可逆的，多复制一份 63 MB 不是。
     同日里为跑门禁重启 N 次都不会触发——门限挡的正是本文件头原来那句
     "加补跑的代价是为重启就顺手复制 63 MB"（10-02 的保留决定，已被实测改口）。
+
+    **第四种（2026-11-08 加）：时刻新鲜、内容却是空壳**——判据见 `snapshot_defect()`；
+    回值 `reason` 取 `empty-snapshot` / `missing-snapshot`（此时 `ageHours` 为 `None`，
+    因为它不是"太旧"那一支）。这一形此前两层判据都过：时刻新鲜、`integrity_check=ok`。
     """
     try:
         outdir = _backup_dir()
@@ -420,10 +486,23 @@ def startup_catch_up(*, label: str = "startup") -> dict:
             age_h = int((datetime.now(TZ) - last_ts).total_seconds() // 3600)
             reason = "fresh" if age_h < stale_h else "stale-%dh" % age_h
         if reason == "fresh":
-            log.info(
-                "backup %s check: last backup %dh ago (< %dh) ⇒ 不补跑", label, age_h, stale_h
-            )
-            return {"triggered": False, "reason": reason, "ageHours": age_h}
+            # 2026-11-08：**新鲜不等于能用**。`lastRun` 只说得清"多久以前备的"，说不清
+            # "备出来的那件事有没有内容"——盘上唯一一份就是 `Product=0` 的空壳，而它
+            # 时刻新鲜、`integrity_check=ok`、`state.json` 写 `ok:true`。判据补在这里
+            # 而不是写进 `run_once`：那一侧加体检会让**每次**备份都多读一遍源库，而这一形
+            # 只在"库被重建过"之后才出现，每小时复查一次几百毫秒就够。
+            defect = snapshot_defect(outdir, _source_db())
+            if defect is None:
+                log.info(
+                    "backup %s check: last backup %dh ago (< %dh) ⇒ 不补跑", label, age_h, stale_h
+                )
+                return {"triggered": False, "reason": reason, "ageHours": age_h}
+            # ⚠️ 刻意**不加冷却**：这一支只在"备份真的坏了"时命中，而那时每小时一条
+            # `log.warning` ＋ 每小时重试正是该有的响度。盘上份数仍由 `BACKUP_KEEP`
+            # 兜住（每小时一份、留 7 份 ⇒ 不超过既定 441 MB 的承诺），补成功一次之后
+            # 快照有行 ⇒ 下一次复查即回 None、静默。
+            reason = defect
+            age_h = None  # 这一支不是"太旧"，别让 ageHours 说成 0 小时
         got = request_run("startup-catchup", label=label)
         # 这条用 warning：uvicorn 默认配置下 log.info 完全不打（门槛⑤ 记过的老账），
         # 而"补了一份"必须第二天还能从日志里读出来。

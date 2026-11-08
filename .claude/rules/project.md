@@ -96,7 +96,7 @@ git diff --cached | grep -iE '(sk-|tvly-|ghp_|AKIA)[A-Za-z0-9_-]{10,}'     # 暂
 |---|---|
 | **`docs/README.md`** | **统一入口**——30 秒知道项目是什么、当前状态、去哪里找什么；其他文件都是"按需查阅" |
 | `docs/PLAN.md` | 需求与设计的**唯一来源**——要改行为先看这里是否已定稿 |
-| `docs/CONSTRAINTS.md` | **改代码前必自查**：C1–C34 不得回退的约束、跨服务契约坑、数据源事实、部署约束 |
+| `docs/CONSTRAINTS.md` | **改代码前必自查**：C1–C36 不得回退的约束、跨服务契约坑、数据源事实、部署约束 |
 | `docs/FIX-LEDGER.md` | 每项修了没、怎么验的；**未闭环看板置顶** |
 | `docs/PROGRESS.md` | 状态总览（P0–P7 + 阻塞与问题）；**进度日志已整体归档至 `docs/history/`** |
 | `docs/CODE-REVIEW.md` | **当前开放轮次**的完整发现 + 误报排除表（轮次号与取号权威一律看 FIX-LEDGER 状态卡，此处不复述）；**已闭环轮次的发现原文已归档至 `docs/history/`** |

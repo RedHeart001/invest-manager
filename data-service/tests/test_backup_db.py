@@ -211,6 +211,36 @@ def _snapshot(outdir: str, stamp: str) -> str:
     return p
 
 
+def _make_product_db(path: str, rows: int) -> None:
+    """建一个带 `Product` 表的库——`snapshot_defect()` 认的就是这张表的行数。
+
+    `_make_db()` 造的是 `t` 表（其余用例的被测对象是"任意表"），而这一枝要断的是
+    "源库有产品、快照没有"，表名必须是 `Product`。
+    """
+    con = sqlite3.connect(path)
+    try:
+        with con:
+            con.execute("CREATE TABLE Product (id INTEGER PRIMARY KEY, v TEXT)")
+            con.executemany("INSERT INTO Product (v) VALUES (?)", [(f"p{i}",) for i in range(rows)])
+    finally:
+        con.close()
+
+
+def _snapshot_at(src_db: str, dest: str) -> str:
+    """把 `src_db` 的快照落到 `dest`（走在线备份 API，与生产同一条路）。"""
+    src = sqlite3.connect("file:%s?mode=ro" % src_db.replace("\\", "/"), uri=True)
+    try:
+        dst = sqlite3.connect(dest)
+        try:
+            with dst:
+                src.backup(dst)
+        finally:
+            dst.close()
+    finally:
+        src.close()
+    return dest
+
+
 def test_backup_job_registered_and_rotates() -> None:
     """job 注册 ⇔ 份数轮换（C34 成对：既断删得掉，也断不该删的一个不动）。"""
     with tempfile.TemporaryDirectory() as tmp:
@@ -776,6 +806,98 @@ def test_backup_state_label_separates_the_two_catchup_entries() -> None:
             bs._state.update(orig_state)
 
 
+def test_empty_snapshot_counts_as_stale() -> None:
+    """2026-11-08：**时刻新鲜、内容却是空壳**的备份必须判落后并补一份。
+
+    来路（真机实测，不是构造）：`web/prisma/dev.db` 建于 11-07 20:38，21:00 那次起服务
+    补跑排在首次同步（11-08 00:13）**之前** ⇒ 盘上唯一一份快照 `Product=0`，而它
+    `integrity_check=ok`、`state.json` 写 `ok:true`、时刻新鲜 ⇒ 两条既有判据全过，
+    26 小时内一律 `fresh`，**没有任何机器会纠正它**（03:30 那班因进程不在场没跑）。
+    ⇒ `snapshot_defect()` 补这一档，`startup_catch_up()` 的 `fresh` 分支调它。
+
+    四枚，后两枚是牙齿：
+      ① 源库有行 + 最新快照 0 行 ⇒ `empty-snapshot`；
+      ② 🔁 快照本身有行 ⇒ `None`（不许把好备份判成坏，否则每小时复制一份 63 MB）；
+      ③ 🔁 源库本来就空（新克隆首次启动）⇒ `None`（空壳是**如实**快照，不许凭空造备份）；
+      ④ 🔁 走完整条链：写一份新鲜 state.json + 放一个空壳快照 ⇒ `startup_catch_up()`
+         真的投递补跑（判据存在但没接线 ⇒ 这枚红）；补完那份**有行**、且再查一次回 `fresh`。
+
+    判据刻意**不含**"state 说备过、盘上一个快照都没有"那一支：套件里有两处
+    `start_scheduler()` 用例预写新鲜 state.json 但不放快照，多判那一支会让它们投出
+    异步线程、而线程比 env 还原活得更久 ⇒ 落进仓库真 `backups/`（本轮实测撞到过）。
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        src = os.path.join(tmp, "dev.db")
+        _make_product_db(src, rows=4)
+        out = os.path.join(tmp, "backups")
+        os.makedirs(out)
+        keys = ("DB_PATH", "BACKUP_DIR", "BACKUP_KEEP", "BACKUP_STALE_HOURS", "BACKUP_MAX_AGE_DAYS")
+        orig_env = {k: os.environ.get(k) for k in keys}
+        orig_state = dict(bs._state)
+        try:
+            os.environ.update({"DB_PATH": src, "BACKUP_DIR": out, "BACKUP_KEEP": "7"})
+            os.environ.pop("BACKUP_STALE_HOURS", None)
+            os.environ.pop("BACKUP_MAX_AGE_DAYS", None)
+
+            # 造一个"空壳"：`Product` 表在、但 0 行（真机那份的形状）
+            empty_src = os.path.join(tmp, "empty.db")
+            _make_product_db(empty_src, rows=0)
+            shell = os.path.join(out, "dev-20200101-000000.db")
+            _snapshot_at(empty_src, shell)
+
+            # ① 源库有 4 行、最新快照 0 行 ⇒ 判空壳
+            check("2026-11-08 ①：源库有行而最新快照 0 行 ⇒ `empty-snapshot`",
+                  bs.snapshot_defect(out, src) == "empty-snapshot",
+                  str(bs.snapshot_defect(out, src)))
+
+            # ② 🔁 快照自己就有行 ⇒ 不许判坏
+            good = os.path.join(out, "dev-20200101-000001.db")
+            _snapshot_at(src, good)
+            check("🔁 2026-11-08 ②：最新快照自己有行 ⇒ 判 `None`（把好备份判坏＝每小时复制 63 MB）",
+                  bs.snapshot_defect(out, src) is None, str(bs.snapshot_defect(out, src)))
+
+            # ③ 🔁 源库本来就空 ⇒ 空壳是如实快照，不判落后
+            if os.path.exists(good):
+                os.remove(good)
+            check("🔁 2026-11-08 ③：源库本来就 0 行 ⇒ 判 `None`（新克隆首启不许凭空造备份）",
+                  bs.snapshot_defect(out, empty_src) is None,
+                  str(bs.snapshot_defect(out, empty_src)))
+
+            # ④ 🔁 走完整条链：新鲜 state.json + 空壳快照 ⇒ 真的补一份
+            os.environ["DB_PATH"] = src
+            fresh = datetime.now(bs.TZ).isoformat(timespec="seconds")
+            bs._write_state({"lastRun": fresh, "ok": True, "outcome": "completed", "runs": 1}, out)
+            r = bs.startup_catch_up()
+            check("🔁 2026-11-08 ④：时刻新鲜但快照是空壳 ⇒ 仍投递补跑（判据在、接线断 ⇒ 这枚红）",
+                  r.get("triggered") is True and r.get("reason") == "empty-snapshot"
+                  and r.get("accepted") is True, str(r))
+            check("2026-11-08 ④：这一支的 ageHours 为 None（它不是『太旧』，别把它说成 0 小时）",
+                  r.get("ageHours") is None, str(r))
+            _wait_idle()
+            names = sorted(f for f in os.listdir(out) if bs.SNAPSHOT_NAME.match(f))
+            newest = os.path.join(out, names[-1])
+            con = sqlite3.connect("file:%s?mode=ro&immutable=1" % newest.replace("\\", "/"), uri=True)
+            try:
+                n = con.execute("SELECT COUNT(*) FROM Product").fetchone()[0]
+            finally:
+                con.close()
+            check("2026-11-08 ④：补出来的那一份有真行（不是又一份空壳）", n == 4, str(n))
+            check("🔁 2026-11-08 ④：补完之后再查一次回到 `fresh`（不许变成每小时无限重试）",
+                  bs.startup_catch_up().get("reason") == "fresh",
+                  str(bs.startup_catch_up()))
+            check("🔁 2026-11-08 ④：快照目录里没留下 `-wal`/`-shm`（`immutable=1` 只读不造 sidecar）",
+                  not any(f.endswith(("-wal", "-shm")) for f in os.listdir(out)),
+                  str(os.listdir(out)))
+        finally:
+            for k, v in orig_env.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+            bs._state.clear()
+            bs._state.update(orig_state)
+
+
 def test_backup_startup_evidence_survives_daily() -> None:
     """CR10-8③（11-02）：`startup` 那一份证据**不许被下一把 daily 擦掉**。
 
@@ -877,6 +999,7 @@ if __name__ == "__main__":
     test_startup_hook_is_wired_into_start_scheduler()
     test_backup_state_label_separates_the_two_catchup_entries()
     test_backup_startup_evidence_survives_daily()
+    test_empty_snapshot_counts_as_stale()
     fails = [x for x in results if not x[1]]
     print(f"\n===== {len(results) - len(fails)}/{len(results)} 通过 =====")
     if fails:
