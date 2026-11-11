@@ -26,7 +26,11 @@ vi.mock("@/lib/prisma", () => ({
 }));
 
 const dsGet = vi.fn();
-vi.mock("@/lib/data-service", () => ({ dsGet: (...a: unknown[]) => dsGet(...a) }));
+// 11-12 美股乙：sync.ts 另 import productsBudgetMs ⇒ 替身只换 dsGet、其余走真件（不抄第二份预算数）
+vi.mock("@/lib/data-service", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./data-service")>()),
+  dsGet: (...a: unknown[]) => dsGet(...a),
+}));
 // 刷新腿拆出去之后，本模块**不应再引用**它——留着 mock 是为了能断"没被调用"
 vi.mock("./market-snapshot", () => ({ refreshSnapshot: (...a: unknown[]) => refreshSnapshot(...a) }));
 // #23 当日幂等闸门的磁盘判据（`MAX(updatedAt)` 是否落在北京今日）——闸门语义的用例点名控制它

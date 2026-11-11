@@ -3,7 +3,15 @@ import { createServer, type Server } from "node:http";
 import { Agent, setGlobalDispatcher } from "undici";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { dsGet, dsPost, TRANSPORT_CEILING_MS, unreachableMessage } from "./data-service";
+import {
+  dsGet,
+  dsPost,
+  PRODUCTS_BUDGET_MS,
+  QUOTE_TIMEOUT_MS,
+  TRANSPORT_CEILING_MS,
+  US_PRODUCTS_BUDGET_MS,
+  unreachableMessage,
+} from "./data-service";
 
 // CR6-P3-3：区分"超时"（AbortSignal.timeout → TimeoutError）与"连不上"，
 // 此前 catch 一律报 "data service unreachable"，超时语义被吞。
@@ -174,9 +182,9 @@ describe("传输层上限真的生效（A 方案的核心断言）", () => {
   }, 15_000);
 
   it("默认常量 > 全仓最大 ds 预算（不变量：传输层不许先于业务预算到期）", () => {
-    // sync.ts 打 /products 的预算是 600_000；这条断言把"谁该更大"钉死，
-    // 将来谁调大预算而不看 TRANSPORT_CEILING_MS，会在这里红。
-    const MAX_DS_BUDGET_MS = 600_000;
+    // 11-12 美股乙：最大预算从生产常量算（us 1_800_000），不抄第二份数——
+    // 将来谁调大任一预算而不看 TRANSPORT_CEILING_MS，会在这里红。
+    const MAX_DS_BUDGET_MS = Math.max(PRODUCTS_BUDGET_MS, US_PRODUCTS_BUDGET_MS, QUOTE_TIMEOUT_MS);
     expect(TRANSPORT_CEILING_MS).toBeGreaterThan(MAX_DS_BUDGET_MS);
   });
 });

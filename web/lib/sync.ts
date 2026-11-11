@@ -3,7 +3,7 @@
 
 import { randomUUID } from "node:crypto";
 
-import { dsGet } from "./data-service";
+import { dsGet, productsBudgetMs } from "./data-service";
 import { listSyncedToday } from "./freshness";
 import { prisma } from "./prisma";
 import { buildSearchText } from "./search-text";
@@ -183,6 +183,8 @@ async function _syncTypeInner(type: string): Promise<SyncResult> {
     // 超时说明（2026-09-20）：港股列表必须分页（东财 `clist/get` 对港股忽略大分页参数，
     // 固定 100 条/页；约 4700 只 → 48 页），且每页经源族限速器（最小间隔 5s）
     // → 最坏约 4 分钟。原 180s 会在港股同步时必然超时，故放宽到 600s。
+    // 11-12 美股乙：预算改按类型取（productsBudgetMs）——us 全量（上限 950 页）名义 ≈950s，
+    // 600s 共用预算装不下；us 1800s／其余仍 600s，常量住 lib/data-service.ts。
     const data = await dsGet<{
       count: number;
       products: ProductPayload[];
@@ -194,7 +196,7 @@ async function _syncTypeInner(type: string): Promise<SyncResult> {
       // #35／CR9-63：上游声明"这一类本来就是有意取的子集"（不是上游劣化）。
       // 只有带这个声明的载荷才允许通过下面的缩水闸；未声明者原判据一字不动。
       intentionalSubset?: boolean;
-    }>("/products", { type }, 600_000);
+    }>("/products", { type }, productsBudgetMs(type));
     const rows = (data.products ?? []).map((p) => ({
       id: randomUUID(),
       type: p.type,

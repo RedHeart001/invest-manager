@@ -2,10 +2,13 @@
 
 背景（10-03 探针／10-04 落码实测，见 docs/FIX-LEDGER.md 的 #32 与 CR9-59 两行）：
 `Product` 里 `us` 长期只有 1 行、`/product/us/AAPL` 404、搜索 0 结果，根因是
-**美股从来没有列表 provider**（`register_list` 里根本没有 us）。甲的口径＝先把入口通了：
-只取前排 N 页（20N 行，实测 15 页＝300 行），**绝不打满 913 页**（那是乙的 913 次请求），
-且这轮**不开美股 tab**；10-04 03:1x 的 (2) 定案在前排之上再叠一道**行业闸**（无 `category`
-的行不进库 ⇒ 300 行实测留 ≈179），闸在解析之后、翻页之前 ⇒ **请求数不受影响**。
+**美股从来没有列表 provider**（`register_list` 里根本没有 us）。甲的口径（10-04→11-12 的历史形态）＝
+只取前排 N 页（20N 行，实测 15 页＝300 行）；**乙（2026-11-12 主人拍板）＝默认全量**：
+给到硬上限 950 页、由"末不满页即早停"按上游实盘定实买页数（首跑实测盘子 18,377 只⇒919 页；
+钉死 913 会差 6 页冒充全量），
+`intentionalSubset` 改按实际覆盖面判定（翻完且零失败页 ⇒ False）。这轮**不开美股 tab** 那句已被
+10-07 主人撤销；10-04 03:1x 的 (2) 定案**行业闸**不变（无 `category` 的行不进库 ⇒ 300 行实测留 ≈179），
+闸在解析之后、翻页之前 ⇒ **请求数不受影响**。
 
 本套件钉住四类事：
 1. **解析按实测字节，不按想象**——jsonp 外层、`count`/`data` 内层、中文名 `cname` 优先、
@@ -241,26 +244,32 @@ def test_page_env() -> None:
           all(str(p) not in {str(x) for x in _REAL_ENV_FILES} for p in _cfg._ENV_FILES),
           str(_cfg._ENV_FILES)[:120])
     with with_pages(None):
-        check("默认页数＝15（≈300 只，甲的盘子）", akp._us_list_pages() == 15, str(akp._us_list_pages()))
+        check("默认页数＝950（乙给到硬上限、早停按实盘买；代码默认即乙，.env 丢了也不缩回甲）",
+              akp._us_list_pages() == 950, str(akp._us_list_pages()))
     with with_pages(3):
         check("env US_LIST_PAGES=3 生效", akp._us_list_pages() == 3, str(akp._us_list_pages()))
     for bad in ("abc", "0", "-5", ""):
         with with_pages(bad):
-            check(f"非法值 {bad!r} 回落默认而不是抛", akp._us_list_pages() == 15, str(akp._us_list_pages()))
+            check(f"非法值 {bad!r} 回落默认而不是抛", akp._us_list_pages() == 950, str(akp._us_list_pages()))
     with with_pages(5000):
         check("🔁 合法但巨大的值被硬上限夹住（1 页＝1 次真请求）",
               akp._us_list_pages() == akp.US_LIST_PAGE_CEILING, str(akp._us_list_pages()))
     check("默认值不许超过硬上限（两个常数不许互相矛盾）",
           akp.US_LIST_DEFAULT_PAGES <= akp.US_LIST_PAGE_CEILING)
-    # CR10-2（10-20 枚3 的补牙）＝账上那句「两道夹都被测试钉住」此前不成立：夹住有效页数的
-    # 其实是整条看门狗，不是 CEILING。逐页顶到超时那一档，150s 只够 `150 // (20+0.5)`＝7 页。
+    check("乙的默认＝给到硬上限（页数由早停按上游实盘定，不许钉死一个会过期的页数）",
+          akp.US_LIST_DEFAULT_PAGES == akp.US_LIST_PAGE_CEILING,
+          f"default={akp.US_LIST_DEFAULT_PAGES} ceiling={akp.US_LIST_PAGE_CEILING}")
+    # CR10-2（10-20 补牙）＋乙（11-12）：真硬闸仍是看门狗，但预算口径换了——
+    # 最坏网络（20.5s/页）下它仍夹页数；名义速度（≈1s/页）下必须装得下**整个硬上限**。
+    # 符号式断言＝改任一枚常数自动适配，不用手改"7"那种魔数。
     _per_page_s = akp.US_LIST_REQUEST_TIMEOUT_S + akp.US_LIST_PAGE_INTERVAL_S
     _pages_the_watchdog_allows = int(akp.US_LIST_WHOLE_TIMEOUT_S // _per_page_s)
-    check("CR10-2 真硬闸是看门狗：50 页 × 每页最坏 20.5s＝1025s ＞ 150s 的整条预算",
-          akp.US_LIST_WHOLE_TIMEOUT_S < akp.US_LIST_PAGE_CEILING * _per_page_s,
-          f"whole={akp.US_LIST_WHOLE_TIMEOUT_S} vs ceiling*per_page={akp.US_LIST_PAGE_CEILING * _per_page_s}")
-    check("CR10-2 看门狗夹出的有效页数＝7（改了任一枚常数这行就红，逼人来对算式）",
-          _pages_the_watchdog_allows == 7, str(_pages_the_watchdog_allows))
+    check("最坏网络下看门狗仍是真硬闸：夹出的有效页数 < 硬上限（符号式）",
+          _pages_the_watchdog_allows < akp.US_LIST_PAGE_CEILING,
+          f"whole={akp.US_LIST_WHOLE_TIMEOUT_S} ⇒ {_pages_the_watchdog_allows} 页 vs ceiling={akp.US_LIST_PAGE_CEILING}")
+    check("乙用例①：名义速度（1s/页）看门狗装得下整个硬上限（BACKLOG 底稿的 WHOLE=900 会当场红）",
+          akp.US_LIST_WHOLE_TIMEOUT_S >= akp.US_LIST_PAGE_CEILING * 1.0,
+          f"whole={akp.US_LIST_WHOLE_TIMEOUT_S} vs ceiling×1.0={akp.US_LIST_PAGE_CEILING * 1.0}")
     check("🔁 整条预算至少够走完一页（否则名单腿在任何网络条件下都必然空手而归）",
           akp.US_LIST_WHOLE_TIMEOUT_S >= _per_page_s, str(akp.US_LIST_WHOLE_TIMEOUT_S))
     check("跑完不污染环境", "US_LIST_PAGES" not in os.environ)
@@ -445,6 +454,66 @@ def test_category_gate() -> None:
           raised2 == "ProviderError" and len(CALLS) == 3, f"{raised2}｜{len(CALLS)} 次")
 
 
+# ---------- 4c. 乙全量档（11-12）：覆盖面判定四枚＋反向钻 ----------
+
+
+def test_us_yi_full_coverage() -> None:
+    # 用例①的反向钻＝monkeypatch 看门狗回甲的 150s ⇒ 名义装不下硬上限，判据必须翻红
+    saved = akp.US_LIST_WHOLE_TIMEOUT_S
+    try:
+        akp.US_LIST_WHOLE_TIMEOUT_S = 150.0
+        check("🔁 反向钻：看门狗设回 150 ⇒ 乙用例①的判据当场不成立（证明它真在量这件事）",
+              not (akp.US_LIST_WHOLE_TIMEOUT_S >= akp.US_LIST_PAGE_CEILING * 1.0),
+              str(akp.US_LIST_WHOLE_TIMEOUT_S))
+    finally:
+        akp.US_LIST_WHOLE_TIMEOUT_S = saved
+
+    # 用例②：末不满页＝翻完上游名单 ⇒ subset=False、degraded 仍 True、note 说"已取全"
+    p1 = page_of([f"A{i}" for i in range(PAGE_SIZE)])
+    p2 = jsonp([dict(NVDA, symbol=f"T{i}") for i in range(5)], count="25")
+    rows, meta = listed({1: p1, 2: p2}, 950)
+    check("乙用例②：翻到尾部（25 只声明、2 页翻完）⇒ 25 行全留", len(rows) == 25, str(len(rows)))
+    check("乙用例②：早停仍生效（950 的额度只发 2 次请求）", len(CALLS) == 2, str(len(CALLS)))
+    check("乙用例②：全量 ⇒ intentionalSubset=False（不再恒 True）",
+          meta.get("intentionalSubset") is False, str(meta)[:90])
+    check("乙用例②：degraded 仍恒 True（行业闸还在剔行，摘了＝谎报全量）",
+          meta.get("degraded") is True, str(meta)[:90])
+    check("乙用例②：note 全量档说『已取全』且不再说『只取前排』",
+          "已取全" in meta["note"] and "只取前排" not in meta["note"], meta["note"][:160])
+
+    # 用例③：env 截断（3 页 < 声明盘子）⇒ subset=True，note 保留原子串"只取前排 N 页"
+    rows3, meta3 = listed(
+        {1: page_of([f"A{i}" for i in range(PAGE_SIZE)]),
+         2: page_of([f"B{i}" for i in range(PAGE_SIZE)]),
+         3: page_of([f"C{i}" for i in range(PAGE_SIZE)])},
+        3,
+    )
+    check("乙用例③：截断 ⇒ intentionalSubset=True（缩水闸放行有意子集的那半）",
+          meta3.get("intentionalSubset") is True, str(meta3)[:90])
+    check("乙用例③：note 保留『只取前排 3 页』原子串（test:323 钉着的那句）",
+          "只取前排 3 页" in meta3["note"], meta3["note"][:160])
+
+    # 用例④：翻到尾部但中途有失败页 ⇒ 仍声明子集（缺页的盘子不许冒充全量，R16）
+    rows4, meta4 = listed(
+        {1: page_of([f"A{i}" for i in range(PAGE_SIZE)]),
+         2: RuntimeError("RemoteDisconnected"),
+         3: jsonp([dict(NVDA, symbol="TAIL")], count="21")},
+        3,
+    )
+    check("乙用例④：尾部到了但有失败页 ⇒ intentionalSubset 仍 True",
+          meta4.get("intentionalSubset") is True, str(meta4)[:90])
+    check("乙用例④：失败页数照旧自己说话", "1 页失败" in meta4["note"], meta4["note"][:160])
+
+    # 纯函数钻＝"subset 恒 False"的改法会让③④的形状当场红（不落盘的合成件）
+    check("🔁 纯函数钻：截断形状必须判子集（恒 False 的改法在这里红）",
+          akp._us_coverage_subset(3, False, "18241", []) is True)
+    check("🔁 纯函数钻：尾部＋失败页形状必须判子集（恒 False 的改法在这里红）",
+          akp._us_coverage_subset(3, True, "21", ["p2:RuntimeError"]) is True)
+    check("🔁 纯函数钻：翻完且零失败 ⇒ 全量；声明数不是数字 ⇒ 只认 exhausted",
+          akp._us_coverage_subset(913, True, "18241", []) is False
+          and akp._us_coverage_subset(913, False, "", []) is True)
+
+
 # ---------- 5. 注册与派发 ----------
 
 
@@ -475,6 +544,7 @@ if __name__ == "__main__":
     test_list_us_stocks_early_stop()
     test_list_us_stocks_partial_and_total_failure()
     test_category_gate()
+    test_us_yi_full_coverage()
     test_registration_and_dispatch()
     fails = [x for x in results if not x[1]]
     print(f"\n===== {len(results) - len(fails)}/{len(results)} 通过 =====")

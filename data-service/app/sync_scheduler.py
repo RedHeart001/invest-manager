@@ -65,12 +65,15 @@ CATCHUP_YIELD_MAX_WAIT_S = 600.0
 #     （fund 358 / stock 41 / crypto 43 / bond 1.3 / hk 4ms）
 #   · 补跑态（重启后 catch-up：与热点争抢同一源族桶、常撞在冷却窗口上）
 #     09-26 实测 **≥29 分钟仍未收敛**，当时 1800s 第一次真被打穿
-# ⇒ 补跑态给 2700s（≥29min 实测 + 约 55% 余量），其余形态沿用 C3/CR7-9 的 1800s
-#    （定时态 4.2 倍余量）。web 侧 `maxDuration=1500` 仍小于两者，维持"web 先结束、
-#    ds 不把已成功的同步误记为失败"的口径（读超时的中性标注见 C3-③）。
+# ⇒ 补跑态给 2700s（≥29min 实测 + 约 55% 余量）。
+# 11-12 美股乙：定时态 1800 → **2500**——us 列表全量（上限 950 页、早停按实盘）名义 ≈950s，
+# 加其余五类（10-17 基线 ≈540s＋stock 修复后 324s）整轮名义 ≈1506s、最坏 ≈2086s，1800 的余量已不足。
+# 2500 刻意避开 2400（REFRESH）与 2700（CATCHUP）：test_c3_readtimeout 的牙齿要求
+# 三种形态预算互不相同（日志归因要分得清是哪条腿）。web 侧 maxDuration 同批抬到 2400，
+# 仍小于本值，维持"web 先结束、ds 不把已成功的同步误记为失败"的口径（中性标注见 C3-③）。
 # ⚠️ 冷却日仍可能超过本预算——真护栏是源族桶自身（docs/CONSTRAINTS.md C-5），
 #    这里只保证"预算与实际形态同量级"，不假装能盖住最坏情况。
-SCHEDULED_CALLBACK_TIMEOUT_S = 1800.0
+SCHEDULED_CALLBACK_TIMEOUT_S = 2500.0
 CATCHUP_CALLBACK_TIMEOUT_S = 2700.0
 CATCHUP_TRIGGER = "startup-catchup"
 

@@ -16,7 +16,11 @@ vi.mock("@/lib/prisma", () => ({
 }));
 
 const dsGet = vi.fn();
-vi.mock("@/lib/data-service", () => ({ dsGet: (...a: unknown[]) => dsGet(...a) }));
+// 11-12 美股乙：sync.ts 另 import productsBudgetMs ⇒ 替身只换 dsGet、其余走真件（不抄第二份预算数）
+vi.mock("@/lib/data-service", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./data-service")>()),
+  dsGet: (...a: unknown[]) => dsGet(...a),
+}));
 vi.mock("./market-snapshot", () => ({ refreshSnapshot: vi.fn() }));
 // #23 的当日闸门默认放行（本文件测的是缩水保护，不是闸门）：不 mock 它会去打
 // `prisma.product.findFirst`，而上面的 prisma 桩里没有这个方法。

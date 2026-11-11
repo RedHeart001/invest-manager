@@ -1,8 +1,8 @@
 // Next.js 服务端启动钩子（Next 15 起不需要 `experimental.instrumentationHook`）。
 //
-// 这里只做一件事：**把 undici 的传输层上限抬到 900s**，让 `AbortSignal.timeout(N)`
-// 重新成为唯一的预算权威。背景与不变量（为什么是 900s、必须大于哪个预算）写在
-// `lib/data-service.ts` 的 `TRANSPORT_CEILING_MS` 头上，改数值前先读那段。
+// 这里只做一件事：**把 undici 的传输层上限抬到 2700s**（11-12 美股乙前是 900s），让
+// `AbortSignal.timeout(N)` 重新成为唯一的预算权威。背景与不变量（为什么是 2700s、必须
+// 大于哪个预算）写在 `lib/data-service.ts` 的 `TRANSPORT_CEILING_MS` 头上，改数值前先读那段。
 //
 // ⚠️ 三条踩过的坑，改写本文件前必读（全部是 2026-11-07 现场实测）：
 //

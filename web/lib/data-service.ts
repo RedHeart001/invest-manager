@@ -25,13 +25,14 @@ const DATA_SERVICE_URL = process.env.DATA_SERVICE_URL ?? "http://localhost:8000"
  *   ⇒ 这个旋钮**按设定值线性生效**，调大即可越过默认 300s。
  *
  * **不变量（改任何一侧前先读这条）**：`TRANSPORT_CEILING_MS` 必须 **大于** 全仓最大的
- * 单次 ds 预算。现值最大者＝`sync.ts` 打 `/products` 的 600_000 ⇒ 900_000 留 1.5 倍。
+ * 单次 ds 预算。现值最大者＝`productsBudgetMs("us")` 的 1_800_000（美股乙全量，11-12）
+ * ⇒ 2_700_000 留 1.5 倍。三层不变量：ds 看门狗（1500s）＜ web 业务预算（us 1800s）＜ 本上限。
  * 反过来，业务预算必须是**更小**的那一个：这样超时时先到期的是 `AbortSignal`，
  * 抛 `TimeoutError`（语义准确、文案说得出"预算多少"），传输层只是永不先开的保险。
  *
  * 常量住在这里（谁 import 都安全，纯数字），**安装动作**住在 `web/instrumentation.ts`。
  */
-export const TRANSPORT_CEILING_MS = 900_000;
+export const TRANSPORT_CEILING_MS = 2_700_000;
 
 /** 供 `instrumentation.ts` 与测试共用的**纯值**，安装逻辑不在这里（避免把 undici 拖进浏览器）。
  *  返回 undefined 表示当前运行时没有 undici（浏览器）；调用方应当跳过。 */
@@ -50,6 +51,16 @@ export function shouldInstallTransportCeiling(): boolean {
  * ⇒ 预算不许低于 30s；独立成常量是为了让两个消费点（`/api/quote` 的裸 fetch、详情页 SSR 的 `dsGet`）不再各写一个数。
  */
 export const QUOTE_TIMEOUT_MS = 30_000;
+
+/** `/products` 的按类型预算（ms，11-12 美股乙）：us 全量＝新浪名单（上限 950 页、早停按实盘）、名义 ≈950s，
+ *  600s 共用预算装不下 ⇒ us 单独 1_800_000（＞ds 看门狗 1500s，超时先由 ds 侧到期、
+ *  回执带原文）；其余类型沿用 600_000（港股 48 页 × 东财桶 5s 的最坏形态）。
+ *  常量住这里＝ds 预算单一来源，`data-service.test.ts` 的不变量断言从这几个数算。 */
+export const PRODUCTS_BUDGET_MS = 600_000;
+export const US_PRODUCTS_BUDGET_MS = 1_800_000;
+export function productsBudgetMs(type: string): number {
+  return type === "us" ? US_PRODUCTS_BUDGET_MS : PRODUCTS_BUDGET_MS;
+}
 
 /** CR6-P3-3：区分"超时"与"连不上"——此前 catch 一律报 unreachable，
  *  `AbortSignal.timeout` 触发的 TimeoutError 语义被吞掉，排查时无法定位。

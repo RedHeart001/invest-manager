@@ -203,22 +203,25 @@ def _sina_symbol_exchange(symbol: str) -> str:
     return ""
 
 
-# ---------- 美股主数据列表（CR9-59／#32 甲，2026-10-04 主人拍板"甲＋先不开美股 tab"） ----------
+# ---------- 美股主数据列表（CR9-59／#32 甲→乙：2026-10-04 拍板"甲＋先不开美股 tab"，2026-11-12 拍板乙全量） ----------
 #
 # 上游＝新浪 `US_CategoryService.getList`（`ak.stock_us_spot` 内部用的同一个接口，10-04 实测
-# 抓到的是同一条 URL）。刻意**不借 akshare 那个函数**：它按 `num=20` 把 913 页全翻完
-# ＝一次调用打满盘子（18,241 只、串行 11–20 分钟，比 A 股那条 56 页的备源贵 16 倍），
-# 而甲要的是"前排常见标的先通入口"。翻页在这里自己做 ⇒ 请求数＝页数，可被 `US_LIST_PAGES` 限住。
+# 抓到的是同一条 URL）。刻意**不借 akshare 那个函数**：它按 `num=20` 把全量名单翻完
+# ＝一次调用打满盘子（11-12 实测 18,377 只、串行 11–20 分钟，比 A 股那条 56 页的备源贵 16 倍）。
+# 翻页在这里自己做 ⇒ 请求数＝页数，可被 `US_LIST_PAGES` 限住。
+# 乙（11-12）＝默认给到硬上限 950、靠"末不满页即早停"按上游实盘买：代码默认即乙，
+# `.env` 丢了也不会静默缩回甲（治 CR10-19 那形）。首跑实测上游已从 10-04 的 18,241 长到
+# 18,377 ⇒ 钉死 913 会差 6 页冒充全量，故默认不钉页数、只钉上限。
 US_LIST_URL = (
     "http://stock.finance.sina.com.cn/usstock/api/jsonp.php/"
     "IO.XSRV2.CallbackList[uslist]/US_CategoryService.getList"
 )
 US_LIST_PAGE_SIZE = 20  # 服务端把 `num` 硬截到 20（实测 num=100/500 都只回 20 行）⇒ 页数＝请求数
-US_LIST_DEFAULT_PAGES = 15  # ≈300 只：第 1 页 NVDA/AAPL/GOOGL/GOOG/MSFT/AMZN、第 2 页 V/XOM/INTC/JNJ
-US_LIST_PAGE_CEILING = 50  # 硬上限：防"合法但手滑多打两个 0"的 env 值变成几千次上游请求
+US_LIST_DEFAULT_PAGES = 950  # 乙全量（11-12 拍板）＝给到硬上限、由早停按上游实盘定实买页数（11-12 实测 18,377 只⇒919 页）；甲的 15 页（≈300 只）是 10-04→11-12 的历史形态
+US_LIST_PAGE_CEILING = 950  # 硬上限：防"合法但手滑多打两个 0"的 env 值变成几千次上游请求；950×20=19,000 只＝对 11-12 盘子 18,377 留约半年增长余量
 US_LIST_PAGE_INTERVAL_S = 0.5  # 翻页之间的节流（新浪侧无声明，按对上游礼貌的常规间隔）
 US_LIST_REQUEST_TIMEOUT_S = 20.0  # 单页超时（实测 0.19–6.31s，最慢那一档留 3 倍余量）
-US_LIST_WHOLE_TIMEOUT_S = 150.0  # 整条列表的看门狗预算（真正先到的是它：50 页 × 最坏 20.5s ≫ 150s ⇒ 有效页数 ≈ int(150//20.5)＝7，见 test_cr9_59_us_list）
+US_LIST_WHOLE_TIMEOUT_S = 1500.0  # 整条看门狗（乙）：名义 950 页上限 × ≈1s ≈ 950s（11-12 实测 913 页 808s≈0.885s/页），1500s ≈ 1.58 倍余量；必须＞名义——超时＝整腿失败（timeout.py 返回 (None, TimeoutError)，没有部分交付）；名义 1s/页也装得下整个硬上限 950 页，见 test_cr9_59_us_list
 
 
 def _us_list_pages() -> int:
@@ -229,6 +232,16 @@ def _us_list_pages() -> int:
         env_capacity("US_LIST_PAGES", US_LIST_DEFAULT_PAGES),
         US_LIST_PAGE_CEILING,
     )
+
+
+def _us_coverage_subset(pages_done: int, exhausted: bool, declared: str, failures: list[str]) -> bool:
+    """覆盖面判定（乙，11-12）：翻完上游名单（末不满页，或已翻页数×页宽 ≥ 上游声明数）
+    且中途零失败页 ⇒ 全量（False）；否则子集（True）。中途有失败页即便翻到尾部也声明
+    子集——缺页的盘子不许冒充全量（R16）。纯函数，离线可钻。"""
+    covered_all = exhausted or (
+        declared.isdigit() and pages_done * US_LIST_PAGE_SIZE >= int(declared)
+    )
+    return (not covered_all) or bool(failures)
 
 
 def _jsonp_payload(text: str) -> dict:
@@ -1249,29 +1262,35 @@ class AkshareProvider(BaseProvider):
         }
 
     def _list_us_stocks(self) -> tuple[list[dict], dict]:
-        """美股主数据＝新浪排行名单的**有界前 N 页**（CR9-59／#32 甲，主人 2026-10-04 定案）。
+        """美股主数据＝新浪排行名单（CR9-59／#32：10-04 甲＝有界前 N 页 → 11-12 主人拍板**乙全量**）。
 
-        为什么不一次拉全（10-03/10-04 实测，不是推断）：`num` 被服务端硬截到 20 ⇒ 全量
-        18,241 只＝**913 次请求**、串行 ≈11–20 分钟，比 A 股那条 56 页的备源贵 16 倍；
-        而 `market` 参数不生效（传 NASDAQ 照样混返回），想按交易所缩盘子只能全量再自筛。
-        该接口按热度/市值排序 ⇒ "前 N 页"就是最常见那一批（第 1 页 NVDA/AAPL/GOOGL/GOOG/
-        MSFT/AMZN），甲要买的"详情页不再 404、代码搜得通"由它就够了，长尾留给乙。
+        为什么全量这么贵（10-03/10-04 实测，不是推断）：`num` 被服务端硬截到 20 ⇒ 全量
+        18,241 只（10-04 盘子；11-12 实测已长到 18,377）＝**900+ 次请求**、串行名义 ≈15 分钟；
+        `market` 参数不生效（传 NASDAQ 照样混返回），想按交易所缩盘子只能全量再自筛。
+        乙的预算链（ds 看门狗 1500s ＜ web us 预算 1800s ＜ 传输层 2700s）见 docs/history/2026-11-12 轮明细。
 
-        刻意声明 `degraded`：覆盖面**按设计**小于上游自己报的总数（不是上游挂了），
-        按 CR9-31 的口径这必须让消费侧读得到，否则"300 只"与"全量"长得一模一样。
-        10-04 03:1x 主人的字（#32 的 (2)）在此再加一道**行业闸**＝`category` 为 null 或空串
-        的行不进库；闸在解析之后、翻页之前 ⇒ **请求数不受它影响**（15 页仍是 15 次），
-        它只缩名单不缩额度。
+        `degraded` 恒 True：行业闸仍按设计剔行 ⇒ 留库行数小于上游声明总数，按 CR9-31
+        的口径必须让消费侧读得到。`intentionalSubset` 改按实际覆盖面判定（11-12）：
+        翻完上游名单且无失败页 ⇒ False；截断/中途有失败页 ⇒ True（web 缩水闸只在收到
+        这个声明时放行有意子集）。10-04 03:1x 主人的字（#32 的 (2)）那道**行业闸**不变＝
+        `category` 为 null 或空串的行不进库；闸在解析之后、翻页之前 ⇒ **请求数不受它影响**。
         """
         pages = _us_list_pages()
 
-        def _fetch() -> tuple[list[dict], str, list[str], int]:
+        def _fetch() -> tuple[list[dict], str, list[str], int, int, bool]:
             rows: list[dict] = []
             seen: set[str] = set()
             declared = ""
             failures: list[str] = []
             dropped = 0  # #32 的 (2) 定案：按"没有行业标签"剔掉的行数（要能在 note 里看见）
+            pages_done = 0
+            exhausted = False
+            deadline = time.monotonic() + US_LIST_WHOLE_TIMEOUT_S
             for page in range(1, pages + 1):
+                # 看门狗到期后外层会弃线程（无取消机制）⇒ 这里自停，最多再买一页（11-12 加固）
+                if time.monotonic() > deadline:
+                    break
+                pages_done = page
                 if page > 1:
                     time.sleep(US_LIST_PAGE_INTERVAL_S)
                 try:
@@ -1311,10 +1330,11 @@ class AkshareProvider(BaseProvider):
                     seen.add(product["code"])
                     rows.append(product)
                 if len(data) < US_LIST_PAGE_SIZE:
+                    exhausted = True
                     break  # 上游给不满一页＝已到尾部（10-03 实测第 913 页只回 1 行）
-            return rows, declared, failures, dropped
+            return rows, declared, failures, dropped, pages_done, exhausted
 
-        rows, declared, failures, dropped = _ak_request(
+        rows, declared, failures, dropped, pages_done, exhausted = _ak_request(
             _fetch, US_LIST_WHOLE_TIMEOUT_S, "sina.us-list"
         )
         if not rows:
@@ -1329,9 +1349,21 @@ class AkshareProvider(BaseProvider):
             key = r["exchange"] or "?"
             markets[key] = markets.get(key, 0) + 1
         spread = "/".join(f"{k}×{v}" for k, v in sorted(markets.items()))
+        subset = _us_coverage_subset(pages_done, exhausted, declared, failures)
+        coverage = (
+            (
+                f"美股主数据已取全上游名单（翻完 {pages_done} 页"
+                + (f"，上游声明 {declared} 只" if declared else "")
+                + f" ⇒ 本次留 {len(rows)} 只）"
+            )
+            if not subset
+            else (
+                f"美股主数据只取前排 {pages_done} 页"
+                + (f"（上游声明盘子 {declared} 只 ⇒ 本次留 {len(rows)} 只）" if declared else "")
+            )
+        )
         note = (
-            f"美股主数据按甲方案只取前排 {pages} 页"
-            + (f"（上游声明盘子 {declared} 只 ⇒ 本次留 {len(rows)} 只）" if declared else "")
+            coverage
             + f"；按「没有行业标签即剔除」的口径剔掉 {dropped} 行、交易所分布 {spread}。"
             "⚠️ 这条筛法不等于「只留普通股」：新浪的行业字段缺失与品种无关"
             "（实测 Visa/Meta 这一档常为空），所以带行业的 ETF 照样进来、"
@@ -1344,14 +1376,15 @@ class AkshareProvider(BaseProvider):
             )
         )
         # #35／CR9-63（主人 10-05 取「甲」）：`degraded` 与 `intentionalSubset` 是**两件事**，
-        # 各用一个键——前者说"这批不是美股全量"（R16 的覆盖面可见性），后者说"缺口是我们自己的
+        # 各用一个键——前者说"这批不是上游声明的全量"（R16 的覆盖面可见性），后者说"缺口是我们自己的
         # 产品口径造成的，不是上游劣化"。web 的降级缩水闸（`web/lib/sync.ts`）只在**收到这个声明**
         # 时才放行有意子集，未声明时原判据一字不动（G2 防的备源劣化照旧挡）。
-        # 别把它读成"degraded 可以摘掉"：摘了就没有任何东西告诉消费侧"这是 179 只而不是全量"。
+        # 乙（11-12）：intentionalSubset 改按实际覆盖面判定（翻完且无失败页 ⇒ False）；
+        # degraded 仍恒 True——行业闸还在剔行，摘了就没有任何东西告诉消费侧"留库数 < 上游盘子"。
         return rows, {
             "source": "sina-us-category-list",
             "degraded": True,
-            "intentionalSubset": True,
+            "intentionalSubset": subset,
             "note": note,
         }
 

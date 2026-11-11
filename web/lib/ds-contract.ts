@@ -218,6 +218,21 @@ export function builderMsFor(committedMs: number, isDirty: boolean, nowMs: numbe
  *  登记表为空＝L3 两条牙齿都在跑：清单外的过期当场红，清单里的不再过期也红（逼着摘）。
  *  每条的 `why` 有 ≥20 字符的下限（`ds-contract.test.ts` 里那两条 `why.trim().length` 断言），且要写清"谁把构造面改新的＋哪一轮重采"。 */
 export const KNOWN_STALE_SNAPSHOTS: Record<string, string> = {
+  // 11-12 美股乙登记（10 条整块）：akshare_provider.py 改新（US_LIST_* 常量 15/50/150→950/950/1500
+  // ＋intentionalSubset 条件化＋_us_coverage_subset），键面零变化（degraded/note/intentionalSubset
+  // 本就是契约明列的可选键）；重采买不到判别力、/products 探针 600s 还装不下 us 920s ⇒
+  // 并入下个人工付费窗口 `test-script/window_contract.py --live --write` 重采后**这 10 条一起删**
+  // （重采后 obsoleteKnownStale 会当场红逼摘＝设计）。
+  "/quote": "2026-11-12 美股乙把 akshare_provider.py 改新（US_LIST_* 常量＋intentionalSubset 条件化），键面零变化；下个人工付费窗口 --live --write 重采后删本条",
+  "/kline": "2026-11-12 美股乙把 akshare_provider.py 改新（US_LIST_* 常量＋intentionalSubset 条件化），键面零变化；下个人工付费窗口 --live --write 重采后删本条",
+  "/quote/realtime": "2026-11-12 美股乙把 akshare_provider.py 改新（US_LIST_* 常量＋intentionalSubset 条件化），键面零变化；下个人工付费窗口 --live --write 重采后删本条",
+  "/news": "2026-11-12 美股乙把 akshare_provider.py 改新（US_LIST_* 常量＋intentionalSubset 条件化），键面零变化；下个人工付费窗口 --live --write 重采后删本条",
+  "/quotes": "2026-11-12 美股乙把 akshare_provider.py 改新（US_LIST_* 常量＋intentionalSubset 条件化），键面零变化；下个人工付费窗口 --live --write 重采后删本条",
+  "/fund/holdings": "2026-11-12 美股乙把 akshare_provider.py 改新（US_LIST_* 常量＋intentionalSubset 条件化），键面零变化；下个人工付费窗口 --live --write 重采后删本条",
+  "/fund/report": "2026-11-12 美股乙把 akshare_provider.py 改新（US_LIST_* 常量＋intentionalSubset 条件化），键面零变化；下个人工付费窗口 --live --write 重采后删本条",
+  "/bond/yieldcurve": "2026-11-12 美股乙把 akshare_provider.py 改新（US_LIST_* 常量＋intentionalSubset 条件化），键面零变化；下个人工付费窗口 --live --write 重采后删本条",
+  "/hotspots/status": "2026-11-12 美股乙把 akshare_provider.py 改新（US_LIST_* 常量＋intentionalSubset 条件化），键面零变化；下个人工付费窗口 --live --write 重采后删本条",
+  "/products": "2026-11-12 美股乙把 akshare_provider.py 改新（US_LIST_* 常量＋intentionalSubset 条件化），键面零变化；下个人工付费窗口 --live --write 重采后删本条",
   // 10-13 13:47 `window_contract.py --live --write` 重采后销账（原两条＝`/quote`／`/kline`，
   // 由 CR9-92 落码判过期）。
   // 10-16 19:0x 重采后销账（原十条＝`/quote`…`/hotspots/status` 整块，由 CR9-108 把 `main.py`＋
