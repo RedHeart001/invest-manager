@@ -29,6 +29,11 @@ export async function POST(req: NextRequest) {
 
 // 追加消息（供 UI 在流结束后兜底同步；正常流程由 /api/chat 内部持久化）
 export async function PUT(req: NextRequest) {
+  // CR10-20：纵深防御补齐（PUT 属非简单请求，外站预检即死；守卫与 POST 同口径）。挡在读 body 之前。
+  const blocked = checkRequestOrigin(req);
+  if (blocked) {
+    return NextResponse.json({ error: blocked }, { status: 403 });
+  }
   const body = (await req.json().catch(() => ({}))) as {
     sessionId?: string;
     role?: "user" | "assistant" | "tool";

@@ -68,12 +68,13 @@ describe("requireWriteToken（三态）", () => {
 
 describe("G7 接线（源码字面断言）", () => {
   const DS_ROUTES = ["app/api/sync/route.ts", "app/api/market/refresh/route.ts"];
-  // CR10-12：浏览器端入口从两枚扩到六枚（chat / chat/sessions / search-click / watchlist 是本轮新挂来源守卫的那四枚）
+  // CR10-12：浏览器端入口从两枚扩到六枚；CR10-20 补第 7 枚 chat/sessions/[id]（DELETE 纵深防御）
   const BROWSER_ROUTES = [
     "app/api/hotspots/run/route.ts",
     "app/api/research/start/route.ts",
     "app/api/chat/route.ts",
     "app/api/chat/sessions/route.ts",
+    "app/api/chat/sessions/[id]/route.ts",
     "app/api/search/click/route.ts",
     "app/api/watchlist/route.ts",
   ];

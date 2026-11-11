@@ -36,7 +36,7 @@ function postReq(body: unknown, headers: Record<string, string> = {}) {
 }
 function delReq(url: string, headers: Record<string, string> = {}) {
   return {
-    nextUrl: { searchParams: new URLSearchParams(url.split("?")[1] ?? "") },
+    nextUrl: { origin: "http://localhost:3000", searchParams: new URLSearchParams(url.split("?")[1] ?? "") },
     headers: new Headers(headers),
   } as unknown as Parameters<typeof DELETE>[0];
 }
@@ -97,8 +97,16 @@ describe("watchlist API（G5）", () => {
     expect(ROUTE_SRC).toContain("checkRequestOrigin(req)");
   });
 
-  it("接线＝守卫排在读 body 之前", () => {
-    expect(ROUTE_SRC.indexOf("checkRequestOrigin(req)")).toBeLessThan(ROUTE_SRC.indexOf("req.json("));
+  it("接线＝两枚写 handler 各自的守卫都排在解析之前（逐 handler 切片，不是整文件 indexOf）", () => {
+    const postSeg = ROUTE_SRC.slice(
+      ROUTE_SRC.indexOf("export async function POST"),
+      ROUTE_SRC.indexOf("export async function DELETE"),
+    );
+    const delSeg = ROUTE_SRC.slice(ROUTE_SRC.indexOf("export async function DELETE"));
+    expect(postSeg.indexOf("checkRequestOrigin(req)")).toBeLessThan(postSeg.indexOf("req.json("));
+    const delGuardAt = delSeg.indexOf("checkRequestOrigin(req)");
+    expect(delGuardAt).toBeGreaterThan(-1);
+    expect(delGuardAt).toBeLessThan(delSeg.indexOf("req.nextUrl.searchParams"));
   });
 
   it("POST 跨站 Origin → 403 且不 upsert", async () => {
@@ -113,8 +121,20 @@ describe("watchlist API（G5）", () => {
     expect(upsert).toHaveBeenCalledTimes(1);
   });
 
-  it("🔁 DELETE 本轮刻意没挂＝跨站 Origin 的 DELETE 仍走 200 那一档（账上「没做」那半的读数）", async () => {
+  it("DELETE 跨站 Origin → 403 且不删（CR10-20 翻面：原「刻意没挂⇒200」那枚读数作废）", async () => {
     const res = await DELETE(delReq("?type=stock&code=600519", { origin: "http://evil.example" }));
+    expect(res.status).toBe(403);
+    expect(deleteMany).not.toHaveBeenCalled();
+  });
+
+  it("🔁 DELETE 无 Origin（本机脚本那一形）→ 放行真删，守卫不许把它们打死", async () => {
+    const res = await DELETE(delReq("?type=stock&code=600519"));
+    expect(res.status).toBe(200);
+    expect(deleteMany).toHaveBeenCalledTimes(1);
+  });
+
+  it("DELETE 同源 Origin → 200", async () => {
+    const res = await DELETE(delReq("?type=stock&code=600519", { origin: "http://localhost:3000" }));
     expect(res.status).toBe(200);
     expect(deleteMany).toHaveBeenCalledTimes(1);
   });

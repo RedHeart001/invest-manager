@@ -30,9 +30,9 @@ export async function GET() {
 }
 
 export async function POST(req: NextRequest) {
-  // CR10-12：本枚是看板上最早登记的那一枚（`#74`／CR10-10 的 POST 那半），本轮与其余
-  // 三枚可被外站驱动的 POST 一起补。下方 `DELETE` **没挂**＝非简单请求，浏览器必先预检，
-  // 而全站零 CORS 头 ⇒ 外站驱动不到（属纵深防御缺口，不是补漏项；账＝FIX-LEDGER 看板 CR10-12 行）。
+  // CR10-12：本枚是看板上最早登记的那一枚（`#74`／CR10-10 的 POST 那半），与其余
+  // 三枚可被外站驱动的 POST 一起补。DELETE 当时判为非简单请求（浏览器必先预检、全站零 CORS 头
+  // ⇒ 外站驱动不到）缓办；CR10-20（2026-11-12 主人拍板）已补齐＝纵深防御，两枚写腿同口径。
   const blocked = checkRequestOrigin(req);
   if (blocked) {
     return NextResponse.json({ error: blocked }, { status: 403 });
@@ -68,6 +68,11 @@ export async function POST(req: NextRequest) {
 }
 
 export async function DELETE(req: NextRequest) {
+  // CR10-20：纵深防御补齐。挡在读 searchParams 之前（与 POST 同口径；仍不挂写 token 守卫＝浏览器持不住密钥）。
+  const blocked = checkRequestOrigin(req);
+  if (blocked) {
+    return NextResponse.json({ error: blocked }, { status: 403 });
+  }
   const type = req.nextUrl.searchParams.get("type") ?? "";
   const code = req.nextUrl.searchParams.get("code") ?? "";
   if (!TYPES.includes(type as (typeof TYPES)[number]) || !CODE_SET.test(code)) {
