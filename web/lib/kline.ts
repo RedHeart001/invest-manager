@@ -80,7 +80,7 @@ function dayStart(iso: string): Date {
   return new Date(`${iso}T00:00:00.000Z`);
 }
 
-function isoAddDays(iso: string, days: number): string {
+export function isoAddDays(iso: string, days: number): string {
   const d = dayStart(iso);
   d.setUTCDate(d.getUTCDate() + days);
   return d.toISOString().slice(0, 10);

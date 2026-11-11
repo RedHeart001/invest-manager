@@ -11,8 +11,9 @@ import { QUOTE_TIMEOUT_MS, dsGet, type Quote } from "@/lib/data-service";
 import { priceWithCurrency } from "@/lib/currency";
 import { fetchEvents, narrowByDates, pickEventDates } from "@/lib/events";
 import { buildIndustryView, type FundReportResp } from "@/lib/fund-industry";
-import { getKlineRange, normalizeRange, type KlineResult } from "@/lib/kline";
+import { getKlineRange, isoAddDays, normalizeRange, todayIso, type KlineResult } from "@/lib/kline";
 import { quoteClockText } from "@/lib/market-clock";
+import { computePePercentile } from "@/lib/metrics";
 import { detectPhases } from "@/lib/phases";
 import { buildProfile, isExchangeTradedFund, type QuoteEnriched } from "@/lib/profile";
 import { prisma } from "@/lib/prisma";
@@ -74,7 +75,12 @@ export default async function ProductPage({
   const range = normalizeRange(null, null);
   const rangeOk = "start" in range;
 
-  const [quoteRes, klineRes, eventsRes, holdingsRes, yieldRes, fundReportRes] = await Promise.allSettled([
+  // R20：PE 分位要近 3 年日线。库内 KlineDaily 几乎为空（11-12 只读 SQL：全库 741 行），
+  // 必须另开一条 SSR 取数腿；仅 stock（基金/债券无 PE 口径）。与其余六腿并发，不叠 TTFB；
+  // 冷缓存首访＝2 发东财 K 线，暖缓存 0 发（kline.ts 30 分钟复查窗口）。
+  const peRange = type === "stock" ? { start: isoAddDays(todayIso(), -1095), end: todayIso() } : null;
+
+  const [quoteRes, klineRes, eventsRes, holdingsRes, yieldRes, fundReportRes, peKlineRes] = await Promise.allSettled([
     dsGet<Quote>("/quote", { type, code }, QUOTE_TIMEOUT_MS),
     rangeOk ? getKlineRange(type, code, range.start, range.end) : Promise.reject(new Error("非法区间")),
     fetchEvents(type, code),
@@ -87,6 +93,9 @@ export default async function ProductPage({
     // 代价按 10-12 23:2x 那次读码更正过：一条 `/fund/report`＝**2–3 发**（公告 1 发＋行业配置
     // 按年份 1–2 发，provider 侧内存缓存 6h），走的是东财桶（`_em_ak_request`）不是 CR9-97 那枚新闸。
     otcFund ? dsGet<FundReportResp>("/fund/report", { code }, 30_000) : Promise.resolve(null),
+    // R20：第 7 腿＝3 年日线（仅 stock）。沿用 kline.ts 既有 45s 预算与增量缓存；
+    // 失败/非 stock ⇒ peView=null ⇒ 槽位与口径说明都不出现（R10 同口径，不带崩整页）。
+    peRange ? getKlineRange(type, code, peRange.start, peRange.end) : Promise.resolve(null),
   ]);
 
   let quote: Quote | null = null;
@@ -178,6 +187,10 @@ export default async function ProductPage({
     (quote as QuoteEnriched | null) ?? null,
   );
 
+  // R20：PE 分位（近似）。peTtm≤0（亏损）/缺现价/有效 bar<120 ⇒ null ⇒ 槽位与说明都不出现（C4）
+  const peHistory = peKlineRes.status === "fulfilled" && peKlineRes.value ? peKlineRes.value.candles : [];
+  const peView = computePePercentile(quote?.peTtm, quote?.price, peHistory);
+
   // 指标卡：区间高低（来自初始 3M K线）+ 行情扩展字段
   const closes = effectiveKline.candles;
   const rangeHigh = closes.length ? Math.max(...closes.map((c) => c.high)) : null;
@@ -203,6 +216,7 @@ export default async function ProductPage({
     });
   }
   if (quote?.peTtm != null) stats.push({ label: "PE(TTM)", value: quote.peTtm.toFixed(2) });
+  if (peView) stats.push({ label: `PE分位(${peView.windowLabel}·近似)`, value: `${peView.percentile}%` });
   if (quote?.pb != null) stats.push({ label: "市净率", value: quote.pb.toFixed(2) });
   if (quote?.marketCapRank != null) stats.push({ label: "市值排名", value: `#${quote.marketCapRank}` });
 
@@ -329,6 +343,11 @@ export default async function ProductPage({
                   </div>
                 ))}
               </div>
+            )}
+            {peView && (
+              <p className="mt-2 text-xs text-zinc-400">
+                PE分位为近似口径：假设盈利（TTM）不变，按价格历史分位折算（{peView.from} ~ {peView.to}，实得 {peView.bars} 根日线）；财报季盈利变动时会失真，仅供参考。
+              </p>
             )}
           </>
         ) : (
