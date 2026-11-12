@@ -131,6 +131,10 @@ wc -l docs/history/*.md
 | [2026-11-12-progress-状态总览现值链1112轮归档.md](2026-11-12-progress-状态总览现值链1112轮归档.md) | PROGRESS.md 的块搬迁（2026-11-12） | 整体搬迁，内容逐字保留 | 见 [../PROGRESS.md](../PROGRESS.md) |
 | [2026-11-12-readme-当前状态块1112轮归档.md](2026-11-12-readme-当前状态块1112轮归档.md) | README.md 的块搬迁（2026-11-12） | 整体搬迁，内容逐字保留 | 见 [../README.md](../README.md) |
 | [2026-11-12-cr10-20-r20-美股乙轮明细.md](2026-11-12-cr10-20-r20-美股乙轮明细.md) | 11-12 收尾轮：CR10-20 守卫／R20 PE 分位／美股乙全量的可复算读数与过程 | 事件快照（轮明细直接进 history） | 见 [../FIX-LEDGER.md](../FIX-LEDGER.md) 看板与 [../CODE-REVIEW.md](../CODE-REVIEW.md) 追加一百零八 |
+| [2026-11-12-fix-ledger-状态卡1112上午轮归档.md](2026-11-12-fix-ledger-状态卡1112上午轮归档.md) | FIX-LEDGER.md 的块搬迁（2026-11-12） | 整体搬迁，内容逐字保留 | 见 [../FIX-LEDGER.md](../FIX-LEDGER.md) |
+| [2026-11-12-readme-当前状态块1112上午轮归档.md](2026-11-12-readme-当前状态块1112上午轮归档.md) | README.md 的块搬迁（2026-11-12） | 整体搬迁，内容逐字保留 | 见 [../README.md](../README.md) |
+| [2026-11-12-progress-状态总览现值链1112上午轮归档.md](2026-11-12-progress-状态总览现值链1112上午轮归档.md) | PROGRESS.md 的块搬迁（2026-11-12） | 整体搬迁，内容逐字保留 | 见 [../PROGRESS.md](../PROGRESS.md) |
+| [2026-11-12-自然轮对账与收尾验收.md](2026-11-12-自然轮对账与收尾验收.md) | 11-12 自然轮对账＋收尾验收（服务恢复／02:00 partial 归因／bond-crypto 补刷／闸1／smoke） | 事件快照（轮明细直接进 history） | 见 [../PROGRESS.md](../PROGRESS.md) 与 [../FIX-LEDGER.md](../FIX-LEDGER.md) 状态卡 |
 
 > **「同日续 N」的去处（10-08 重组留下的 19 处旧指针）**：上层文件里凡写「PROGRESS 同日续 N」的句子，其原文现在都在
 > [2026-10-08-progress-进度日志归档.md](2026-10-08-progress-进度日志归档.md)（该文件按「同日续 1…75」分节，编号与旧指针一一对得上，已逐号核对齐 75 段）。
