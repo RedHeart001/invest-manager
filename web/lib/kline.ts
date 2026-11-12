@@ -1,6 +1,7 @@
 // 日 K 增量缓存（PLAN M3/KlineDaily）：BFF 维护，历史日 K 不变只拉增量
 // - 首次请求：整段回源 data-service 并落库
-// - 后续请求：命中区间读库，仅增量区间（缓存末日+1 → 请求末日）回源
+// - 后续请求：命中区间读库，仅增量区间（缓存末日 → 请求末日）回源；
+//   尾部复查含缓存末日，允许同日限定更新（CR10-27：盘中缓存的未完结 bar 有修正路径）
 // - 分钟级数据（interval=1m）：实时数据不落库，直连透传（R: PLAN 约定）
 // - 回源失败时已有缓存照常返回（R10 优雅降级，note 标注）
 
@@ -171,6 +172,7 @@ async function upsertCandles(
   code: string,
   candles: { date: string; open: number; high: number; low: number; close: number; volume: number | null }[],
   source: string,
+  refreshExisting = false,
 ): Promise<number> {
   // CR6-P1-3：护栏——provider 侧已剔除 null OHLC，这里再兜一层，防未来
   // 新 provider 漏过滤时单行脏数据让整批 upsert 中断。
@@ -183,8 +185,11 @@ async function upsertCandles(
     select: { date: true },
   });
   const have = new Set(existing.map((r) => r.date.toISOString().slice(0, 10)));
-  const fresh = valid.filter((c) => !have.has(c.date));
-  if (fresh.length === 0) return 0;
+  // CR10-27：尾部复查（refreshExisting）允许更新回源区间内的已有行——区间由
+  // 取数窗口（缓存末日 → 请求末日）限定，区间外的历史行不会被改写；
+  // 头补/整段回源仍只写新日期，不无差别重写历史。
+  const rows = refreshExisting ? valid : valid.filter((c) => !have.has(c.date));
+  if (rows.length === 0) return 0;
 
   // CR-15（本轮 code review）：首段回源（5 年 ≈ 1200 行）此前逐行 await create，
   // 1200 次往返；改为分块多行 INSERT OR IGNORE——一次往返写多行，
@@ -198,8 +203,8 @@ async function upsertCandles(
   // 故原生 INSERT 的日期参数必须与 Prisma 同为毫秒数字（`dayStart().getTime()`）。
   const CHUNK = 50;
   let n = 0;
-  for (let i = 0; i < fresh.length; i += CHUNK) {
-    const batch = fresh.slice(i, i + CHUNK);
+  for (let i = 0; i < rows.length; i += CHUNK) {
+    const batch = rows.slice(i, i + CHUNK);
     const rowPlaceholder = "(?,?,?,?,?,?,?,?,?,?)";
     const params = batch.flatMap((c) => [
       randomId(), // 走原生 INSERT，id 需显式生成（Prisma 默认 cuid 不参与）
@@ -213,10 +218,19 @@ async function upsertCandles(
       c.volume,
       source,
     ]);
+    // CR10-27：尾部复查用 ON CONFLICT DO UPDATE 修正同日 OHLC（唯一键不变、
+    // 冲突行保留原 id）；其余路径维持 INSERT OR IGNORE 吸收并发重复（C11）。
     await prisma.$executeRawUnsafe(
-      `INSERT OR IGNORE INTO "KlineDaily"
-         ("id","type","code","date","open","high","low","close","volume","source")
-       VALUES ${batch.map(() => rowPlaceholder).join(",")}`,
+      refreshExisting
+        ? `INSERT INTO "KlineDaily"
+             ("id","type","code","date","open","high","low","close","volume","source")
+           VALUES ${batch.map(() => rowPlaceholder).join(",")}
+           ON CONFLICT("type","code","date") DO UPDATE SET
+             "open"=excluded."open","high"=excluded."high","low"=excluded."low",
+             "close"=excluded."close","volume"=excluded."volume","source"=excluded."source"`
+        : `INSERT OR IGNORE INTO "KlineDaily"
+             ("id","type","code","date","open","high","low","close","volume","source")
+           VALUES ${batch.map(() => rowPlaceholder).join(",")}`,
       ...params,
     );
     n += batch.length;
@@ -268,6 +282,7 @@ export async function getKlineRange(
 
   let fetched = 0;
   let fetchedSource = "";
+  let headFetchAttempted = false;
   const notes: string[] = [];
   const cacheKey = `${type}:${code}`;
 
@@ -322,6 +337,7 @@ export async function getKlineRange(
       if (withinFailWindow || recentlyChecked) {
         notes.push("历史区间回源近期失败/已复查（限流/故障），窗口期内跳过补齐");
       } else {
+        headFetchAttempted = true;
         try {
           const ds = await fetchDs(type, code, start, isoAddDays(minCached, -1), interval);
           if ((ds.candles?.length ?? 0) === 0) {
@@ -339,17 +355,23 @@ export async function getKlineRange(
         }
       }
     }
-    // 尾部增量（缓存末日 < 请求末日）：30 分钟内已复查过则跳过（R15：避免非交易日空转）
+    // 尾部复查（CR10-27：含缓存末日，允许同日限定更新）：30 分钟内已复查过则跳过（R15：避免非交易日空转）
     // CR-05：读/写独立的 `lastCheckedTail`，不再被头部缺口补全压制。
-    if (maxCached < end) {
+    if (maxCached <= end) {
       const recentlyChecked =
         Date.now() - (lastCheckedTail.get(cacheKey) ?? 0) < RECHECK_MS;
+      // 同日复查（尾部无新日）且本请求已为头部回源：顺延一个窗口（R15 取数预算）；
+      // 尾部有新日时不受影响——头不压制尾（CR-05）。
+      const deferredByHead = maxCached === end && headFetchAttempted;
       if (recentlyChecked) {
         notes.push("增量复查窗口内（30 分钟），本次使用缓存");
+      } else if (deferredByHead) {
+        lastCheckedTail.set(cacheKey, Date.now());
+        notes.push("本次已回源头部缺口，尾部同日复查顺延一个窗口");
       } else {
         try {
-          const ds = await fetchDs(type, code, isoAddDays(maxCached, 1), end, interval);
-          fetched += await upsertCandles(type, code, ds.candles, ds.source);
+          const ds = await fetchDs(type, code, maxCached, end, interval);
+          fetched += await upsertCandles(type, code, ds.candles, ds.source, true);
           fetchedSource = fetchedSource || ds.source;
           lastCheckedTail.set(cacheKey, Date.now());
         } catch (e) {

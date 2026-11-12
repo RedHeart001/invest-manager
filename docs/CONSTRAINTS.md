@@ -32,6 +32,7 @@
 | **C11** | **K 线增量缓存防重复回源**：头部缺口回源失败同样进入失败窗口（`RECHECK_MS` = 30 分钟，`kline.ts:47`）；并发写入的重复行现由 **`INSERT OR IGNORE`** 吸收（`:184`，注释在 `:158` 明写"无需 catch P2002"）——**机制已换，不再是"P2002 按已写入处理"**；P2002 判定现仅存在于 `web/lib/hotspots.ts:44,219`（热点去重路径） | `web/lib/kline.ts:47,157-185,262` |
 | **C11 现值更正（10-22 14:5x，只增这一行；上面那格的三个行号原样不回改）** | 那三个锚点已随代码漂移：`RECHECK_MS` 的声明现值在 **`kline.ts:55`**、`INSERT OR IGNORE` 的写库处现值在 **`:217`**（"无需 catch P2002"那句注释同段）⇒ 约束正文一字不改，只把**锚点换准**；判别力零变化（本条约束的行为断言在 `web/lib/kline*.test.ts`，不靠行号） | `web/lib/kline.ts:55,217` |
 | **C11 现值更正之二（2026-11-07，只增这一行；上面 C11 那格与 10-22 那行原句一律不回改）** | 那格末句「P2002 判定现仅存在于 `web/lib/hotspots.ts:44,219`」**两个锚都已漂**：`:44` 现在是空行、`:219` 是 `nameByCode.get(...)`；现查（`git grep -n "P2002\|isUniqueViolation" web/lib/hotspots.ts`）＝**定义在 `:94-96`**（`isUniqueViolation`）、**调用点在 `:295-296`**（`ingestDigests` 的 catch 分支）。`kline.ts` 侧那句已收敛成注释（`:191` 的「无需 catch P2002」），`INSERT OR IGNORE` 仍在 `:217` ⇒ **约束语义零变化，只有锚点换准** | `web/lib/hotspots.ts:94-96,295-296` |
+| **C11 现值更正之三（2026-11-13，只增这一行；上面 C11 那格与 10-22／11-07 两行原句一律不回改）** | CR10-27 尾部复查把写库改双模：**尾部复查**（`refreshExisting`）用 `INSERT … ON CONFLICT("type","code","date") DO UPDATE` 修正同日 OHLC（`kline.ts:228`，冲突行保留原 id）；**头补／整段**仍 `INSERT OR IGNORE`（`:231`）只写新日期。并发重复吸收语义不变（DO UPDATE 同样吸收冲突，「无需 catch P2002」仍成立）；`RECHECK_MS` 锚漂至 `:56`。行为断言在 `kline-tail-refresh.test.ts` 4 枚＋C34 三钻 | `web/lib/kline.ts:56,221-236` |
 | **C12** | **快照刷新失败必须显式**：整批无可用报价计入 `failedBatches`，禁止"0 更新 0 失败"伪装成功 | `web/lib/market-snapshot.ts` |
 | **C13** | **界面细节**：热点时间用北京时间（Intl timeZone）；SSE updater 内禁止副作用；ECharts 卸载必须 dispose；搜索 loading 收尾须确认请求未过期；browse 模式 sort/page 从 URL 还原；详情页五路取数并行 | 各前端页面 |
 | **C14** | **安全基线**：外部抓取链接仅放行 `http(s)`；`/api/health` 不回显异常细节；`/api/tools/status` 不回显服务端路径且探测结果缓存 30s；MCP 工具名截断时附加哈希防碰撞 | `web/lib/*`、`web/app/api/health` |
@@ -110,6 +111,8 @@
 > "头部补全成功立刻压制同一请求的尾部增量"；合并双判会让头部失败顺带压住尾部 30 分钟。
 > ⚠️ 附带更正一条账上旧判断：`web/lib/kline.ts` **不在** `DS_RESPONSE_FILES`（那五枚都在 `data-service/app/`）
 > ⇒ **改它不会点亮闸2 L3**、不需要 `window_contract.py --live --write` 同窗重采。
+
+> **C28 现值更正之二（2026-11-13，只增这一段；上面 10-30 那段原句不回改）**＝CR10-27 后尾部分支条件现值 `kline.ts:360`（`maxCached <= end`，含缓存末日），`lastCheckedTail` 现有**三处写点**——同日顺延 `:369`（本请求已为头部回源且尾部无新日）／成功 `:376`／失败 `:379`，对称记账不变；头部双判语义不变（成功写 `lastChecked`、失败/空响应写 `lastFailed`，`headFetchAttempted` 标记在 `:340`）。CR-05 拆分保留：尾部有新日时头部不压制尾部。
 
 > **CR5 修复的需求映射**（CR5 未新增需求编号，其修复回填到既有需求）：
 > CR5-1 → R15；CR5-2 → R16（新增）；CR5-3 → R17（新增）；CR5-P5 → R5/R16；
