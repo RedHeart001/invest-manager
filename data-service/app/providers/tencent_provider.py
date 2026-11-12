@@ -12,8 +12,10 @@
 
 import os
 import re
+from contextlib import contextmanager
 
 import requests
+from requests.exceptions import RequestException
 
 from ..utils.timeutil import beijing_today
 from .base import BaseProvider, ProviderError, ProviderNotSupported, register_chain
@@ -153,28 +155,44 @@ from ..utils.num import to_float as _num  # noqa: E402
 # `tp.requests = SimpleNamespace(get=...)` 打的仍然是本模块的 `requests` 名）。
 
 
+@contextmanager
+def _as_provider_error(op: str):
+    """CR10-28：网络/HTTP/非法 JSON 归一为 ProviderError——`chain_call` 只认这一族
+    （chain.py:28），原始异常越过降级面会把 fund/us 链上腾讯后面的 sina 整个吃掉。
+
+    只抓这两族、不抓 Exception：调用方与桩用 AssertionError 表达"不该发请求"，宽抓会把
+    编程错误伪装成上游失败（规格明令不许）。RequestException 在导入期绑定——离线套件把
+    本模块的 `requests` 名换成只有 get 的替身，写 `requests.RequestException` 会 AttributeError。
+    """
+    try:
+        yield
+    except (RequestException, ValueError) as e:
+        raise ProviderError(f"tencent {op} failed: {type(e).__name__}: {e}") from e
+
+
 def fetch_quote_fields(symbols: list[str], timeout: float = REQ_TIMEOUT) -> dict[str, list[str]]:
     """`qt.gtimg.cn/q=<sym>` 批量现价，返回 `{symbol: 字段数组}`；一条都没有时抛 ProviderError。"""
     # NO_PROXY=* 已在 main 侧设置，这里直连国内源
     out: dict[str, list[str]] = {}
-    for i in range(0, len(symbols), 60):  # 腾讯单次建议 ≤60 个
-        chunk = symbols[i : i + 60]
-        r = requests.get(
-            "https://qt.gtimg.cn/q=" + ",".join(chunk),
-            timeout=timeout,
-            headers={"User-Agent": "Mozilla/5.0"},
-        )
-        r.raise_for_status()
-        text = r.content.decode("gbk", errors="ignore")
-        for line in text.split(";"):
-            line = line.strip()
-            if not line.startswith("v_"):
-                continue
-            head, _, payload = line.partition("=")
-            sym = head[2:]
-            fields = payload.strip().strip('"').split("~")
-            if len(fields) > 34:
-                out[sym] = fields
+    with _as_provider_error("quote"):
+        for i in range(0, len(symbols), 60):  # 腾讯单次建议 ≤60 个
+            chunk = symbols[i : i + 60]
+            r = requests.get(
+                "https://qt.gtimg.cn/q=" + ",".join(chunk),
+                timeout=timeout,
+                headers={"User-Agent": "Mozilla/5.0"},
+            )
+            r.raise_for_status()
+            text = r.content.decode("gbk", errors="ignore")
+            for line in text.split(";"):
+                line = line.strip()
+                if not line.startswith("v_"):
+                    continue
+                head, _, payload = line.partition("=")
+                sym = head[2:]
+                fields = payload.strip().strip('"').split("~")
+                if len(fields) > 34:
+                    out[sym] = fields
     if not out:
         raise ProviderError("tencent quote empty")
     return out
@@ -205,17 +223,18 @@ def fields_to_quote(source: str, type_: str, code: str, f: list[str]) -> dict:
 
 def fetch_minute_payload(sym: str, timeout: float = REQ_TIMEOUT) -> tuple[str, list[str]]:
     """`ifzq.gtimg.cn/appstock/app/minute/query` 的当日分时原始体，返回 `(归属日, 行)`。"""
-    r = requests.get(
-        "https://ifzq.gtimg.cn/appstock/app/minute/query",
-        params={"code": sym},
-        timeout=timeout,
-        headers={"User-Agent": "Mozilla/5.0"},
-    )
-    r.raise_for_status()
-    payload = ((r.json() or {}).get("data") or {}).get(sym) or {}
-    rows = ((payload.get("data") or {}).get("data")) or []
-    day = str((payload.get("data") or {}).get("date") or "")
-    return day, rows
+    with _as_provider_error("minute"):
+        r = requests.get(
+            "https://ifzq.gtimg.cn/appstock/app/minute/query",
+            params={"code": sym},
+            timeout=timeout,
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+        r.raise_for_status()
+        payload = ((r.json() or {}).get("data") or {}).get(sym) or {}
+        rows = ((payload.get("data") or {}).get("data")) or []
+        day = str((payload.get("data") or {}).get("date") or "")
+        return day, rows
 
 
 def minute_rows_to_candles(day: str, rows: list[str]) -> list[dict]:
@@ -333,15 +352,16 @@ class TencentProvider(BaseProvider):
         # 又不会让上游按窗口长度返回不同形态。窗口过滤交给下面的本地那一段。
         days = 1200
 
-        r = requests.get(
-            "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get",
-            params={"param": f"{sym},day,{s_req},{e_req},{days},qfq"},
-            timeout=REQ_TIMEOUT,
-            headers={"User-Agent": "Mozilla/5.0"},
-        )
-        r.raise_for_status()
-        data = ((r.json() or {}).get("data") or {}).get(sym) or {}
-        rows = data.get("qfqday") or data.get("day") or []
+        with _as_provider_error("kline"):
+            r = requests.get(
+                "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get",
+                params={"param": f"{sym},day,{s_req},{e_req},{days},qfq"},
+                timeout=REQ_TIMEOUT,
+                headers={"User-Agent": "Mozilla/5.0"},
+            )
+            r.raise_for_status()
+            data = ((r.json() or {}).get("data") or {}).get(sym) or {}
+            rows = data.get("qfqday") or data.get("day") or []
         candles = []
         for row in rows:
             # 行格式：[日期, 开, 收, 高, 低, 量, ...]
