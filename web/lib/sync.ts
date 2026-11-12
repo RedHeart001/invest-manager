@@ -49,9 +49,10 @@ export type SyncResult = {
   skipped?: boolean;
   /** CR10-13（`#95` 的甲＋）：这批列表载荷里**同一 `(type,code)` 出现两次以上**的那几枚，
    *  形如 `"crypto:BTCUSDT"`，最多点 20 枚。下面那条 `INSERT … SELECT` 不带 `ON CONFLICT`，
-   *  所以重复码必然把整轮打成回滚——此前账上只有一枚裸 `error` 字符串，谁重复了读不出来。
-   *  **只点名、不改取舍、不碰唯一键**；刻意不住 `note` 里＝`note` 会被 `HotspotFeed.tsx:259` 上屏，
-   *  而"哪几枚 code 重复"是开发者向的数。 */
+   *  所以重复码此前必然把整轮打成回滚——账上只剩一枚裸 `error` 字符串，谁重复了读不出来。
+   *  **CR10-21 起**：同一 `(type,code)` 在写库前由 `keepFirstByTypeCode()` 留**首次出现**，
+   *  重复码不再让整轮回滚；本键仍点名被丢的键（最多 20 枚，去重作用于全部重复）。
+   *  刻意不进 `note`＝`note` 会被 `HotspotFeed.tsx:259` 上屏，而"哪几枚 code 重复"是开发者向的数。 */
   dupCodes?: string[];
 };
 
@@ -174,6 +175,25 @@ export function findDuplicateCodes(rows: { type: string; code: string }[]): stri
   return dups.length > 0 ? dups.slice(0, DUP_CODES_MAX) : undefined;
 }
 
+/** CR10-21（`#95` 乙）：同一 `(type,code)` 保序留**首次出现**那一条。
+ *
+ * 为什么留首条：上游列表顺序有含义（crypto 按市值降序、stock/fund/hk 按主源序），
+ * 且 CR10-15 已把“首次优先”落成 crypto 的名单／单发／批量三处同解；留末次会让
+ * 名单与单发报价各说各话。这里只做确定性 tie-break，不合并字段、不碰唯一键。
+ * 同 code 不同 type 不算重复；返回新数组，不修改入参。
+ */
+export function keepFirstByTypeCode<T extends { type: string; code: string }>(rows: T[]): T[] {
+  const seen = new Set<string>();
+  const out: T[] = [];
+  for (const r of rows) {
+    const key = `${r.type}:${r.code}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(r);
+  }
+  return out;
+}
+
 async function _syncTypeInner(type: string): Promise<SyncResult> {
   const started = Date.now();
   let stageTableName: string | null = null;
@@ -197,7 +217,7 @@ async function _syncTypeInner(type: string): Promise<SyncResult> {
       // 只有带这个声明的载荷才允许通过下面的缩水闸；未声明者原判据一字不动。
       intentionalSubset?: boolean;
     }>("/products", { type }, productsBudgetMs(type));
-    const rows = (data.products ?? []).map((p) => ({
+    let rows = (data.products ?? []).map((p) => ({
       id: randomUUID(),
       type: p.type,
       code: p.code,
@@ -218,8 +238,11 @@ async function _syncTypeInner(type: string): Promise<SyncResult> {
       lastChangePct: null,
       updatedAt: new Date(),
     }));
-    // CR10-13：重复即点名（只数不改）。放在判空与缩水闸之前＝那两条早退也带着这笔读数走。
+    // CR10-13：重复即点名。放在判空与缩水闸之前＝那两条早退也带着这笔读数走。
     dupCodes = findDuplicateCodes(rows);
+    // CR10-21（`#95` 乙）：点名之后立刻按 type:code 留首次出现；不这样做，下面的
+    // INSERT … SELECT 会撞 UNIQUE(type,code) 整轮回滚。去重作用于全部重复，dupCodes 只点前 20。
+    if (dupCodes) rows = keepFirstByTypeCode(rows);
 
     // 空载荷保护（C1）：全量替换前必须判空——上游返回空列表时保留旧数据
     if (rows.length === 0) {

@@ -17,7 +17,7 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
-import { findDuplicateCodes } from "./sync";
+import { findDuplicateCodes, keepFirstByTypeCode } from "./sync";
 
 const SYNC_SRC = readFileSync(
   path.join(path.dirname(fileURLToPath(import.meta.url)), "sync.ts"),
@@ -78,5 +78,43 @@ describe("CR10-13：findDuplicateCodes 与它的接线", () => {
         expect(line, `note 组装那行掺进了 dupCodes：${line}`).not.toContain("dupCodes");
       }
     }
+  });
+});
+
+describe("CR10-21：#95 乙＝同一 (type,code) 留首次出现", () => {
+  it("保序留首条，后一条同键被丢", () => {
+    const rows = [
+      row("crypto", "USDF", "Falcon USD"),
+      row("crypto", "BTCUSDT", "Bitcoin"),
+      row("crypto", "USDF", "Aster USDF"),
+    ];
+    const kept = keepFirstByTypeCode(rows);
+    expect(kept.map((r) => r.name)).toEqual(["Falcon USD", "Bitcoin"]);
+    expect(kept[0]).toBe(rows[0]);
+  });
+
+  it("同 code 不同 type 不算重复，两条都留", () => {
+    const kept = keepFirstByTypeCode([row("fund", "510300"), row("stock", "510300")]);
+    expect(kept).toHaveLength(2);
+  });
+
+  it("空表⇒空表；无重复⇒原样长度", () => {
+    expect(keepFirstByTypeCode([])).toEqual([]);
+    expect(keepFirstByTypeCode([row("hk", "00700"), row("hk", "00001")])).toHaveLength(2);
+  });
+
+  it("去重作用于全部重复，dupCodes 仍只点前 20 枚", () => {
+    const rows = Array.from({ length: 25 }, (_, i) => [row("crypto", `C${i}`), row("crypto", `C${i}`)]).flat();
+    expect(findDuplicateCodes(rows)).toHaveLength(20);
+    expect(keepFirstByTypeCode(rows)).toHaveLength(25);
+  });
+
+  it("接线＝去重必须在点名之后、判空之前", () => {
+    const dupAt = SYNC_SRC.indexOf("dupCodes = findDuplicateCodes(rows)");
+    const dedupeAt = SYNC_SRC.indexOf("if (dupCodes) rows = keepFirstByTypeCode(rows)");
+    const emptyAt = SYNC_SRC.indexOf("if (rows.length === 0)");
+    expect(dupAt).toBeGreaterThan(-1);
+    expect(dedupeAt).toBeGreaterThan(dupAt);
+    expect(dedupeAt).toBeLessThan(emptyAt);
   });
 });
