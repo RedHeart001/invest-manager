@@ -40,6 +40,7 @@ def backup(source: str, outdir: str) -> str:
     ts = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
     dest = os.path.join(outdir, f"dev-{ts}.db")
     src = _connect_ro(source)
+    error: sqlite3.DatabaseError | None = None
     try:
         dst = sqlite3.connect(dest)
         try:
@@ -50,22 +51,24 @@ def backup(source: str, outdir: str) -> str:
                 try:
                     src.backup(dst)
                 except sqlite3.DatabaseError as e:
-                    print(f"[backup] 源库读取失败（损坏/非 SQLite）：{e}", file=sys.stderr)
-                    return ""
-            integrity = dst.execute("PRAGMA integrity_check").fetchone()
+                    error = e
+            integrity = None if error else dst.execute("PRAGMA integrity_check").fetchone()
         finally:
             dst.close()
     finally:
         src.close()
 
-    size = os.path.getsize(dest)
-    ok = bool(integrity) and integrity[0] == "ok"
-    print(f"[backup] 输出：{dest}（{size} bytes，integrity_check={integrity[0] if integrity else 'n/a'}）")
+    if error:
+        print(f"[backup] 源库读取失败（损坏/非 SQLite）：{error}", file=sys.stderr)
+    else:
+        size = os.path.getsize(dest)
+        print(f"[backup] 输出：{dest}（{size} bytes，integrity_check={integrity[0] if integrity else 'n/a'}）")
+    ok = not error and bool(integrity) and integrity[0] == "ok"
     if not ok:
         # CR4（2026-09-15 review）：校验失败时清理损坏产物，避免 --list 时残留不可区分
         try:
             os.remove(dest)
-            print("[backup] 完整性校验失败，已删除损坏产物", file=sys.stderr)
+            print("[backup] 备份失败，已删除无效产物", file=sys.stderr)
         except OSError:
             pass
         return ""

@@ -18,6 +18,7 @@ import sys
 import tempfile
 import time
 from datetime import datetime, timedelta
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))) + "/scripts")
@@ -54,20 +55,23 @@ def test_backup_integrity_and_corrupt_cleanup() -> None:
         good_db = os.path.join(tmp, "good.db")
         _make_db(good_db)
         outdir = os.path.join(tmp, "out")
-        dest = backup_db.backup(good_db, outdir)
-        check("D1：正常库备份成功且产出存在", dest and os.path.exists(dest), str(dest))
-        con = sqlite3.connect(dest)
-        try:
-            n = con.execute("SELECT COUNT(*) FROM t").fetchone()[0]
-        finally:
-            con.close()
-        check("D1：备份内容完整（3 行）", n == 3, str(n))
+        # 强制两次调用使用不同文件名，避免同秒覆盖把失败产物残留伪装成通过。
+        with patch("backup_db.dt.datetime") as mock_datetime:
+            mock_datetime.now.side_effect = [datetime(2026, 1, 1, 0, 0, 0), datetime(2026, 1, 1, 0, 0, 1)]
+            dest = backup_db.backup(good_db, outdir)
+            check("D1：正常库备份成功且产出存在", dest and os.path.exists(dest), str(dest))
+            con = sqlite3.connect(dest)
+            try:
+                n = con.execute("SELECT COUNT(*) FROM t").fetchone()[0]
+            finally:
+                con.close()
+            check("D1：备份内容完整（3 行）", n == 3, str(n))
 
-        # 损坏源：非 SQLite 文件
-        bad_db = os.path.join(tmp, "bad.db")
-        with open(bad_db, "wb") as f:
-            f.write(b"this is not a sqlite database" * 10)
-        dest2 = backup_db.backup(bad_db, outdir)
+            # 损坏源：非 SQLite 文件
+            bad_db = os.path.join(tmp, "bad.db")
+            with open(bad_db, "wb") as f:
+                f.write(b"this is not a sqlite database" * 10)
+            dest2 = backup_db.backup(bad_db, outdir)
         check("D1：损坏源备份失败返回空", dest2 == "", str(dest2))
         # CR9-15：原断言末尾挂着 `or True` → 恒真，把这条防线变成了假覆盖（C34）。
         # 去掉后按真实语义断：失败路径不得在 out 目录留下新的 dev-* 产物。
