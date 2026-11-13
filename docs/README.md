@@ -1,83 +1,49 @@
 # Invest Manager 文档导航
 
-> **这份文件是给主人和 AI 工具的统一入口**——30 秒知道项目是什么、当前状态、去哪里找什么。
-> 其他文件都是"按需查阅"，不需要通读。
+> 统一入口：30 秒知道项目是什么、去哪里找什么。逐项状态只在 [FIX-LEDGER.md](FIX-LEDGER.md) 维护。
 
 ## 项目是什么
 
-个人投资理财辅助 Agent。四条原始需求：热点推送 / 智能搜索 / 产品详情页 / 金融分析 Agent。
-- **web/**：Next.js 15（App Router）+ React 19 + Prisma/SQLite —— 界面 + BFF，**唯一对外端口**，也是**唯一写库方**
-- **data-service/**：FastAPI **无业务状态的取数服务**（**不写业务库**——写库方只有 web；它会写自己的运行时状态文件与库快照，都在 `.gitignore` 内，口径见 [PLAN.md](PLAN.md)「为什么 data-service 不需要数据库配置」；compose 网络内 `expose 8000` 不发布到宿主机，采集结果经 HTTP 回调 web 落库）
-- **LLM**：OpenAI 兼容端点（DeepSeek/GLM）
-- **数据源**：akshare（东财/腾讯/新浪）、Tavily、yfinance 等免费源，全部走多源降级
+个人投资理财辅助 Agent：热点推送 / 智能搜索 / 产品详情页 / 金融分析 Agent。
 
-## 当前状态（随 FIX-LEDGER 同步）
+- **web/**：Next.js 15（App Router）+ React 19 + Prisma/SQLite；界面 + BFF，唯一对外端口和唯一写库方。
+- **data-service/**：FastAPI 无业务状态取数服务，不写业务库；运行时状态与库快照在 `.gitignore` 内。Compose 网络内 `expose 8000`，不发布到宿主机；采集结果经 HTTP 回调 web 落库。
+- **LLM**：OpenAI 兼容端点（DeepSeek/GLM）。
+- **数据源**：akshare（东财/腾讯/新浪）、Tavily、yfinance 等，走多源降级。
 
-> **【已搬归档】** - **当前轮次**：**CR10**（CR9 已于 10- —— 正文见 [2026-11-08-readme-当前状态块归档-1108.md](history/2026-11-08-readme-当前状态块归档-1108.md)（体量治理：整块搬迁，原地只留指针）。
+## 当前短摘要
 
-> **【已搬归档】** - **当前轮次**：**CR10**（CR9 已于 10- —— 正文见 [2026-11-08-readme-当前状态块1108下午轮归档.md](history/2026-11-08-readme-当前状态块1108下午轮归档.md)（体量治理：整块搬迁，原地只留指针）。
+P0–P7 主功能已完成。CR10-23～32 均已有代码与定向验证，但完整验收和交付未完成；隔离 P0 冷启动不能替代完整七套、真实 LLM、真实容器或自然调度证据。
 
-> **【已搬归档】** - **当前轮次**：**CR10**（CR9 已于 10- —— 正文见 [2026-11-12-readme-当前状态块1112轮归档.md](history/2026-11-12-readme-当前状态块1112轮归档.md)（体量治理：整块搬迁，原地只留指针）。
-
-> **【已搬归档】** - **当前轮次**：**CR10**（CR9 已于 10- —— 正文见 [2026-11-12-readme-当前状态块1112上午轮归档.md](history/2026-11-12-readme-当前状态块1112上午轮归档.md)（体量治理：整块搬迁，原地只留指针）。
-
-> **【已搬归档】** - **当前轮次**：**CR10**（CR9 已于 10- —— 正文见 [2026-11-12-readme-当前状态块1112傍晚轮.md](history/2026-11-12-readme-当前状态块1112傍晚轮.md)（体量治理：整块搬迁，原地只留指针）。
-
-> **【已搬归档】** - **当前轮次（11-12 20:54）**：**CR10 —— 正文见 [2026-11-12-readme-当前状态块1112深夜轮归档.md](history/2026-11-12-readme-当前状态块1112深夜轮归档.md)（体量治理：整块搬迁，原地只留指针）。
-
-> **【已搬归档】** - **当前轮次（11-12 23:3x）**：**CR10 —— 正文见 [2026-11-13-readme-当前状态块1113凌晨轮归档.md](history/2026-11-13-readme-当前状态块1113凌晨轮归档.md)（体量治理：整块搬迁，原地只留指针）。
-
-> **【已搬归档】** - **当前轮次（11-13 01:0x）**：**CR10 —— 正文见 [2026-11-13-readme-当前状态块1113凌晨轮归档.md](history/2026-11-13-readme-当前状态块1113凌晨轮归档.md)（体量治理：整块搬迁，原地只留指针）。
-
-> **【已搬归档】** - **当前轮次（11-13 01:1x）**：**CR10 —— 正文见 [2026-11-13-readme-当前状态块1113凌晨轮归档.md](history/2026-11-13-readme-当前状态块1113凌晨轮归档.md)（体量治理：整块搬迁，原地只留指针）。
-
-> **【已搬归档】** - **当前轮次（11-13 01:3x）**：**CR10 —— 正文见 [2026-11-13-readme-当前状态块1113凌晨轮归档.md](history/2026-11-13-readme-当前状态块1113凌晨轮归档.md)（体量治理：整块搬迁，原地只留指针）。
-
-- **当前轮次（11-13 03:0x）**：**CR10**｜阶段1 CR10-23～26 已闭（代码未提交），阶段2 **CR10-27／28 已闭**、CR10-29～30 待办｜下一可用＝**CR10-33**。状态以 [FIX-LEDGER.md](FIX-LEDGER.md) 为准。
-- **已完成（11-13 03:02 闸1 全绿）**：CR10-28 腾讯三处 I/O 边界异常归一（49 枚新套件＋C34 三钻）；tsc 0、vitest 620/620（64 文件）、ds 离线 31 套 1204/1204。回执 `gate1-25-1113-0302.out`。
-- **自然轮（11-13 02:00）**：列表腿 18.7min `partial_failed`（hk 被缩水闸挡回、us 920 页已取全 3342）＋刷新腿 1108s `completed`（hk 无价 1595→125）。读数＝[自然轮明细](history/2026-11-13-0200自然轮读数.md)。
-- **进行中**：CR10-29 HotspotFeed 生命周期、CR10-30 缺失快照判据、CR10-31／32 未开始。
-- **验证边界**：闸1 零出网；CR10-28 未重启 ds ⇒ 无活体探针；③④与阶段4正式浏览器验收未跑。明细＝[CR10-28 轮](history/2026-11-13-cr10-28-腾讯异常归一.md)。
-- **观察项**：CR10-6、crypto 真失败、OPT-3 的 `diverged`／`stale` 等自然现场，不制造故障、不排自动重试。
-- **交付边界**：CR10-28 代码＋测试＋docs 本轮提交并 push（主人已给字）；阶段1 代码与 cr10_25 套件（含 UTF-8 仪器修复）仍未提交。
-- **本块＝重写块**：旧块逐字归档至 [11-13 01:3x 状态](history/2026-11-13-readme-当前状态块1113凌晨轮归档.md)（7 行／772 字符／sha256 前缀 `6ac8c712af3e176d`）。
-
-> **【已搬归档】** - **当前轮次**：CR9（开放）；CR8 已收尾 —— 正文见 [2026-11-02-readme-当前状态块归档-1102.md](history/2026-11-02-readme-当前状态块归档-1102.md)（体量治理：整块搬迁，原地只留指针）。
+下一动作及全部欠账见 [FIX-LEDGER.md](FIX-LEDGER.md)；执行顺序、隔离和授权边界见 [分级验收与交付任务书](history/2026-11-14-后续分级验收与交付任务书.md)。自然观察项不阻塞确定性修复交付。
 
 ## 文档地图
 
 | 你要做什么 | 读哪个文件 | 说明 |
 |---|---|---|
-| 改需求/设计 | [PLAN.md](PLAN.md) | 需求与设计**唯一来源**——要改行为先看这里是否已定稿 |
-| 改代码 | [CONSTRAINTS.md](CONSTRAINTS.md) | **改代码前必自查**：C1–C36 不得回退的约束、跨服务契约坑、数据源事实（`C1–C34` 那句指"按来源审查轮次分五批"的那 34 条；C35／C36 是 CR10 的两枚新发现，各自独立成块） |
-| 查某功能修了没 | [FIX-LEDGER.md](FIX-LEDGER.md) | 每项修了没、怎么验的；**未闭环看板置顶** |
-| 查某轮发现了什么 | [CODE-REVIEW.md](CODE-REVIEW.md) | **当前开放轮次**的完整发现（轮次号与取号权威＝FIX-LEDGER 状态卡，此处不复述）＋「附录 · 已核验排除的误报」；**CR9 及更早轮次的发现原文已于 11-03 整节搬进 [history/](history/)**，本文件里只剩带标签的指针行 |
-| 回顾执行过程 | [history/](history/) | 按主题归档被压缩的过程材料，[history/README.md](history/README.md) 有索引 |
-| 评估「想做但还没做」的项 | [BACKLOG-PLAN.md](BACKLOG-PLAN.md) | 8 项待办的**可行性＋落地方案＋代价**；不是需求、不是账本，只答"能不能做、怎么落不出事" |
-| 收尾清单（历史快照） | [END_PLAN.md](END_PLAN.md) | 2026-10-23 那轮的收尾计划快照，**已过期、不是现值**——里面的体量数／行号锚／编号一律不采信（11-03 现查实证：它 `:60/:61` 两行指路的 `CODE-REVIEW.md:9` 与 `README.md:29` 两处早已不在那些位置）。现状只看 [FIX-LEDGER.md](FIX-LEDGER.md) 与上表的 BACKLOG-PLAN；距今天数请现查，不在本格钉数字 |
-
-> **【已搬归档】** > **位置更正（10-30，只增这一行；上面表格原句不回改 —— 正文见 [2026-11-02-readme-当前状态块归档-1102.md](history/2026-11-02-readme-当前状态块归档-1102.md)（体量治理：整块搬迁，原地只留指针）。
+| 改需求/设计 | [PLAN.md](PLAN.md) | 需求与设计唯一来源 |
+| 改代码 | [CONSTRAINTS.md](CONSTRAINTS.md) | 不得回退的约束、跨服务契约、数据源事实和部署约束 |
+| 查功能状态与验收欠账 | [FIX-LEDGER.md](FIX-LEDGER.md) | 逐项状态、有效判据、验证门槛的唯一来源 |
+| 查里程碑与真实阻塞 | [PROGRESS.md](PROGRESS.md) | P0–P7 与当前里程碑，不复制逐项状态 |
+| 查当前轮发现 | [CODE-REVIEW.md](CODE-REVIEW.md) | 当前开放轮次完整发现与误报排除表 |
+| 回顾重要事件 | [history/](history/) | 根因、决策、验收、自然窗口与事故报告；[索引](history/README.md) |
+| 评估候选优化 | [BACKLOG-PLAN.md](BACKLOG-PLAN.md) | 候选项的可行性、落地方案与代价，不是当前状态账本 |
+| 查旧收尾计划 | [END_PLAN.md](END_PLAN.md) | 2026-10-23 历史快照，不是现值；其中行号和计数不采信 |
 
 ## 常用命令
 
-- **起服务**：ds＝`cd data-service && SYNC_CATCHUP=off HTTPS_PROXY=http://127.0.0.1:7897 PYTHONPATH=. .venv/Scripts/python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000`（**解释器必须是 `.venv/Scripts/python.exe`**——全局 `python` 没有 `apscheduler`，照它起必崩，见 [FIX-LEDGER.md](FIX-LEDGER.md) 待拍板 #73；**不带 `--reload`**、不手设 `NO_PROXY`）／web＝`cd web && npm run dev`
-- **位置更正（10-18 18:3x，只增一行）**＝本配方此前被三处散文指路写成 `README:74`（本文件 :33/:35/:37 那三行，随追加而漂行）⇒ **一律以上面这一行为准**；断链闸看不见这类指路（rules :140 只认 `追加N`／`第 N 项`／链接三形），所以只能在这里点名。
-- **启动期旋钮的归属（10-18 19:2x 新增，只增一行）**＝`HTTPS_PROXY` 这类变量**优先由 `data-service/.env` 供**（`config.py` 的 `load_env()` 用 `setdefault`＝进程环境仍优先于该文件），上面配方里的内联 `SYNC_CATCHUP=off HTTPS_PROXY=…` 从此只用于临时探针与"这一棵到底带了什么"的对账。理由＝依赖它的三处只看 `os.environ`（`crypto_provider.py:38`／`openbb_provider.py:45`／`hotspot/pipeline.py:74`），不经配方起的那一棵（手动 uvicorn／换机／compose）此前会静默走"没有代理"分支＝海外源腿不掉消息地缺席。
-- **跑测试**：web `npx tsc --noEmit && npx vitest run`；ds 离线套件逐套 `exit=0`；集成 `node web/scripts/verify-all.mjs`。**点名的套件清单与各项现值只读 [FIX-LEDGER.md](FIX-LEDGER.md)「验证门槛（权威现值）」**——本文件不复述计数（计数会随重组漂移）
-- **查状态**：`curl :8000/health`（ds）、`curl :3000/api/health`（web）
+- **起 DS**：`cd data-service && PYTHONPATH=. .venv/Scripts/python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000`。解释器须为 `.venv/Scripts/python.exe`；dev 不加 `--reload`。启动前按任务书检查补跑开关、热点日键、同步状态和备份新鲜度，避免未授权外部任务。
+- **起 Web**：`cd web && npm run dev`。
+- **离线门禁**：`node scripts/gate.mjs --offline`。
+- **Web 测试**：`cd web && npx tsc --noEmit && npx vitest run`。
+- **完整集成**：`node web/scripts/verify-all.mjs`。会写库并可能触发真实行情、热点、研报或 LLM，只能按授权在隔离实例运行，不得直接对开发实例执行。
+- **健康检查**：`curl :8000/health`、`curl :3000/api/health`。
+- **docs 检查**：`python scripts/docs-scan.py`、`python scripts/docs-scan.py --selftest`。
+
+各套件边界与验收条件见 [FIX-LEDGER.md](FIX-LEDGER.md)「验证门槛（权威现值）」。
 
 ## 文档维护约定
 
-- **"当前状态"节**：随 [FIX-LEDGER.md](FIX-LEDGER.md) 的未闭环看板与待拍板区同步更新（每次轮次推进、未闭环项增减、待拍板变化时）
-- **其他节**：基本不变（项目结构、文档地图、常用命令稳定）
-- **历史归档**：被压缩的过程材料一律进 [history/](history/)，并在 [history/README.md](history/README.md) 加索引行
-
-## 历史在哪
-
-[history/](history/) 按主题归档被压缩的过程材料：
-- 执行明细（如 `2026-09-18-cr6-批次ABCD执行明细.md`）
-- 已闭环轮次发现（如 `2026-10-08-code-review-已闭环轮次归档.md`）
-- 早期日志（如 `2026-10-08-progress-进度日志归档.md`）
-- 一次性操作记录（如 `2026-09-19-ops-港股排障记录.md`）
-
-检索方式：按文件名（日期 + 主题）或 [history/README.md](history/README.md) 的索引表。
+- 状态只在 [FIX-LEDGER.md](FIX-LEDGER.md) 更新；本文件只留导航与短摘要。
+- 普通旧状态由 Git 保存，不再为每次现值重写生成机械归档和指针。
+- [history/](history/) 只保留有长期价值的根因、决策、验收、自然窗口、事故报告与前向任务书；重要报告不做摘要重写。
