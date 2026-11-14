@@ -40,16 +40,23 @@ def _primary(type_: str):
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    # P3：启动热点调度（盘前/盘后 + 启动补跑）
-    hotspot_scheduler.start_scheduler()
-    # G2（批次 D）：启动产品主数据每日同步调度（含启动补跑）
-    sync_scheduler.start_scheduler()
-    # ①（2026-10-02）＋ #54 乙：启动 dev.db 每日备份调度；10-18 更正原句「**无补跑**」＝03:30 档无 misfire 补跑，但启动时 `startup_catch_up()` 必跑一次＋每小时复查会补
-    backup_scheduler.start_scheduler()
-    yield
-    hotspot_scheduler.shutdown_scheduler()
-    sync_scheduler.shutdown_scheduler()
-    backup_scheduler.shutdown_scheduler()
+    # 默认保持日常调度；仅隔离部署显式 SCHEDULERS_ENABLED=0 时跳过三类启动补跑。
+    # 该开关不关闭手动端点，隔离验收仍不得调用真实行情/热点/研报端点。
+    schedulers_enabled = os.environ.get("SCHEDULERS_ENABLED", "1").strip().lower() not in {"0", "false", "off"}
+    if schedulers_enabled:
+        # P3：启动热点调度（盘前/盘后 + 启动补跑）
+        hotspot_scheduler.start_scheduler()
+        # G2（批次 D）：启动产品主数据每日同步调度（含启动补跑）
+        sync_scheduler.start_scheduler()
+        # ①（2026-10-02）＋ #54 乙：启动 dev.db 每日备份调度；含启动/每小时落后补跑
+        backup_scheduler.start_scheduler()
+    try:
+        yield
+    finally:
+        if schedulers_enabled:
+            hotspot_scheduler.shutdown_scheduler()
+            sync_scheduler.shutdown_scheduler()
+            backup_scheduler.shutdown_scheduler()
 
 
 app = FastAPI(title="invest-manager data-service", version="0.5.0", lifespan=lifespan)

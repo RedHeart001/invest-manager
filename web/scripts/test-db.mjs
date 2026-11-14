@@ -5,6 +5,9 @@ import { PrismaClient } from "@prisma/client";
 
 const p = new PrismaClient();
 const results = [];
+const coldStart = process.argv.includes("--cold");
+const minimalFixture = process.argv.includes("--minimal");
+if (coldStart && minimalFixture) throw new Error("--cold 与 --minimal 不能同时使用");
 
 function check(name, cond, detail = "") {
   results.push([name, !!cond, detail]);
@@ -106,11 +109,17 @@ try {
       sum === total,
       `sum=${sum} total=${total} grouped=${JSON.stringify(grouped)}`,
     );
-    check(
-      "已有主数据的类型未跌回 0 行（stock/fund/bond/us）",
-      ["stock", "fund", "bond", "us"].every((t) => counts[t] > 0),
-      `counts=${JSON.stringify(counts)}`,
-    );
+    if (coldStart) {
+      check("冷启动：迁移后的 Product 为空（不伪称已有主数据）", total === 0, `total=${total}`);
+    } else if (minimalFixture) {
+      check("受控最小主数据：仅 stock/us 各一条合成记录", counts.stock === 1 && counts.us === 1 && total === 2, `total=${total}`);
+    } else {
+      check(
+        "已有主数据的类型未跌回 0 行（stock/fund/bond/us）",
+        ["stock", "fund", "bond", "us"].every((t) => counts[t] > 0),
+        `counts=${JSON.stringify(counts)}`,
+      );
+    }
     console.log(
       `  主数据类型完整率 ${present.length}/6｜${ALL_TYPES.map((t) => `${t}=${counts[t]}`).join(" ")}` +
         (missing.length ? `｜缺口：${missing.join(",")}（可达性属 CR9-26，未静默）` : ""),

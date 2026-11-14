@@ -52,6 +52,22 @@ describe("checkRequestOrigin（CR-08）", () => {
     expect(r).toMatch(/cross-site/);
   });
 
+  it("Docker 回环非默认端口：Origin 等于实际 Host 即放行，即使 nextUrl 是容器内地址", () => {
+    expect(checkRequestOrigin(req({
+      origin: "http://127.0.0.1:33024",
+      host: "127.0.0.1:33024",
+      self: "http://localhost:3000",
+    }))).toBeNull();
+  });
+
+  it("实际 Host 不同仍拒绝跨站，不用 nextUrl 的容器内地址误放行", () => {
+    expect(checkRequestOrigin(req({
+      origin: "http://localhost:3000",
+      host: "127.0.0.1:33024",
+      self: "http://localhost:3000",
+    }))).toMatch(/cross-site/);
+  });
+
   it("合法 URL 但非法 Origin 值（不可解析）→ 放行（不误伤）", () => {
     expect(checkRequestOrigin(req({ origin: "not-a-url" }))).toBeNull();
   });

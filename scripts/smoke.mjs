@@ -97,7 +97,7 @@ async function main() {
       unseeded = true;
       console.log(
         `     ⚠ 产品主数据为空（全新数据卷的预期状态，库内 ${total} 条）→ 请先执行：\n` +
-          `       curl -X POST ${BASE}/api/sync      # 全量同步约 3~8 分钟（受外部源限流影响）`,
+          `       curl -X POST -H 'x-write-token: <WRITE_TOKEN>' ${BASE}/api/sync  # 全量同步；占位符请本地替换，勿提交密钥`,
       );
     }
   }
@@ -142,7 +142,7 @@ async function main() {
   console.log(`\n== 冒烟结果：${passed} 通过 / ${failed} 失败 ==`);
   if (unseeded) {
     console.log("⚠ 数据未初始化：容器冒烟通过，但产品主数据为空（搜索无结果属预期）。");
-    console.log(`   执行 curl -X POST ${BASE}/api/sync 同步后再跑一次本脚本即可全绿。`);
+    console.log(`   执行 curl -X POST -H 'x-write-token: <WRITE_TOKEN>' ${BASE}/api/sync 后再跑本脚本（勿提交密钥）。`);
   }
   if (failures.length) {
     console.log("\n失败项：");

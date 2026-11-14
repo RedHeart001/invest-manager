@@ -1,7 +1,7 @@
 // 状态确认：串行跑全部 web 集成套件并汇总
 import { spawnSync } from "node:child_process";
-import { writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const suites = ["test-db.mjs", "test-p1.mjs", "test-p2.mjs", "test-p3.mjs", "test-p4.mjs", "test-p6.mjs", "test-p5.mjs"];
@@ -12,6 +12,9 @@ const suites = ["test-db.mjs", "test-p1.mjs", "test-p2.mjs", "test-p3.mjs", "tes
 // 且那行错误被下面的 tail 过滤正则吃掉，输出只剩"exit=1 断言 0/18"——今天就是这样
 // 白跑了一轮才查明。跑哪个目录都该得到同一结果，这是门禁可复现性的底线（CR9-34 同族）。
 const WEB_DIR = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPORT_DIR = process.env.VERIFY_REPORT_DIR ? resolve(process.env.VERIFY_REPORT_DIR) : WEB_DIR;
+const TEST_BASE = process.env.TEST_BASE ?? "http://localhost:3000";
+const WEB_URL = process.env.WEB_URL ?? TEST_BASE;
 
 // CR9-25：这些套件过去只打印"通过 X"，而 X = **实际执行到的断言数**——被条件分支跳过的
 // 断言既不失败也不计数，于是"全绿"≠"全跑"（09-26 实证：test-p5 串行 17、单跑 21，
@@ -124,7 +127,8 @@ for (const s of suites) {
     cwd: WEB_DIR,
     encoding: "utf8",
     timeout: 20 * 60 * 1000,
-    env: { ...process.env, TEST_BASE: "http://localhost:3000", WEB_URL: "http://localhost:3000" },
+    // CR10-31：隔离启动器显式下发地址；不再强制覆盖为开发实例。
+    env: { ...process.env, TEST_BASE, WEB_URL },
   });
   const out = `${r.stdout ?? ""}\n${r.stderr ?? ""}`;
   // tail 必须保住"跳过"解释行，否则缺口只剩一个数字（CR9-36）；
@@ -172,9 +176,10 @@ const bj = new Intl.DateTimeFormat("en-GB", {
 const g = (t) => bj.find((x) => x.type === t)?.value ?? "00";
 const detailName = `verify-suites-${g("month")}${g("day")}-${g("hour")}${g("minute")}.txt`;
 const detail = lines.join("\n");
-writeFileSync(join(WEB_DIR, "verify-suites.txt"), detail, "utf8");
-writeFileSync(join(WEB_DIR, detailName), detail, "utf8");
-console.log(`逐套明细：最新＝web/verify-suites.txt｜本轮另存＝web/${detailName}（gitignored，不覆写历史）`);
+mkdirSync(REPORT_DIR, { recursive: true });
+writeFileSync(join(REPORT_DIR, "verify-suites.txt"), detail, "utf8");
+writeFileSync(join(REPORT_DIR, detailName), detail, "utf8");
+console.log(`逐套明细目录：${REPORT_DIR}（最新＋带时刻副本，不覆写历史）`);
 if (gaps.length) {
   // 不静默：绿色数字里混着"根本没跑"的断言，正是 CR9-25 要消灭的假闭环
   console.log(`\n!!! 断言缺口（全绿不等于全跑）：\n  - ${gaps.join("\n  - ")}`);

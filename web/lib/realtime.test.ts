@@ -15,6 +15,7 @@ import {
   REALTIME_BUDGET_MS,
   REALTIME_TEXT,
   displayPrice,
+  hasValidPrice,
   isStale,
   lastUpdateStamp,
   mergeTick,
@@ -118,6 +119,41 @@ describe("规则③：拉不到就交最后已知值", () => {
   it("🔁 反向：不做这一步 merge ⇒ 每 6 跳闪灭一次（那是自家节奏造成的闪，不是上游没数据）", () => {
     const raw = resp({ parts: ["price"], hasTodayData: null, intradayDateIsToday: null, intraday: null });
     expect(stripVisible(raw)).toBe(false);
+  });
+
+  it("CR10-26：只有有限数值报价才刷新成功时刻", () => {
+    expect(hasValidPrice(resp())).toBe(true);
+    expect(hasValidPrice(resp({ price: null }))).toBe(false);
+    expect(hasValidPrice(resp({ price: { ...resp().price!, price: null } }))).toBe(false);
+    expect(hasValidPrice(resp({ price: { ...resp().price!, price: Number.NaN } }))).toBe(false);
+  });
+
+  it("CR10-26：HTTP 200 空价保留最后价、报价时刻、分时与可见状态", () => {
+    const previous = resp();
+    const merged = mergeTick(previous, resp({
+      observedAt: "2026-10-13T09:31:12",
+      price: null,
+      intraday: null,
+      hasTodayData: false,
+      intradayDateIsToday: false,
+      degraded: true,
+    }));
+    expect(merged.price).toBe(previous.price);
+    expect(merged.observedAt).toBe(previous.observedAt);
+    expect(merged.intraday).toBe(previous.intraday);
+    expect(merged.hasTodayData).toBe(true);
+    expect(stripVisible(merged)).toBe(true);
+    expect(displayPrice(merged)).toBe(1250);
+    expect(lastUpdateStamp(merged)).toBe("09:31:00");
+  });
+
+  it("CR10-26🔁：首次空价不编旧值；后续有效报价正常替换并刷新成功时刻", () => {
+    const empty = resp({ price: null, hasTodayData: false, intraday: null });
+    const first = mergeTick(null, empty);
+    expect(first).toBe(empty);
+    expect(displayPrice(first)).toBeNull();
+    const recovered = mergeTick(first, resp({ price: { ...resp().price!, price: 1252 } }));
+    expect(displayPrice(recovered)).toBe(1252);
   });
 
   it("取过分时的那一跳整份换（旧曲线不许盖住新曲线）", () => {

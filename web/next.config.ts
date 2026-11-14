@@ -1,4 +1,10 @@
 import type { NextConfig } from "next";
+import { isAbsolute, relative } from "node:path";
+
+const isolatedDist = process.env.NEXT_DIST_DIR;
+if (isolatedDist && (isAbsolute(isolatedDist) || relative(process.cwd(), isolatedDist).startsWith(".."))) {
+  throw new Error("NEXT_DIST_DIR 必须是 web 项目内的相对路径（Next distDir 限制）");
+}
 
 // CR9-58（#31 选 A）：`dev.db` 就住在 Next dev 的监听目录里（web/prisma/），
 // **每一次写库都会触发一次全量重编译**（10-03 与 10-04 两次对照实验：30 次纯 GET
@@ -7,6 +13,11 @@ import type { NextConfig } from "next";
 // 同步一次写 5571 行 ⇒ 那几分钟页面上是"偶发 500/白屏"。
 // 主人的口径＝排除监听，**不挪库**（不动数据位置、不动 DATABASE_URL，单点可回退）。
 const nextConfig: NextConfig = {
+  // CR10-31：隔离验收不得与开发实例共用 .next；仅由启动器显式指定。
+  ...(isolatedDist ? { distDir: isolatedDist } : {}),
+  // CR10-31：Next dev 会自动向 tsconfig 写入 distDir 类型路径；隔离启动器显式
+  // 指向临时副本，避免污染仓库。未设置时沿用 Next 默认 web/tsconfig.json。
+  ...(process.env.NEXT_TSCONFIG_PATH ? { typescript: { tsconfigPath: process.env.NEXT_TSCONFIG_PATH } } : {}),
   experimental: {
     // 客户端路由缓存：back/forward 时复用已渲染的动态页面（默认 dynamic=0 会
     // 导致返回搜索页时结果丢失、重新请求）

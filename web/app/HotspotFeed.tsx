@@ -111,29 +111,55 @@ export default function HotspotFeed({
   const [error, setError] = useState<string | null>(null);
   const [flash, setFlash] = useState<string | null>(null);
   const esRef = useRef<EventSource | null>(null);
-  // CR4（P3）：触发轮询期间的卸载取消标志
-  const pollAliveRef = useRef(true);
-  useEffect(() => () => {
-    pollAliveRef.current = false;
+  const mountedRef = useRef(false);
+  const dateRef = useRef(date);
+  dateRef.current = date;
+
+  // CR10-29：每次刷新独占一个代次。新刷新或新 digest 会使旧请求失效并中止，
+  // 旧响应即使更晚返回也不能覆盖新状态；finally 也只能收尾自己的代次。
+  const refreshSeqRef = useRef(0);
+  const refreshAbortRef = useRef<AbortController | null>(null);
+  const triggerSeqRef = useRef(0);
+  const triggerAbortRef = useRef<AbortController | null>(null);
+  const triggeringRef = useRef(false);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      refreshSeqRef.current += 1;
+      triggerSeqRef.current += 1;
+      refreshAbortRef.current?.abort();
+      triggerAbortRef.current?.abort();
+    };
   }, []);
 
   const refresh = useCallback(async () => {
+    if (!mountedRef.current) return;
+    const seq = ++refreshSeqRef.current;
+    refreshAbortRef.current?.abort();
+    const controller = new AbortController();
+    refreshAbortRef.current = controller;
+    const alive = () => mountedRef.current && refreshSeqRef.current === seq;
     setPending(true);
     setError(null);
     try {
-      const res = await fetch(`/api/hotspots?date=${date ?? ""}&limit=30`);
+      const res = await fetch(`/api/hotspots?date=${dateRef.current ?? ""}&limit=30`, {
+        signal: controller.signal,
+      });
       const body = await res.json();
+      if (!alive()) return;
       if (!res.ok) throw new Error(body.error ?? res.statusText);
       setRows((body.rows ?? []) as DigestRow[]);
       setDate((body.date ?? null) as string | null);
     } catch (e) {
+      if (!alive() || controller.signal.aborted) return;
       setError(e instanceof Error ? e.message : "刷新失败");
     } finally {
-      setPending(false);
+      if (alive()) setPending(false);
     }
-  }, [date]);
+  }, []);
 
-  // ref 保存最新 refresh：SSE 订阅 effect 不因 refresh 变化重建（避免反复断连）
   const refreshRef = useRef(refresh);
   useEffect(() => {
     refreshRef.current = refresh;
@@ -149,6 +175,11 @@ export default function HotspotFeed({
           date: string;
           rows: DigestRow[];
         };
+        // digest 是服务端新事实：作废此前的整表刷新，避免旧快照随后覆盖它。
+        refreshSeqRef.current += 1;
+        refreshAbortRef.current?.abort();
+        refreshAbortRef.current = null;
+        setPending(false);
         setRows((prev) => {
           const seen = new Set(prev.map((r) => r.id));
           const fresh = (data.rows ?? []).filter((r) => !seen.has(r.id));
@@ -166,10 +197,13 @@ export default function HotspotFeed({
     // 断线重连后补拉（代码审查修复）：此前 onopen 只置连接状态，断线期间的
     // digest 会漏掉，与 /api/hotspots/stream 的注释承诺不符
     es.onopen = () => {
+      if (!mountedRef.current) return;
       setConnected(true);
-      void refreshRef.current?.();
+      void refreshRef.current();
     };
-    es.onerror = () => setConnected(false);
+    es.onerror = () => {
+      if (mountedRef.current) setConnected(false);
+    };
     return () => {
       es.close();
       esRef.current = null;
@@ -177,6 +211,12 @@ export default function HotspotFeed({
   }, []);
 
   const trigger = useCallback(async () => {
+    if (!mountedRef.current || triggeringRef.current) return;
+    triggeringRef.current = true;
+    const seq = ++triggerSeqRef.current;
+    const controller = new AbortController();
+    triggerAbortRef.current = controller;
+    const alive = () => mountedRef.current && triggerSeqRef.current === seq;
     setTriggering(true);
     setError(null);
     setFlash(null);
@@ -184,12 +224,15 @@ export default function HotspotFeed({
       // 代码审查修复：改走 BFF 代理（此前浏览器直连 data-service，而 P7 容器化
       // 后 data-service 故意不发布端口 → 按钮必然失效）
       // M4：后端改为异步执行——POST 立即返回 accepted，进度经 status 轮询
-      const res = await fetch("/api/hotspots/run", { method: "POST" });
+      const res = await fetch("/api/hotspots/run", {
+        method: "POST",
+        signal: controller.signal,
+      });
       const body = await res.json();
+      if (!alive()) return;
       if (!res.ok) throw new Error(body.detail ?? body.error ?? res.statusText);
       if (body.accepted === false) {
         setFlash("已有热点任务在执行中");
-        setTriggering(false);
         return;
       }
       setFlash("已提交后台抓取，执行中…");
@@ -198,19 +241,27 @@ export default function HotspotFeed({
       const startedAt = Date.now();
       let sawRunning = false;
       for (;;) {
-        // CR4（P3）：卸载后停止轮询（此前循环在组件卸载后仍每 3s 请求直到上限）
-        if (!pollAliveRef.current) break;
+        if (!alive()) return;
         if (Date.now() - startedAt > 240_000) {
           setFlash("抓取超时（仍在后台执行，可稍后刷新查看）");
           break;
         }
-        await new Promise((r) => setTimeout(r, 3000));
-        const st = await fetch("/api/hotspots/status");
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, 3000);
+          controller.signal.addEventListener("abort", () => {
+            clearTimeout(timer);
+            resolve();
+          }, { once: true });
+        });
+        if (!alive()) return;
+        const st = await fetch("/api/hotspots/status", { signal: controller.signal });
         if (!st.ok) continue;
         const sb = (await st.json()) as {
           running?: boolean;
           lastResult?: { topics?: number; ingested?: number; newsSources?: string[]; note?: string; error?: string } | null;
         };
+        if (!alive()) return;
+        if (!st.ok) continue;
         if (sb.running) {
           sawRunning = true;
           continue;
@@ -236,11 +287,13 @@ export default function HotspotFeed({
         break;
       }
     } catch (e) {
+      if (!alive() || controller.signal.aborted) return;
       setError(
         `触发失败：${e instanceof Error ? e.message : "unknown"}（请确认 data-service 已启动）`,
       );
     } finally {
-      setTriggering(false);
+      if (triggerSeqRef.current === seq) triggeringRef.current = false;
+      if (alive()) setTriggering(false);
     }
   }, [refresh]);
 

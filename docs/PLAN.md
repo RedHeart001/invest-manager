@@ -50,7 +50,7 @@
 | 数据库 | SQLite + Prisma（本地单文件，Docker 挂卷持久化） |
 | LLM | OpenAI 兼容接口（base_url / api_key / model 可配置）；目标选型**暂定 DeepSeek + GLM**（2026-09-12，P4 启动时双家 FC spike） |
 | Agent harness | TradingAgents（104k★，多智能体深度研报）+ OpenBB（73k★，美股/加密/宏观数据 SDK） |
-| 部署 | 先本地单机，预留 Docker 化（Dockerfile + docker-compose） |
+| 部署 | **个人本机使用；本机 Docker Compose 是最终日常运行形态**（2026-11-14 主人确认）。仅 Web 绑定 `127.0.0.1`，data-service 不发布宿主机端口，SQLite 使用命名卷，备份落宿主机 `./backups`；不为本机单机提前建设公网鉴权、PostgreSQL 或 Kubernetes。CR10 收稳后优先完成隔离 Docker 验收，再经授权初始化正式卷并迁移为唯一日常实例；开发与 Docker 不得同时写同一数据库。 |
 | 对话称呼 | 用户已定称呼其为"主人"（2026-09-12） |
 
 ## v2 整合设计思路（相对 v1 的三处重构）

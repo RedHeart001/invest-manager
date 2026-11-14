@@ -17,6 +17,7 @@ import {
   PRICE_POLL_MS,
   REALTIME_TEXT,
   displayPrice,
+  hasValidPrice,
   isStale,
   lastUpdateStamp,
   mergeTick,
@@ -64,8 +65,13 @@ export default function RealtimeStrip({
       if (!res.ok) throw new Error(body.error ?? `实时条取数失败（HTTP ${res.status}）`);
       if (seq !== seqRef.current) return;
       setShown((prev) => mergeTick(prev, body));
-      lastOkRef.current = Date.now();
-      setFailCount(0);
+      // CR10-26：HTTP 200 空价仍是一次取数失败，不能刷新成功时刻或掩盖陈旧状态。
+      if (hasValidPrice(body)) {
+        lastOkRef.current = Date.now();
+        setFailCount(0);
+      } else {
+        setFailCount((n) => n + 1);
+      }
       setNowMs(Date.now());
     } catch {
       if (seq === seqRef.current) setFailCount((n) => n + 1);

@@ -150,9 +150,15 @@ export async function startResearch(
     }
   }
 
-  let ds: { taskId?: string; rejected?: string; todayDone?: boolean };
+  type ResearchRejection = {
+    taskId?: string;
+    rejected?: string;
+    reason?: "running" | "today_done" | "capacity";
+    todayDone?: boolean;
+  };
+  let ds: ResearchRejection;
   try {
-    ds = await dsPost<{ taskId?: string; rejected?: string; todayDone?: boolean }>(
+    ds = await dsPost<ResearchRejection>(
       "/research/start",
       { type, code, name: name ?? code },
       30_000,
@@ -162,12 +168,17 @@ export async function startResearch(
     // 而 dsPost 对任何非 2xx 都抛 DataServiceError → rejected 分支曾是死代码，
     // 且被拒会被误写成 failed、丢失 watcher 会话推送。此处特判救活 rejected 语义。
     if (e instanceof DataServiceError && e.status === 409) {
-      const b = (e.body ?? {}) as { rejected?: string; todayDone?: boolean };
-      if (b.todayDone) {
+      const b = (e.body ?? {}) as ResearchRejection;
+      if (b.todayDone || b.reason === "today_done") {
         // 每日限 1 次：库中尚无 done 行（可能由另一实例完成），直接返回原因
         return { status: "rejected", reason: b.rejected ?? "该标的今日已完成深度研究" };
       }
-      // 并发去重：任务仍在执行 → 登记 watcher，兑现"完成后本会话推送"
+      // CR10-25：全局容量满没有创建任务，立即拒绝，不能登记 watcher 让用户空等。
+      if (b.reason === "capacity") {
+        return { status: "rejected", reason: b.rejected ?? "研究任务容量已满，请稍后重试" };
+      }
+      // 并发去重：任务仍在执行 → 登记 watcher，兑现"完成后本会话推送"。
+      // 无结构化 reason 的旧 data-service 响应仍按 running 兼容处理。
       watchResearch(type, code, watcherSessionId);
       return { status: "running", reason: b.rejected ?? "该标的已有研究任务在执行" };
     }
@@ -186,12 +197,15 @@ export async function startResearch(
     return { status: "rejected", reason: `研究任务提交失败：${row.error}` };
   }
 
-  if (ds.rejected && ds.todayDone) {
+  if (ds.rejected && (ds.todayDone || ds.reason === "today_done")) {
     // 每日限 1 次：库中尚无 done 行（可能由另一实例完成），直接返回原因
     return { status: "rejected", reason: ds.rejected };
   }
+  if (ds.rejected && ds.reason === "capacity") {
+    return { status: "rejected", reason: ds.rejected };
+  }
   if (ds.rejected) {
-    // CR4（P3）：被拒但非"当日已完成"（如并发去重：另一实例正在执行）也登记
+    // CR4（P3）：同标的运行任务仍登记
     // 发起会话——否则 chat 仍提示"完成后在会话推送"却推送不到（C8 承诺落空）。
     watchResearch(type, code, watcherSessionId);
     return { status: "running", reason: ds.rejected };

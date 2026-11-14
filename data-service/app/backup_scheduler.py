@@ -211,22 +211,16 @@ def snapshot_defect(outdir: str, src: str) -> str | None:
     判落后**只看 `lastRun` 时刻** ⇒ 这份空壳在 26 小时内一律 `fresh`，**没有任何机器会
     纠正它**，而它是盘上唯一一份（03:30 那班因为进程不在场没跑）。
 
-    回值：`"empty-snapshot"`＝源库有行、最新快照 0 行；`None`＝其余全部情况。
-
-    ⚠️ **刻意不同时判"state 说备过、盘上一个文件都没有"**（`missing-snapshot` 那一支）：
-    本函数只回答"已有的那份能不能用"。多判一支的代价实测到了——套件里有几处
-    `start_scheduler()` 的用例会**预写一份新鲜 state.json 但不放快照**（`test_backup_db.py`
-    的 ② 与 `test_startup_hook_is_wired_into_start_scheduler`），多出来的那一支让它们
-    在 fresh 分支里投出一条**异步补跑线程**，而线程比 test 的 env 还原活得更久 ⇒ 它带着
-    已还原的 `BACKUP_DIR` 落进仓库真的 `backups/`，覆写 `state.json`（2026-11-08 本轮实测：
-    多出一份 49,500,160 字节的快照＋`state.json` 被改成 `runs:1`）。"快照全没了"是另一件事，
-    要靠轮换/删除那条链去查，不在这枚判据里。
+    回值：`"empty-snapshot"`＝源库有行、最新快照 0 行；`"missing-snapshot"`＝目录不存在
+    或没有合规主快照；`None`＝其余全部情况。后一支只由新鲜 state 分支调用：状态说刚备过，
+    盘上却没有产物，不能继续当 fresh。调度注册测试已用合成快照和 request_run 替身隔离，
+    不会为了这一支向真实 backups/ 投递异步线程。
     """
     if not os.path.isdir(outdir):
-        return None
+        return "missing-snapshot"
     names = sorted(f for f in os.listdir(outdir) if SNAPSHOT_NAME.match(f))
     if not names:
-        return None
+        return "missing-snapshot"
     snap_rows = _product_rows(os.path.join(outdir, names[-1]), immutable=True)
     if snap_rows is None or snap_rows > 0:
         return None

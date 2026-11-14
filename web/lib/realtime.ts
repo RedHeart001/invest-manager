@@ -97,8 +97,24 @@ export function partsForTick(tick: number): "price" | "price,intraday" {
  * 为什么需要这一步：只问现价的响应里 `hasTodayData` 是 `null`（"这一轮没看"），
  * 直接整份替换会让这一块每 6 跳闪灭一次——那是自家节奏造成的闪，不是上游没数据。
  */
+export function hasValidPrice(r: RealtimeResponse): boolean {
+  return typeof r.price?.price === "number" && Number.isFinite(r.price.price);
+}
+
 export function mergeTick(prev: RealtimeResponse | null, next: RealtimeResponse): RealtimeResponse {
   if (!prev) return next;
+  if (!hasValidPrice(next)) {
+    // CR10-26：HTTP 200 不代表有报价。保留最后一份有效现价及其采样时刻；
+    // 分时即使本轮请求过也不能用 null 擦掉，否则最后已知值会连同实时条一起消失。
+    return {
+      ...next,
+      observedAt: prev.observedAt,
+      price: prev.price,
+      intraday: prev.intraday,
+      hasTodayData: prev.hasTodayData,
+      intradayDateIsToday: prev.intradayDateIsToday,
+    };
+  }
   if (next.parts.includes("intraday")) return next;
   return {
     ...next,

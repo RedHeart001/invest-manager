@@ -90,11 +90,18 @@ def restore(backup_file: str, target: str) -> bool:
             if not integrity or integrity[0] != "ok":
                 print(f"[restore] 备份文件未通过完整性校验：{integrity}", file=sys.stderr)
                 return False
-            tables = src_check.execute(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='table'"
-            ).fetchone()
-            if not tables or tables[0] == 0:
-                print("[restore] 备份文件不含任何表，拒绝恢复", file=sys.stderr)
+            # CR10-24：任意合法 SQLite 不能冒充本应用备份。Product 是 PLAN 的统一产品
+            # 主表；核心列必须存在，但不要求有数据行（合法冷启动备份也应可恢复）。
+            columns = {
+                row[1]
+                for row in src_check.execute("PRAGMA table_info('Product')").fetchall()
+            }
+            required = {"id", "type", "code", "name"}
+            if not required.issubset(columns):
+                print(
+                    "[restore] 备份文件缺少目标应用的 Product 表或核心列，拒绝恢复",
+                    file=sys.stderr,
+                )
                 return False
         finally:
             src_check.close()
@@ -102,26 +109,30 @@ def restore(backup_file: str, target: str) -> bool:
         print(f"[restore] 备份文件不是有效 SQLite 库：{e}", file=sys.stderr)
         return False
 
-    # 挪走的文件清单：[(现名, 原名)]，回滚时按序全部还原。
+    # 挪走的文件清单：[(现名, 原名)]，回滚时逆序全部还原。
     # 修复（2026-09-14 code review）：此前回滚只还原主库，被挪走的 -wal/-shm
     # 留在 .pre-restore 名下不还原 → WAL 模式下未检查点事务丢失。
     moved: list[tuple[str, str]] = []
     ts = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-    if os.path.exists(target):
-        pre = f"{target}.pre-restore-{ts}"
-        os.replace(target, pre)
-        moved.append((pre, target))
-        print(f"[restore] 原库已改名保留：{pre}")
-    # WAL/SHM 必须一并清理：残留的旧 WAL 会被应用到新库（数据错乱）
-    for suffix in ("-wal", "-shm"):
-        sidecar = target + suffix
-        if os.path.exists(sidecar):
-            sidecar_pre = f"{sidecar}.pre-restore-{ts}"
-            os.replace(sidecar, sidecar_pre)
-            moved.append((sidecar_pre, sidecar))
-
+    write_started = False
     try:
+        # CR10-24：改名本身也属于恢复事务。任一步失败都必须进入同一回滚路径，
+        # 不能留下主库已挪走而 WAL/SHM 还在原处的半恢复现场。
+        if os.path.exists(target):
+            pre = f"{target}.pre-restore-{ts}"
+            os.replace(target, pre)
+            moved.append((pre, target))
+            print(f"[restore] 原库已改名保留：{pre}")
+        # WAL/SHM 必须一并清理：残留的旧 WAL 会被应用到新库（数据错乱）
+        for suffix in ("-wal", "-shm"):
+            sidecar = target + suffix
+            if os.path.exists(sidecar):
+                sidecar_pre = f"{sidecar}.pre-restore-{ts}"
+                os.replace(sidecar, sidecar_pre)
+                moved.append((sidecar_pre, sidecar))
+
         # 用 backup API 反向写回（同样保证一致性）。
+        write_started = True
         # CR4（2026-09-15 review）：改只读打开备份源——此前用读写模式，
         # 会在 /backup 旁生成 -wal/-shm，备份目录只读挂载时直接恢复失败。
         src = _connect_ro(backup_file)
@@ -137,14 +148,16 @@ def restore(backup_file: str, target: str) -> bool:
     except Exception as e:  # noqa: BLE001
         # 失败自动回滚（2026-09-13 加固；2026-09-14 补齐 sidecar 还原）
         print(f"[restore] 恢复失败：{e}；正在回滚", file=sys.stderr)
-        # 先清掉可能已写出一半的新库，再把挪走的文件按序还原
-        try:
-            if os.path.exists(target):
-                os.remove(target)
-        except OSError:
-            pass
-        rollback_errors: list[str] = []
-        for cur, orig in moved:
+        # 先清掉可能已写出一半的新库及其 sidecar，再逆序还原旧文件。
+        cleanup_errors: list[str] = []
+        for path in ((target, target + "-wal", target + "-shm") if write_started else ()):
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+            except OSError as cleanup_error:
+                cleanup_errors.append(f"{path}: {cleanup_error}")
+        rollback_errors: list[str] = cleanup_errors
+        for cur, orig in reversed(moved):
             if not os.path.exists(cur):
                 continue
             try:

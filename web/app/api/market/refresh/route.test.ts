@@ -14,7 +14,7 @@
  *     npx vitest run app/api/market/refresh/route.test.ts
  */
 
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { NextRequest } from "next/server";
 
 const log: string[] = [];
@@ -57,6 +57,8 @@ function emulateRound(types: string[], opts: { onResult?: (r: unknown) => void }
     }),
   );
 }
+
+afterEach(() => { delete process.env.WRITE_TOKEN; });
 
 beforeEach(() => {
   log.length = 0;
@@ -122,6 +124,24 @@ describe("/api/market/refresh 的进度接线（CR9-68／#40 甲）", () => {
     expect(refreshAll).not.toHaveBeenCalled();
     expect(startRefreshProgress).not.toHaveBeenCalled();
     expect(finishRefreshProgress).not.toHaveBeenCalled();
+  });
+
+  it.each([undefined, "wrong-token"])("无/错 token ⇒ 401，刷新与全部进度函数零调用", async (token) => {
+    process.env.WRITE_TOKEN = "synthetic-write-token";
+    const res = await POST(req("?type=all", token ? { "x-write-token": token } : {}));
+    expect(res.status).toBe(401);
+    for (const spy of [refreshAll, startRefreshProgress, recordRefreshResult, finishRefreshProgress]) {
+      expect(spy).not.toHaveBeenCalled();
+    }
+  });
+
+  it("正确 x-write-token 穿过 guard；非法参数 400 且零任务、零进度", async () => {
+    process.env.WRITE_TOKEN = "synthetic-write-token";
+    const res = await POST(req("?type=bogus", { "x-write-token": "synthetic-write-token" }));
+    expect(res.status).toBe(400);
+    for (const spy of [refreshAll, startRefreshProgress, recordRefreshResult, finishRefreshProgress]) {
+      expect(spy).not.toHaveBeenCalled();
+    }
   });
 
   it("跨站 Origin ⇒ 403 同样零进度（CSRF 那道闸仍在写状态位之前）", async () => {

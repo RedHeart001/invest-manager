@@ -80,16 +80,24 @@ def start_research(type_: str, code: str, name: str = "") -> dict:
             if t["status"] == "running" and t["key"] == key
         ]
         if running:
-            return {"rejected": "该标的已有研究任务在执行", "taskId": running[0]["id"]}
+            return {
+                "rejected": "该标的已有研究任务在执行",
+                "reason": "running",
+                "taskId": running[0]["id"],
+            }
         # 每日限 1 次（P5 成本管控）；CR-06：北京时间口径
         if _daily_done.get(key) == beijing_today():
             return {
                 "rejected": "该标的今日已完成一次深度研究（每日限 1 次）",
+                "reason": "today_done",
                 "todayDone": True,
             }
         running_count = sum(1 for t in _tasks.values() if t["status"] == "running")
         if running_count >= MAX_RUNNING:
-            return {"rejected": f"当前执行中的研究任务已达上限（{MAX_RUNNING}）"}
+            return {
+                "rejected": f"当前执行中的研究任务已达上限（{MAX_RUNNING}）",
+                "reason": "capacity",
+            }
 
         _evict_expired()
         task_id = uuid.uuid4().hex[:16]

@@ -47,7 +47,9 @@ export function checkRequestOrigin(req: NextRequest): string | null {
   // 无来源（curl/测试/部分同源请求）：放行
   if (!sourceHost) return null;
 
-  const selfHost = hostOf(req.nextUrl.origin) ?? req.headers.get("host");
+  // Next standalone 在容器内可能把 nextUrl.origin 固定为 localhost:3000，
+  // 而浏览器实际经回环映射端口访问。以请求 Host 为同源基准；不得改信可伪造的 X-Forwarded-Host。
+  const selfHost = req.headers.get("host") ?? hostOf(req.nextUrl.origin);
   if (selfHost && sourceHost === selfHost) return null;
   if (allowedHosts().has(sourceHost)) return null;
 

@@ -117,7 +117,11 @@ export function recordRefreshResult(result: SnapshotResult): void {
   // 所以这里不是把盖章删掉，是把它绑到"这一轮确实写了行"上：**没有写入 ⇒ 不动账本**
   // （既新增不了，也覆盖不了已有的首次时刻）。
   const lastCompleted = prev?.lastCompleted ?? {};
-  if (result.updated > 0) lastCompleted[result.type] = nowIso();
+  // CR10-23：写入过行只证明有进度，不证明整类完成。部分失败仍保留在 done 供归因，
+  // 但不得推进当日完成账本，否则下一次普通触发会被幂等闸门挡住，无法续跑。
+  if (result.updated > 0 && result.failedBatches === 0 && !result.skipped) {
+    lastCompleted[result.type] = nowIso();
+  }
   writeProgress({
     startedAt: prev?.startedAt ?? nowIso(),
     types,

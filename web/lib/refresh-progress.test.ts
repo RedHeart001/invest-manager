@@ -194,6 +194,26 @@ describe("刷新腿进度状态位（CR9-60／#33 甲）", () => {
     expect(hasCompletionLedger()).toBe(false); // 空账本 ⇒ 闸门退回旧判据，而不是"跑完过"
   });
 
+  it("CR10-23：部分批次失败不写完成账本，下一次普通触发仍可续跑", () => {
+    startRefreshProgress(["stock"]);
+    recordRefreshResult(res("stock", { updated: 7, failedBatches: 2 }));
+    const p = readRefreshProgress();
+    expect(p?.done).toHaveLength(1); // 部分结果仍留作观测，不能把失败藏掉
+    expect(p?.lastCompleted.stock).toBeUndefined();
+    expect(completedToday("stock")).toBe(false);
+    expect(hasCompletionLedger()).toBe(false);
+  });
+
+  it("CR10-23🔁：已有完成时刻也不能被后续部分失败轮重新盖章", () => {
+    startRefreshProgress(["stock"]);
+    recordRefreshResult(res("stock"));
+    const first = readRefreshProgress()?.lastCompleted.stock;
+    expect(typeof first).toBe("string");
+    startRefreshProgress(["stock"]);
+    recordRefreshResult(res("stock", { updated: 7, failedBatches: 1 }));
+    expect(readRefreshProgress()?.lastCompleted.stock).toBe(first);
+  });
+
   it("🔁 #36：同一类先有真写入的盖章、后来一轮 updated=0 ⇒ 首次时刻保住不被重盖章，而真写入照常盖", () => {
     startRefreshProgress(["stock", "fund"]);
     recordRefreshResult(res("stock")); // updated=10 ⇒ 盖章

@@ -1,7 +1,7 @@
 # 投资理财助手（Invest Manager）容器编排
 #
 # 用法：
-#   cp .env.example .env        # 填 INGEST_TOKEN / LLM_* / TAVILY_API_KEY（可含代理）
+#   cp .env.example .env        # 填 INGEST_TOKEN / WRITE_TOKEN / LLM_* / TAVILY_API_KEY
 #   docker compose build
 #   docker compose up -d
 #   node scripts/smoke.mjs      # 冒烟（6 段 / 7~8 条断言，见脚本抬头）
@@ -19,16 +19,17 @@ services:
       args:
         # docker.io 直连受限时用国内镜像前缀（可用环境变量覆盖）
         NODE_IMAGE: ${NODE_IMAGE:-docker.m.daocloud.io/library/node:22-bookworm-slim}
-    image: invest-manager-web:local
+    image: ${WEB_IMAGE:-invest-manager-web:local}
     environment:
       NODE_ENV: production
       PORT: "3000"
       TZ: Asia/Shanghai
       # SQLite 落在命名卷内（覆盖 web/.env 的开发态 file:./dev.db）
       DATABASE_URL: file:/app/data/dev.db
-      DATA_SERVICE_URL: http://data-service:8000
+      DATA_SERVICE_URL: ${DATA_SERVICE_URL:-http://data-service:8000}
       # 落库回调共享密钥：两侧同值；未设置时 compose 直接拒绝启动
       INGEST_TOKEN: ${INGEST_TOKEN:?必须在 .env 中设置 INGEST_TOKEN（ingest 回调共享密钥）}
+      WRITE_TOKEN: ${WRITE_TOKEN:?必须在 .env 中设置 WRITE_TOKEN（同步/刷新回调共享密钥）}
       # LLM 与搜索：经 .env 注入，绝不写进镜像
       LLM_BASE_URL: ${LLM_BASE_URL:-}
       LLM_API_KEY: ${LLM_API_KEY:-}
@@ -38,7 +39,7 @@ services:
       SKILLS_DIR: ${SKILLS_DIR:-./skills}
       MCP_CONFIG: ${MCP_CONFIG:-./mcp.json}
     ports:
-      - "${WEB_PORT:-3000}:3000"
+      - "127.0.0.1:${WEB_PORT:-3000}:3000"
     volumes:
       - prisma-data:/app/data
     restart: unless-stopped
@@ -51,18 +52,27 @@ services:
       args:
         # 必须与锁文件生成环境一致（本地开发 venv 为 3.12）
         PY_IMAGE: ${PY_IMAGE:-docker.m.daocloud.io/library/python:3.12-slim}
-    image: invest-manager-data-service:local
+    image: ${DS_IMAGE:-invest-manager-data-service:local}
     # data-service 的启动补跑与落库回调都需要 web 就绪（web 不反向依赖，故无环）
     depends_on:
       web:
         condition: service_healthy
     environment:
       TZ: Asia/Shanghai
+      # 默认开启日常调度；隔离部署显式设 0，避免启动补跑触发外部请求。
+      SCHEDULERS_ENABLED: ${SCHEDULERS_ENABLED:-1}
+      DB_PATH: /data/dev.db
+      BACKUP_DIR: /backup
+      # 三类运行态落盘文件也随隔离卷走，绝不复用开发 runtime。
+      SYNC_STATE_FILE: /data/runtime/sync-state.json
+      HOTSPOT_STATE_FILE: /data/runtime/hotspot-state.json
+      LIMITER_STATE_FILE: /data/runtime/limiter-state.json
       # P6 起 data-service 有 4 条回调 web 的链路：
       #   热点落库 / 研报落库（research ingest）/ 研报回读 web /api/kline / MCP search_products
       WEB_BASE_URL: http://web:3000
       WEB_API_BASE: http://web:3000
       INGEST_TOKEN: ${INGEST_TOKEN:?必须在 .env 中设置 INGEST_TOKEN（ingest 回调共享密钥）}
+      WRITE_TOKEN: ${WRITE_TOKEN:?必须在 .env 中设置 WRITE_TOKEN（同步/刷新回调共享密钥）}
       LLM_BASE_URL: ${LLM_BASE_URL:-}
       LLM_API_KEY: ${LLM_API_KEY:-}
       LLM_MODEL: ${LLM_MODEL:-}
@@ -78,7 +88,7 @@ services:
       # 恢复（--restore）需要写入，故此处必须 rw —— 恢复前务必先 `docker compose stop web`
       - prisma-data:/data
       # 备份输出目录（宿主机 bind mount）
-      - ./backups:/backup
+      - ${BACKUP_HOST_DIR:-./backups}:/backup
     expose:
       - "8000"          # 仅 compose 网络可达，不发布到宿主机
     restart: unless-stopped
@@ -87,7 +97,7 @@ services:
   # ---------------- 可选：MCP HTTP server（供宿主机客户端调用） ----------------
   # 启动：docker compose --profile mcp up -d
   mcp:
-    image: invest-manager-data-service:local
+    image: ${DS_IMAGE:-invest-manager-data-service:local}
     profiles: [mcp]
     depends_on:
       web:
@@ -112,3 +122,5 @@ volumes:
 
 networks:
   app:
+    # 隔离验收可设为 true，阻断容器外网；日常默认保持 false。
+    internal: ${APP_NETWORK_INTERNAL:-false}

@@ -70,7 +70,7 @@ curl http://localhost:3000/api/tools/status
 ## 容器化部署（P7）
 
 ```bash
-cp .env.example .env         # 填 INGEST_TOKEN（openssl rand -hex 24）、LLM_*、TAVILY_API_KEY
+cp .env.example .env         # 填 INGEST_TOKEN / WRITE_TOKEN、LLM_*、TAVILY_API_KEY
 docker compose build         # 首次约 10~20 分钟（npm ci + pip 依赖树）
 docker compose up -d
 node scripts/smoke.mjs       # 冒烟 6 段 / 基础 7 条断言（库内已同步时 8 条）；详见脚本抬头
@@ -84,11 +84,11 @@ docker compose down          # 停止（保留数据卷）
 
 | 项 | 说明 |
 |---|---|
-| 暴露面 | 仅 web（`${WEB_PORT:-3000}`）对外；data-service **不发布端口**，只在 compose 网络内可达 |
+| 暴露面 | 仅 web 绑定回环 `127.0.0.1:${WEB_PORT:-3000}`；data-service **不发布端口**，只在 compose 网络内可达 |
 | 数据 | SQLite 存于命名卷 `prisma-data`（`docker compose down` 不会丢；`down -v` 才会） |
 | 迁移 | web 容器入口自动 `prisma migrate deploy`（空卷首次启动即建库） |
 | 时区 | TZ=Asia/Shanghai（APScheduler 盘前 08:30 / 盘后 16:30 不错时） |
-| 密钥 | 一律经 `.env` 注入，不进镜像；`INGEST_TOKEN` 未设置时 compose 直接拒绝启动 |
+| 密钥 | 一律经 `.env` 注入，不进镜像；`INGEST_TOKEN` / `WRITE_TOKEN` 未设置或为空时 compose 拒绝启动 |
 | 镜像源 | docker.io 直连受限，默认走 `docker.m.daocloud.io` 前缀（可用 `NODE_IMAGE` / `PY_IMAGE` 覆盖） |
 | 代理 | R12 海外源：`.env` 里设 `HTTPS_PROXY=http://host.docker.internal:<port>`；`NO_PROXY` 已含服务名 |
 
@@ -127,7 +127,7 @@ node scripts/test-p4.mjs        # P4 统一 Agent 验收
 node scripts/test-p5.mjs        # P5 深度研究验收
 node scripts/test-p6.mjs        # P6 Skills + MCP 验收（需 web + data-service 在跑）
 cd ../data-service
-.venv/Scripts/python tests/test_p6_mcp.py        # MCP server 工具暴露与降级（离线）
+.venv/Scripts/python tests/test_p6_mcp.py        # MCP 工具暴露/降级；含真实报价请求，须授权后单独运行（非离线）
 .venv/Scripts/python tests/test_p2_m8.py         # 多源降级与限速（离线）
 
 # 闸1（OPT-4）：一条命令跑完四道零出网门禁（tsc／vitest／ds 离线逐套／docs 闸）

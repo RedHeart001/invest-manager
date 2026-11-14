@@ -49,11 +49,28 @@ def _make_db(path: str, rows: int = 3) -> None:
         con.close()
 
 
+def _make_restore_db(path: str, rows: int = 3) -> None:
+    """合法恢复源：具备 Invest Manager 的最低业务 schema（冷启动允许 0 行）。"""
+    con = sqlite3.connect(path)
+    try:
+        with con:
+            con.execute(
+                "CREATE TABLE Product ("
+                "id TEXT PRIMARY KEY, type TEXT NOT NULL, code TEXT NOT NULL, name TEXT NOT NULL)"
+            )
+            con.executemany(
+                "INSERT INTO Product (id, type, code, name) VALUES (?, ?, ?, ?)",
+                [(f"id{i}", "stock", f"60000{i}", f"产品{i}") for i in range(rows)],
+            )
+    finally:
+        con.close()
+
+
 def test_backup_integrity_and_corrupt_cleanup() -> None:
     """① 备份正常 → integrity ok；源损坏 → 失败产物删除不残留。"""
     with tempfile.TemporaryDirectory() as tmp:
         good_db = os.path.join(tmp, "good.db")
-        _make_db(good_db)
+        _make_restore_db(good_db)
         outdir = os.path.join(tmp, "out")
         # 强制两次调用使用不同文件名，避免同秒覆盖把失败产物残留伪装成通过。
         with patch("backup_db.dt.datetime") as mock_datetime:
@@ -62,7 +79,7 @@ def test_backup_integrity_and_corrupt_cleanup() -> None:
             check("D1：正常库备份成功且产出存在", dest and os.path.exists(dest), str(dest))
             con = sqlite3.connect(dest)
             try:
-                n = con.execute("SELECT COUNT(*) FROM t").fetchone()[0]
+                n = con.execute("SELECT COUNT(*) FROM Product").fetchone()[0]
             finally:
                 con.close()
             check("D1：备份内容完整（3 行）", n == 3, str(n))
@@ -88,7 +105,7 @@ def test_restore_rejects_invalid_backup() -> None:
     """② restore 前置验证：非法备份拒绝恢复，线上库原样保留。"""
     with tempfile.TemporaryDirectory() as tmp:
         live_db = os.path.join(tmp, "dev.db")
-        _make_db(live_db, rows=5)
+        _make_restore_db(live_db, rows=5)
         bad_backup = os.path.join(tmp, "bad.db")
         with open(bad_backup, "wb") as f:
             f.write(b"not sqlite at all")
@@ -97,7 +114,7 @@ def test_restore_rejects_invalid_backup() -> None:
         check("D1：非法备份 → restore 返回 False", ok is False)
         con = sqlite3.connect(live_db)
         try:
-            n = con.execute("SELECT COUNT(*) FROM t").fetchone()[0]
+            n = con.execute("SELECT COUNT(*) FROM Product").fetchone()[0]
         finally:
             con.close()
         check("D1：线上库未被破坏（仍 5 行）", n == 5, str(n))
@@ -109,17 +126,83 @@ def test_restore_rejects_invalid_backup() -> None:
         check("D1：无表备份 → 拒绝恢复", ok2 is False)
         con = sqlite3.connect(live_db)
         try:
-            n2 = con.execute("SELECT COUNT(*) FROM t").fetchone()[0]
+            n2 = con.execute("SELECT COUNT(*) FROM Product").fetchone()[0]
         finally:
             con.close()
         check("D1：线上库仍未被破坏", n2 == 5, str(n2))
+
+
+def test_restore_rejects_unrelated_sqlite_schema() -> None:
+    """CR10-24：合法 SQLite 不等于本应用备份；拒绝前后目标与源都不变。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        target = os.path.join(tmp, "dev.db")
+        unrelated = os.path.join(tmp, "unrelated.db")
+        _make_restore_db(target, rows=5)
+        _make_db(unrelated, rows=3)
+        before = open(target, "rb").read()
+        source_before = open(unrelated, "rb").read()
+        ok = backup_db.restore(unrelated, target)
+        check("CR10-24：只有无关 t 表的 SQLite 被拒绝", ok is False)
+        check("CR10-24：schema 不符时目标逐字节不变", open(target, "rb").read() == before)
+        check("CR10-24：校验只读，备份源逐字节不变", open(unrelated, "rb").read() == source_before)
+        check("CR10-24：前置拒绝不产生 pre-restore 文件",
+              not any(".pre-restore-" in f for f in os.listdir(tmp)), str(os.listdir(tmp)))
+
+        empty_product = os.path.join(tmp, "empty-product.db")
+        _make_restore_db(empty_product, rows=0)
+        check("CR10-24🔁：合法 Product schema 即使 0 行也可恢复（冷启动不被误拒）",
+              backup_db.restore(empty_product, target) is True)
+        con = sqlite3.connect(target)
+        try:
+            n = con.execute("SELECT COUNT(*) FROM Product").fetchone()[0]
+        finally:
+            con.close()
+        check("CR10-24🔁：冷启动备份恢复后确为 0 行", n == 0, str(n))
+
+
+def test_restore_rename_failures_roll_back_every_file() -> None:
+    """CR10-24：主库/WAL/SHM 任一改名失败，已挪走的文件全部还原。"""
+    for suffix in ("", "-wal", "-shm"):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = os.path.join(tmp, "dev.db")
+            backup = os.path.join(tmp, "backup.db")
+            _make_restore_db(target, rows=7)
+            _make_restore_db(backup, rows=2)
+            originals = {}
+            for side in ("", "-wal", "-shm"):
+                path = target + side
+                if side:
+                    with open(path, "wb") as fh:
+                        fh.write(("original" + side).encode())
+                with open(path, "rb") as fh:
+                    originals[path] = fh.read()
+
+            real_replace = os.replace
+            failed = {"done": False}
+
+            def fail_selected_rename(src, dst):
+                if (src == target + suffix and ".pre-restore-" in dst
+                        and not failed["done"]):
+                    failed["done"] = True
+                    raise OSError("simulated rename failure: " + (suffix or "main"))
+                return real_replace(src, dst)
+
+            with patch("backup_db.os.replace", side_effect=fail_selected_rename):
+                ok = backup_db.restore(backup, target)
+            label = suffix or "主库"
+            check("CR10-24：%s 改名失败 ⇒ restore=False" % label, ok is False and failed["done"])
+            check("CR10-24：%s 改名失败后主库与 sidecar 逐字节还原" % label,
+                  all(os.path.exists(p) and open(p, "rb").read() == content
+                      for p, content in originals.items()), str(os.listdir(tmp)))
+            check("CR10-24：%s 改名失败不残留 pre-restore 文件" % label,
+                  not any(".pre-restore-" in f for f in os.listdir(tmp)), str(os.listdir(tmp)))
 
 
 def test_restore_rollback_with_sidecars() -> None:
     """③ restore 中途失败 → 自动回滚，含 -wal/-shm sidecar。"""
     with tempfile.TemporaryDirectory() as tmp:
         live_db = os.path.join(tmp, "dev.db")
-        _make_db(live_db, rows=7)
+        _make_restore_db(live_db, rows=7)
         # 造 sidecar（模拟 WAL 模式运行中的库）
         with open(live_db + "-wal", "wb") as f:
             f.write(b"wal-content")
@@ -130,31 +213,29 @@ def test_restore_rollback_with_sidecars() -> None:
         # 会在中途失败——用不可写的目标路径触发。为可控注入，直接 monkeypatch
         # _connect_ro 返回的连接使 backup 抛错。
         good_backup = os.path.join(tmp, "good-bak.db")
-        _make_db(good_backup, rows=1)
+        _make_restore_db(good_backup, rows=1)
 
-        orig_connect_ro = backup_db._connect_ro
-        called = {"n": 0}
+        # Connection 实例属性和 immutable 类型都不能 patch；在 _connect_ro 边界
+        # 包装连接，让真正的 backup_db.restore() 调用这个受控失败替身。
+        class FailingBackupConnection:
+            def __init__(self, connection):
+                self._connection = connection
 
-        def _connect_ro_then_fail(path: str):
-            called["n"] += 1
-            con = orig_connect_ro(path)
-            if called["n"] == 2:  # 第二次调用 = restore 内写回阶段
-                orig_close = con.close
+            def execute(self, *args, **kwargs):
+                return self._connection.execute(*args, **kwargs)
 
-                def _backup_patch(dst, **kw):
-                    raise sqlite3.OperationalError("simulated mid-restore failure")
+            def backup(self, _destination):
+                raise sqlite3.OperationalError("simulated mid-restore failure")
 
-                con.backup = _backup_patch  # type: ignore[method-assign]
-                # 保留 close 可用
-                con.close = orig_close  # type: ignore[method-assign]
-            return con
+            def close(self):
+                self._connection.close()
 
-        backup_db._connect_ro = _connect_ro_then_fail
-        try:
+        with patch(
+            "backup_db._connect_ro",
+            return_value=FailingBackupConnection(backup_db._connect_ro(good_backup)),
+        ):
             ok = backup_db.restore(good_backup, live_db)
-            check("D1：中途失败 → restore 返回 False", ok is False)
-        finally:
-            backup_db._connect_ro = orig_connect_ro
+        check("D1：中途失败 → restore 返回 False", ok is False)
 
         # 回滚后：主库 + 两个 sidecar 全部还原
         check("D1：主库已回滚还原", os.path.exists(live_db), str(os.listdir(tmp)))
@@ -162,7 +243,7 @@ def test_restore_rollback_with_sidecars() -> None:
         check("D1：-shm sidecar 已还原", os.path.exists(live_db + "-shm"))
         con = sqlite3.connect(live_db)
         try:
-            n = con.execute("SELECT COUNT(*) FROM t").fetchone()[0]
+            n = con.execute("SELECT COUNT(*) FROM Product").fetchone()[0]
         finally:
             con.close()
         check("D1：回滚后数据完整（7 行）", n == 7, str(n))
@@ -176,15 +257,15 @@ def test_restore_success_replaces_live() -> None:
     """④（正向）合法备份恢复成功：新库生效、原库改名保留。"""
     with tempfile.TemporaryDirectory() as tmp:
         live_db = os.path.join(tmp, "dev.db")
-        _make_db(live_db, rows=9)
+        _make_restore_db(live_db, rows=9)
         bak = os.path.join(tmp, "bak.db")
-        _make_db(bak, rows=2)
+        _make_restore_db(bak, rows=2)
 
         ok = backup_db.restore(bak, live_db)
         check("D1：合法备份恢复成功", ok is True)
         con = sqlite3.connect(live_db)
         try:
-            n = con.execute("SELECT COUNT(*) FROM t").fetchone()[0]
+            n = con.execute("SELECT COUNT(*) FROM Product").fetchone()[0]
         finally:
             con.close()
         check("D1：恢复后为新内容（2 行）", n == 2, str(n))
@@ -192,7 +273,7 @@ def test_restore_success_replaces_live() -> None:
         check("D1：原库改名保留（.pre-restore-*）", len(pres) == 1, str(pres))
         con = sqlite3.connect(os.path.join(tmp, pres[0]))
         try:
-            n_old = con.execute("SELECT COUNT(*) FROM t").fetchone()[0]
+            n_old = con.execute("SELECT COUNT(*) FROM Product").fetchone()[0]
         finally:
             con.close()
         check("D1：保留的原库数据完整（9 行）", n_old == 9, str(n_old))
@@ -265,6 +346,10 @@ def test_backup_job_registered_and_rotates() -> None:
         # 不投递线程、不碰仓库里的 `backups/`，本套其余断言的时序因此不变。
         boot_dir = os.path.join(tmp, "boot")
         os.makedirs(boot_dir)
+        src = os.path.join(tmp, "dev.db")
+        _make_product_db(src, rows=1)
+        snapshot = os.path.join(boot_dir, "dev-20200101-000000.db")
+        _snapshot_at(src, snapshot)
         orig_boot_env = (os.environ.get("BACKUP_DIR"), os.environ.get("DB_PATH"))
         bs._write_state(
             {"lastRun": datetime.now(bs.TZ).isoformat(timespec="seconds"),
@@ -272,8 +357,11 @@ def test_backup_job_registered_and_rotates() -> None:
             boot_dir,
         )
         os.environ["BACKUP_DIR"] = boot_dir
+        os.environ["DB_PATH"] = src
         try:
-            bs.start_scheduler()
+            # 调度注册测试绝不创建真实后台线程；fixture 破坏时也应红在断言，而非写真实目录。
+            with patch.object(bs, "request_run", return_value={"accepted": True}) as request_run:
+                bs.start_scheduler()
         finally:
             (d, p) = orig_boot_env
             if d is None:
@@ -284,8 +372,10 @@ def test_backup_job_registered_and_rotates() -> None:
                 os.environ.pop("DB_PATH", None)
             else:
                 os.environ["DB_PATH"] = p
-        check("🔁 #37：新鲜 state.json ⇒ 起服务不投递补跑（同日多次重启不会顺手复制 63 MB）",
-              os.listdir(boot_dir) == [bs.STATE_NAME], str(os.listdir(boot_dir)))
+        check("🔁 #37：新鲜 state＋有效快照 ⇒ 起服务不投递补跑（同日多次重启不复制库）",
+              request_run.call_count == 0
+              and set(os.listdir(boot_dir)) == {bs.STATE_NAME, os.path.basename(snapshot)},
+              str(os.listdir(boot_dir)))
         try:
             jobs = {j.id: j for j in bs._scheduler.get_jobs()}
             check("①：daily-db-backup 已注册为 job", "daily-db-backup" in jobs,
@@ -357,7 +447,7 @@ def test_backup_run_once_end_to_end_and_paths() -> None:
     """`run_once` 两条分支 ⇔ 路径回落链（容器挂载点／dev 仓库内）。"""
     with tempfile.TemporaryDirectory() as tmp:
         src = os.path.join(tmp, "dev.db")
-        _make_db(src, rows=4)
+        _make_restore_db(src, rows=4)
         out = os.path.join(tmp, "backups")
         orig_env = {k: os.environ.get(k) for k in ("DB_PATH", "BACKUP_DIR", "BACKUP_KEEP")}
         orig_state = dict(bs._state)
@@ -369,7 +459,7 @@ def test_backup_run_once_end_to_end_and_paths() -> None:
                   r.get("ok") is True and len(produced) == 1, str(r))
             con = sqlite3.connect(os.path.join(out, produced[0]))
             try:
-                n = con.execute("SELECT COUNT(*) FROM t").fetchone()[0]
+                n = con.execute("SELECT COUNT(*) FROM Product").fetchone()[0]
             finally:
                 con.close()
             check("①：快照内容是真库（4 行，走在线备份 API 而非文件拷贝）", n == 4, str(n))
@@ -724,6 +814,10 @@ def test_startup_hook_is_wired_into_start_scheduler() -> None:
             bs.shutdown_scheduler()
 
         try:
+            fresh_src = os.path.join(tmp, "fresh.db")
+            _make_product_db(fresh_src, rows=1)
+            _snapshot_at(fresh_src, os.path.join(boot, "dev-20200101-000001.db"))
+            os.environ["DB_PATH"] = fresh_src
             fresh = datetime.now(bs.TZ).isoformat(timespec="seconds")
             bs._write_state(
                 {"lastRun": fresh, "ok": True, "outcome": "completed", "runs": 2}, boot)
@@ -810,6 +904,49 @@ def test_backup_state_label_separates_the_two_catchup_entries() -> None:
             bs._state.update(orig_state)
 
 
+def test_missing_snapshot_counts_as_stale() -> None:
+    """CR10-30：新鲜 state 不能替不存在的快照作证；正常快照不得误补。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        src = os.path.join(tmp, "dev.db")
+        _make_product_db(src, rows=1)
+        out = os.path.join(tmp, "backups")
+        keys = ("DB_PATH", "BACKUP_DIR")
+        orig_env = {k: os.environ.get(k) for k in keys}
+        orig_state = dict(bs._state)
+        try:
+            os.environ.update({"DB_PATH": src, "BACKUP_DIR": out})
+            fresh = datetime.now(bs.TZ).isoformat(timespec="seconds")
+            os.makedirs(out)
+            bs._write_state({"lastRun": fresh, "ok": True, "outcome": "completed", "runs": 1}, out)
+            check("CR10-30：目录不存在 ⇒ missing-snapshot",
+                  bs.snapshot_defect(os.path.join(tmp, "absent"), src) == "missing-snapshot")
+            check("CR10-30：只有 state、零主快照 ⇒ missing-snapshot",
+                  bs.snapshot_defect(out, src) == "missing-snapshot")
+            with patch.object(bs, "request_run", return_value={"accepted": True}) as request_run:
+                result = bs.startup_catch_up()
+                check("CR10-30：新鲜 state＋零快照仍投递一次补跑，ageHours 不伪装成 0",
+                      result.get("triggered") is True and result.get("reason") == "missing-snapshot"
+                      and result.get("ageHours") is None and result.get("accepted") is True, str(result))
+                request_run.assert_called_once_with("startup-catchup", label="startup")
+
+            snapshot = os.path.join(out, "dev-20200101-000000.db")
+            _snapshot_at(src, snapshot)
+            check("🔁 CR10-30：有效非空快照不误报 missing",
+                  bs.snapshot_defect(out, src) is None)
+            with patch.object(bs, "request_run") as request_run:
+                result = bs.startup_catch_up()
+                check("🔁 CR10-30：正常 fresh 快照不投递补跑",
+                      result.get("reason") == "fresh" and request_run.call_count == 0, str(result))
+        finally:
+            for k, v in orig_env.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+            bs._state.clear()
+            bs._state.update(orig_state)
+
+
 def test_empty_snapshot_counts_as_stale() -> None:
     """2026-11-08：**时刻新鲜、内容却是空壳**的备份必须判落后并补一份。
 
@@ -826,9 +963,8 @@ def test_empty_snapshot_counts_as_stale() -> None:
       ④ 🔁 走完整条链：写一份新鲜 state.json + 放一个空壳快照 ⇒ `startup_catch_up()`
          真的投递补跑（判据存在但没接线 ⇒ 这枚红）；补完那份**有行**、且再查一次回 `fresh`。
 
-    判据刻意**不含**"state 说备过、盘上一个快照都没有"那一支：套件里有两处
-    `start_scheduler()` 用例预写新鲜 state.json 但不放快照，多判那一支会让它们投出
-    异步线程、而线程比 env 还原活得更久 ⇒ 落进仓库真 `backups/`（本轮实测撞到过）。
+    缺失快照由相邻的 CR10-30 用例覆盖；新鲜 state 的调度注册 fixture 已改用真实合成快照，
+    并用 request_run 替身隔离线程，不再依靠漏判 missing 来避免测试写真实 backups/。
     """
     with tempfile.TemporaryDirectory() as tmp:
         src = os.path.join(tmp, "dev.db")
@@ -993,6 +1129,8 @@ def test_backup_startup_evidence_survives_daily() -> None:
 if __name__ == "__main__":
     test_backup_integrity_and_corrupt_cleanup()
     test_restore_rejects_invalid_backup()
+    test_restore_rejects_unrelated_sqlite_schema()
+    test_restore_rename_failures_roll_back_every_file()
     test_restore_rollback_with_sidecars()
     test_restore_success_replaces_live()
     test_backup_job_registered_and_rotates()
@@ -1004,6 +1142,7 @@ if __name__ == "__main__":
     test_backup_state_label_separates_the_two_catchup_entries()
     test_backup_startup_evidence_survives_daily()
     test_empty_snapshot_counts_as_stale()
+    test_missing_snapshot_counts_as_stale()
     fails = [x for x in results if not x[1]]
     print(f"\n===== {len(results) - len(fails)}/{len(results)} 通过 =====")
     if fails:
