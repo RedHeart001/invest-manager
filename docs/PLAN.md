@@ -4,7 +4,7 @@
 > 任务执行进度记入 [PROGRESS.md](PROGRESS.md)；"不得回退"的约束与数据源事实见 [CONSTRAINTS.md](CONSTRAINTS.md)；
 > 代码审查发现见 [CODE-REVIEW.md](CODE-REVIEW.md)，修复状态见 [FIX-LEDGER.md](FIX-LEDGER.md)。
 
-> **速览**：本文件回答"要做什么、怎么做"。原始需求 4 条（热点推送 / 智能搜索 / 产品详情页 / 金融分析 Agent），补充需求 R5–R17；设计按模块 M1–M8 组织；P0–P7 建设阶段已全部完成（进度状态与验收分数见 [PROGRESS.md](PROGRESS.md)，不在本文件重复）；已定稿的决策集中在文末「决策记录」。
+> **速览**：本文件回答"要做什么、怎么做"。原始需求 4 条（热点推送 / 智能搜索 / 产品详情页 / 金融分析 Agent），补充需求 R5–R20；设计按模块 M1–M8 组织；P0–P7 建设阶段已全部完成（进度状态与验收分数见 [PROGRESS.md](PROGRESS.md)，不在本文件重复）；已定稿的决策集中在文末「决策记录」。
 > **编号口径**：R=需求条目，M=设计模块，P=实施阶段，C=不得回退的约束（正文在 [CONSTRAINTS.md](CONSTRAINTS.md)），CRn=第 n 轮代码审查（发现在 [CODE-REVIEW.md](CODE-REVIEW.md)），G=需求交付缺口，OPT=优化候选（在 [FIX-LEDGER.md](FIX-LEDGER.md)）。
 
 ## Context
@@ -28,7 +28,7 @@
 | R10 | **外部数据源不可达时必须优雅降级**（标注来源/留空），不阻塞其余功能 | P1 | provider 降级 + `inconclusive` 标注 |
 | R11 | **变化归因两阶段策略**：P2 详情页做算法阶段划分（时长/幅度）+ 大波动日事件标注（一律标"可能相关"，不做因果断言）；完整多因素归因归 P5 深度研报 | P2 设计定稿 | 详情页 ③④ 区 |
 | R12 | **海外数据源自动降级**：海外源（Tavily/OpenBB/CoinGecko）经用户本地代理优先尝试；不可达时自动切换国内源（东财/新浪）并在界面与产出中显式标注降级状态。<br>**⚠️ 2026-09-24 CR8-1 反转（仅财经新闻类）**：新闻源改为**国内源为主**、Tavily 降为回退，多源按数据丰富度排序后逐个回退；降级标注改为**按分类在页头标注一次**（不再逐卡重复），板块名映射未命中**不再对用户显示**。行情/加密类仍按原海外优先口径<br>**⚠️ 2026-09-26 主人拍板升级（仅财经新闻类）**：新闻层从 failover 升级为 **fusion 多源合并**——东财快讯（主）→ 财联社（二）→ Tavily（辅）**全部尝试**，成功源并集 + 跨源标题相似度去重 + 择优（有 url 优先于无 url），不再是"任一源成功即返回"；需求动机 = 主人明确要求「国内源为主、国外源为辅 + 支持多数据源」 | P3–P5 评估定稿；新闻源序 2026-09-24 修订；fusion 2026-09-26 立项（OPT-2） | 各 provider 降级链 + 前端分类标注 + 新闻 fusion 合并（✅ **CR8-1/CR8-3 已随 10-01 批次二落地**；✅ **OPT-2 新闻 fusion 已落地（10-05 起，CR9-62；源序反转见 `pipeline.py` 的 `NEWS_SOURCE_ORDER`）**——本格此前那句"⬜ OPT-2＝已立项＋已排期"是陈账，已更正） |
-| R13 | **多源数据对比验证**：关键行情指标（收盘价、净值等）在数据源允许时做双源交叉验证，差异超阈值时显式标注来源与偏差，不做静默取舍；各数据源可用性验证推迟到对应阶段落地时进行 | 规划期补充；接入方案 2026-09-24 拍板 | ✅ **已落地（2026-09-25，`d4c9703`）**：`/quote/verified` 端点 + `providers/chain.py` 的 `verify_metric`（按需，不叠加普通 /quote）+ 测试断言；接入 = 详情页「双源核对」按钮 → BFF **`GET /api/quote/verify`**（实落路由名；最初计划的 `?verify=1` 查询参数形态未采用，语义更清晰）→ `/quote/verified`，偏差与"备源不可用"均如实写入 `note`（R16）。**遗留**：详情页按钮的手测未执行；`crossChecked` 语义=「已尝试比对」而非「已比对成功」，前端又以文案子串决定颜色 → **CR9-11**。逐项状态见 [FIX-LEDGER.md](FIX-LEDGER.md) |
+| R13 | **多源数据对比验证**：关键行情指标（收盘价、净值等）在数据源允许时做双源交叉验证，差异超阈值时显式标注来源与偏差，不做静默取舍；各数据源可用性验证推迟到对应阶段落地时进行 | 规划期补充；接入方案 2026-09-24 拍板 | DS 能力保留：按需 `GET /quote/verified` → `providers/chain.py#verify_metric`，偏差与备源不可用如实写入 `note`（R16）。**2026-10-17 CR9-115 已撤详情页按钮及 BFF `/api/quote/verify`**，不得再把它们当现有入口；当前无前端自动核对，自然 `diverged/stale` 观察见 [FIX-LEDGER.md](FIX-LEDGER.md) |
 | R14 | **分类浏览**：搜索页选中类型标签即浏览该类全部产品（无需关键词），支持按涨幅/名称/代码排序与分页；全局排序基于行情快照列（同步/刷新任务写入），列表展示仍为实时富集 | P2 | `/api/search` 浏览分支 + `lib/browse.ts` + `lib/market-snapshot.ts` |
 | R15 | **多源自动降级 + 请求频率控制**：同类数据源主备链（主源失败/熔断 → 自动切备源，响应标注来源与降级状态）；按"源族"令牌桶限速（东财多域名共享额度，因封禁为 IP 级）+ 连续失败熔断冷却；**目标是用户侧永不空白**，无可用备源时显式缺口说明 | P2 收尾（2026-09-12 批准） | provider 主备链 + `app/utils/limiter.py` + 腾讯/新浪备源 provider |
 | R16 | **异常/失败终态必须如实呈现**：服务端失败必须以失败形态呈现，**不得回落为"成功/中性"等假象**（如研报失败不得渲染成"已完成·中性评级"）；降级与数据缺口一律显式标注，不粉饰 | CR5 审查（2026-09-17） | 各前端消费点（`ChatUI` 研报推送、`ResearchPanel` 等） |
@@ -112,7 +112,7 @@
 - 流程：搜索 API（Tavily）抓财经新闻 → LLM 把热点**结构化为板块/概念标签** → 走 AkShare 板块成分接口（`stock_board_concept_cons_em` / 行业板块）取**成分股 + 主题基金** → 产出 digest 后**回调 `/api/hotspots/ingest` 落库** `HotspotDigest`（data-service 不直连数据库）
   - 相比关键词模糊匹配，板块映射的关联精度与可解释性显著提升（"光伏热点 → 光伏板块 N 只成分股"）
 - **推送为正式交付项**：① 站内 dashboard 热点卡片流 + SSE 实时推送（任务完成即推到前端）；② ~~webhook 通道（企业微信/邮件，可配置开关）~~ → **2026-09-19 显式裁剪**（G1，见文末决策记录）
-- 热点卡片下挂"相关产品"（点击进详情页）＋**「去分析 <标的>」入口**（CR8-2 于 09-30 批次一改名的遗留描述修正：它**只是**跳 `related[0]` 详情页的 `#research` 锚点，不调统一 Agent、不触发分析、不带这条热点的上下文；落地页 `ResearchPanel` 读该品种**已有**研报，没有则停在初始态需手动生成。真做"解读"要另立需求：接口加上下文参数 ＋ 决定研报缓存键）
+- 热点卡片下挂"相关产品"（点击进详情页）＋**「去分析 <标的>」入口**。现行行为以 R19 为准：跳 `/chat?prompt=<热点标题＋摘要>`，只预填输入框、不自动发送；不再跳详情页 `#research`。
 - 搜索 API 无 key 时降级为"仅站内数据"，标注 `inconclusive`
   - **⚠️ 10-18 23:2x 现值更正（只增这一行，上面那句原样留着）＝`inconclusive` 不是码上也不是屏上的字面**：现查 `grep inconclusive web/**`（非测试文件）＝**0 命中**；web 侧降级的真载体＝`degraded`＋`note` 两枚（与「场内基金行业配置」那一支的 `unavailable`、事件区新闻降级支同形）。`inconclusive` 在码上只住 `sync_scheduler.py`＝**同步腿读超时的第三态**（`ok=None`＋`outcome="inconclusive"`），与"搜索无 key 降级"无关 ⇒ **P3 那句按字面永远跑不过**＝判据载体选错那一形（同「④ 的读数面」那条 甲 的处置）。验收改按真载体读；编号＝`FIX-LEDGER` `#93`（本轮按现值更正闭掉，零码、不占 CR 号）。
 - **G2 落地（2026-09-19）**：产品主数据每日自动同步——data-service `app/sync_scheduler.py`（APScheduler，默认 02:00 Asia/Shanghai，`SYNC_HOUR`/`SYNC_MINUTE` 可覆盖）+ 启动补跑，回调 web `POST /api/sync`；状态端点 `/sync/status`、手动触发 `/sync/run`。此前仅手动触发。
@@ -425,10 +425,10 @@ MCP_HTTP_HOST=127.0.0.1              # MCP HTTP 仅绑本机
 MCP_HTTP_PORT=8765
 RESEARCH_MAX_COLLECT_THREADS=4       # 研报采集并发线程上限（utils/timeout.py 信号量）
 RESEARCH_COLLECT_ACQUIRE_TIMEOUT=60  # 采集名额等待上限（秒，research/adapter.py）；信号量被挂起线程占满时超时降级，不永久阻塞
-US_LIST_PAGES=15                 # 美股名单每次取几页（CR9-59／甲）：新浪硬截 20 行/页 ⇒ 15 页≈300 只、单夜 15 次请求。上限刻意远小于全量的 913 页（盘子 18,241 只＝乙，等主人的字）
+US_LIST_PAGES=950                # 美股乙全量：950 为默认与硬上限；末不满页即早停。行业闸仍过滤无 category 行，"全量"不表示库行数等于上游声明数
 ```
 
-> 完整模板见 `web/.env.example`（P6 已补全为全量清单）。
+> 模板见 `web/.env.example`，部署实际生效项以 `docker-compose.yml` 为准；美股 950 页默认以生产代码为准。正式 Docker 切换还须核对 `WRITE_TOKEN`、`WEB_PORT`、`SCHEDULERS_ENABLED`、`SYNC_CATCHUP`、`BACKUP_HOST_DIR`：分别控制写接口口令、回环 Web 端口、三类调度、同步启动补跑及宿主备份目录；不在文档填写真实值。
 >
 > **⚠️ 11-08 现值更正（只增这一行；下面「已于 16:3x 落进 `data-service/.env`」那句原样不回改）**＝那一行 **11-07 傍晚随工作树重建一起消失了**：`data-service/.env` 与 `web/.env` 的 CreationTime 都是 `2026-11-07 19:57:12`（仓库根 `.git` 是 `11-06 12:57`），而 11-08 00:57 只补回了 `HTTPS_PROXY` ⇒ 现查 `.env` 只有 5 个生效键、`_us_list_pages()` = **15**、库里 `us` = **179**（15 页档的产物）。**已于 11-08 12:59 写回 `US_LIST_PAGES=50` 并重启 ds**（PID 3792→32232，起 `12:59:37` ＞ `.env` mtime `12:59:12`），零出网复测 = **50**；`us 179→≈495` 与「只取前排 50 页」那句 note 由明早 02:00 那条自然腿给出（不手动买那一轮）。见 [FIX-LEDGER.md](FIX-LEDGER.md) 看板 **CR10-19**。
 
@@ -472,7 +472,7 @@ US_LIST_PAGES=15                 # 美股名单每次取几页（CR9-59／甲）
 - **TradingAgents 集成不确定性**：依赖重、data-access contract 可能随版本变、分钟级高成本——spike 先行 + 版本冻结 + B 计划（见 M5 补强），为全项目技术风险最高点
 - **东财反爬限流被放大**：P3 板块成分批量调用与 P5 vendor_adapter 回读会放大请求量，P2 的 `KlineDaily` 缓存是前置依赖，必须先行做扎实；**已落地对策（R15/M8）**：按源族限速（东财 IP 级封禁 → 多域名共享令牌桶）+ 连续失败熔断冷却 + 主备源自动降级
 - **第三方 MCP server 供应链**：配置白名单制（`mcp.json` 以外一律不连）、不自动安装、仅接只读数据类 server
-- **Docker 镜像体积失控**：openbb 依赖树大，若实测 >3GB 拆"核心镜像 + 分析镜像"双 tag；日常开发保持 Windows 原生，Docker 仅用于部署验证。**实测已闭环**：1.62GB → 1.25GB（见 CONSTRAINTS §D）
+- **Docker 镜像体积失控**：openbb 依赖树大，若实测 >3GB 拆"核心镜像 + 分析镜像"双 tag；Docker Compose 为最终日常运行形态，Windows 原生仅保留开发用途。**历史瘦身已闭环**：1.62GB → 1.25GB（见 CONSTRAINTS §D）
 - **Python 依赖兼容性（2026-09-13 P6 实测教训）**：`fastmcp 4.x` 与 `fastapi<0.126` 要求的 `starlette<0.51` **硬冲突**，装上后 data-service 直接无法启动。完整定版与理由见 [CONSTRAINTS.md §C-2](CONSTRAINTS.md)
 - **合规**：所有 Agent 输出与研报附"仅供参考，不构成投资建议"；TradingAgents 官方声明仅用于研究目的
 
@@ -506,7 +506,7 @@ US_LIST_PAGES=15                 # 美股名单每次取几页（CR9-59／甲）
 |---|---|---|---|
 | **G1** | M1 webhook 推送（企业微信/邮件）未实现 | **显式裁剪** | 站内 dashboard + SSE 实时推送已覆盖核心需求；webhook 与"本地单机"定位不匹配。**需求条目已在上文 M1 划除**；未来如需，重新立项 |
 | **G2** | 产品主数据无自动同步 | **实现**（已闭环） | `data-service/app/sync_scheduler.py` + `/sync/status`、`/sync/run`；默认每日 02:00（北京时间），含启动补跑 |
-| **G3** | R13 双源交叉验证未落地 | **✅ 已落地（2026-09-25，`d4c9703`；方案 2026-09-24 拍板 = 详情页按需核对 B1 方案 ①）** | `providers/chain.py#verify_metric` + `/quote/verified`（按需端点，不叠加普通 /quote，避免放大外部请求）；接入 = 详情页现状区「双源核对」按钮 → BFF `GET /api/quote/verify`（**实落路由名**，非最初计划的 `?verify=1` 查询参数形态）→ `/quote/verified`，偏差在 `note` 显式标注（R16：备源不可用时如实展示，不静默）。执行记录见 [FIX-LEDGER.md](FIX-LEDGER.md) 批次 B；遗留（手测未跑 / `crossChecked` 语义）见 R13 行与 CR9-11 |
+| **G3** | R13 双源交叉验证未落地 | **✅ 已落地；2026-10-17 调整消费入口** | DS 保留 `providers/chain.py#verify_metric` + `/quote/verified`（按需，不叠加普通 /quote）；详情页「双源核对」按钮与 BFF `GET /api/quote/verify` 已随 CR9-115 撤除，不再是当前入口。现行需求与自然观察见 R13 和 [FIX-LEDGER.md](FIX-LEDGER.md) |
 | **G4** | M2 FTS 无结果时 LLM 兜底召回未实现 | **实现** | `lib/search.ts#llmFallback` + `lib/llm.ts#chatJson`；LLM 未配置/失败时静默降级 |
 | **G5** | Watchlist 只读不通写 | **实现** | `/api/watchlist`（GET/POST/DELETE）+ `app/components/WatchButton.tsx`（详情页）。**2026-11-01 补上另一半**＝清单页缺失（"能存不能看"），见 R18 |
 | **G6** | `hk` 类型无 provider | **取数侧实现 + 补备源**；消费侧部分闭环 ⚠️ | ① `data-service/app/providers/hk_provider.py`（东财直连 + **多 host 降级**，非 akshare 封装）；② **腾讯港股备源**（扩展 `tencent_provider`：`_hk_symbol`/`_symbol_for` + `register_chain(["hk"], …, position=1)`）；③ web 侧 `SYNC_TYPES`、搜索 Tab、行情富集、快照白名单纳入 hk。**消费侧仍有断链**（CR7-4） |
