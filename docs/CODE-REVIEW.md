@@ -290,3 +290,9 @@
 | **CR10-32** | `docker-compose.yml:23-41` 未给 Web 注入 WRITE_TOKEN且发布端口；`guard.ts:15-22` 空 token 放行 | Compose 条件性部署缺口；不推翻本地 dev 已配置证据，不等于完整用户鉴权 |
 
 **验收与自然观察分流**：浏览器、冷启动、02:00/03:30 自然窗口、真实 LLM、③④、10 条契约快照及 `/bond/yieldcurve` 行面属于验收欠账；CR10-6、crypto 真失败、`diverged`／`stale` 只等自然现场。完整用户鉴权与高成本接口限流是对外开放前置，不扩大为当前本地单机需求。
+
+#### 追加一百一十 · 11-15 15:30（**阶段 B 实装发现刷新进度目录不可写：CR10-34**）
+
+| 编号 | 发现与实测证据 | 定性 |
+|---|---|---|
+| **CR10-34** | `web/lib/refresh-progress.ts` 默认写 `process.cwd()/runtime`，而生产 Web 以 UID 1000 运行且镜像内 `/app` 不可写；阶段 B 实际日志连续 8 次 `EACCES: mkdir '/app/runtime'`，健康接口的 `refresh` 全程为 null。 | 确定的 Compose 配置/部署缺口；刷新主链和快照写入仍完成，但逐类进度与完成账本不可观测，不能记成整轮账本验收通过。 |

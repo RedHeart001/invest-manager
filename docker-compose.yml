@@ -26,6 +26,8 @@ services:
       TZ: Asia/Shanghai
       # SQLite 落在命名卷内（覆盖 web/.env 的开发态 file:./dev.db）
       DATABASE_URL: file:/app/data/dev.db
+      # Web 以非 root 运行；镜像内 /app 不可写，进度/完成账本随正式命名卷持久化。
+      REFRESH_PROGRESS_FILE: /app/data/runtime/refresh-progress.json
       DATA_SERVICE_URL: ${DATA_SERVICE_URL:-http://data-service:8000}
       # 落库回调共享密钥：两侧同值；未设置时 compose 直接拒绝启动
       INGEST_TOKEN: ${INGEST_TOKEN:?必须在 .env 中设置 INGEST_TOKEN（ingest 回调共享密钥）}

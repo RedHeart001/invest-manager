@@ -136,6 +136,7 @@ check("DS 未发布宿主端口", !rendered.services["data-service"].ports);
 // Compose JSON 对默认 false 可省略 internal 字段；只禁止显式启用 internal。
 check("隔离网络与日常 Compose 同形（非 internal，不宣称网络层断网）", rendered.networks.app.internal !== true);
 check("隔离模式关闭三类调度", rendered.services["data-service"].environment.SCHEDULERS_ENABLED === "0");
+check("Web 刷新进度落在可写命名卷而非镜像目录", rendered.services.web.environment.REFRESH_PROGRESS_FILE === "/app/data/runtime/refresh-progress.json");
 check("备份不指向开发 backups", rendered.services["data-service"].volumes.some((v) => v.target === "/backup" && resolve(v.source) === BACKUPS));
 console.log(`[config-only] ${checks}/${checks} 通过；现场=${WORK}`);
 
