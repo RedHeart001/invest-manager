@@ -69,16 +69,21 @@ const PLANNED = {
   // 34→35（10-04 OPT-2 刀 3）：新闻源标注由单值改**数组**（fusion），字段完整性与合法值
   // 两条断言随之改判，并补一条 🔁「存量裸字符串行也读得出来源」——归一必须在读侧，
   // 因为这一列没迁移、也不会迁移（无 migration）。
-  "test-p3.mjs": 35,
+  // 35→37（11-15）：真实 pipeline 前置并只跑一次，新增“新终态”与“本轮非异常失败”断言；
+  // jobs 仍按 TEST_SCHEDULERS_ENABLED 显式前提执行对应分支，不再把关闭当异常。
+  "test-p3.mjs": 37,
   // CR9-38（09-27）：p4 的第 4 段从"两条 LLM 措辞断言"换成三条结构化断言（两轮走完／
   // 会话历史四条／指代按工具入参或正文判定）⇒ 应跑数 19→20。
   // 09-28：门禁外的 `b2-chain.mjs` 并入为第 5 段「组合链」3 条（一轮内 ≥2 次工具调用／
-  // 热点族+行情族各被调用／走完）⇒ 20→23。LLM 未配置时第 2、5 段整段跳过。
-  "test-p4.mjs": 23,
+  // 热点族+行情族各被调用／走完）⇒ 20→23。LLM 未配置时第 2 段只验明确错误终态，
+  // 第 4 段三条多轮断言与第 5 段三条组合链均跳过；合法未配置形态为 12，不是正常能力通过。
+  "test-p4.mjs": [12, 23],
   // 24→25（10-03 F6＝M7 已知优化点 2 闭环）：`namespaces.mcp.probeTimeoutS` 这条观测位
   // 上集成层——面板要自证"探测最多等几秒"活在这个进程里，而不是等某个 server 挂起时由人猜。
   // 零出网（stdio server 在本地，探测不打外网）。
-  "test-p6.mjs": 25,
+  // 25→26（11-15）：keyword 多技能消息补一条终态断言。所有原 done.skills 断言改为
+  // 双向分支：成功验 skills，llm_not_configured 必须明确 error 且无 done；不是静默少跑。
+  "test-p6.mjs": [25, 26],
   // 三档各有出处（#80 乙加了一条落在 [1] 的 done 分支里＝凡有 done 行就 +1）：
   //   18 ＝ 10-17 今晨实测 17（当日无 done 行）＋ 本轮新增那条；
   //   21 ＝ 10-17 13:1x 实测（当日已有 done 行，且 [2] 走 degraded 支＝1 条）；
@@ -105,13 +110,24 @@ function executedCount(out) {
 const lines = [];
 const gaps = [];
 const failedSuites = [];
+const rawReports = [];
+let reportWriteError = null;
+
+// 每套结束立刻落盘：末尾汇总/写历史文件若失败，也不能再吞掉已经跑出的失败名称。
+// 原始 stdout/stderr 与摘要分开保存；摘要保持既有 verify-suites.txt 契约。
+function checkpointReports() {
+  mkdirSync(REPORT_DIR, { recursive: true });
+  const detail = lines.join("\n");
+  writeFileSync(join(REPORT_DIR, "verify-suites.txt"), detail, "utf8");
+  writeFileSync(join(REPORT_DIR, "verify-suites-raw.json"), JSON.stringify(rawReports, null, 2), "utf8");
+}
 
 // #78（10-16）：回执要自带"对着哪一棵树跑的"。此前 ③④ 的回执只有数字，事后无法证明
 // 它对应已提交的那一棵，还是改到一半的脏树（脏改动也算"现在"＝#77 同一族）。
 // ③ 那半落地时把判据收进了 data-service/tests/_live_stamp.py，这里 spawn 同一份——
 // node 侧再实现一遍"哪一棵码"就是第二把尺，而它会漂（漂的那一形是静默的：dirty 恒 0、装载恒成立）。
 const REPO_DIR = join(WEB_DIR, "..");
-const VENV_PY = join(REPO_DIR, "data-service", ".venv", "Scripts", "python.exe");
+const VENV_PY = process.env.VERIFY_ALL_TREE_PYTHON ?? join(REPO_DIR, "data-service", ".venv", "Scripts", "python.exe");
 const STAMP_PY = join(REPO_DIR, "data-service", "tests", "_live_stamp.py");
 function treeStamp() {
   const r = spawnSync(VENV_PY, [STAMP_PY], { cwd: REPO_DIR, encoding: "utf8", timeout: 30_000 });
@@ -157,6 +173,13 @@ for (const s of suites) {
   lines.push(
     `\n########## ${s} — exit=${r.status} 用时 ${Math.round((Date.now() - started) / 1000)}s 断言 ${ran}/${shapes.join("|")}${hit ? "" : " ⚠️"} ##########\n${tail}`,
   );
+  rawReports.push({ suite: s, exitCode: r.status, signal: r.signal, spawnError: r.error?.message, output: out });
+  try {
+    checkpointReports();
+  } catch (e) {
+    reportWriteError = e instanceof Error ? e.message : String(e);
+    console.error(`报告检查点写入失败：${reportWriteError}`);
+  }
   console.log(`${s}: exit=${r.status} 断言 ${ran}/${shapes.join("|")}${mark}`);
 }
 // CR10-8③（11-02）：这把尺此前每跑一次就把上一轮的逐套明细**原地盖掉**——11-01 那把的明细
@@ -176,10 +199,14 @@ const bj = new Intl.DateTimeFormat("en-GB", {
 const g = (t) => bj.find((x) => x.type === t)?.value ?? "00";
 const detailName = `verify-suites-${g("month")}${g("day")}-${g("hour")}${g("minute")}.txt`;
 const detail = lines.join("\n");
-mkdirSync(REPORT_DIR, { recursive: true });
-writeFileSync(join(REPORT_DIR, "verify-suites.txt"), detail, "utf8");
-writeFileSync(join(REPORT_DIR, detailName), detail, "utf8");
-console.log(`逐套明细目录：${REPORT_DIR}（最新＋带时刻副本，不覆写历史）`);
+try {
+  checkpointReports();
+  writeFileSync(join(REPORT_DIR, detailName), detail, "utf8");
+  console.log(`逐套明细目录：${REPORT_DIR}（最新＋带时刻副本，不覆写历史）`);
+} catch (e) {
+  reportWriteError = e instanceof Error ? e.message : String(e);
+  console.error(`最终报告写入失败：${reportWriteError}`);
+}
 if (gaps.length) {
   // 不静默：绿色数字里混着"根本没跑"的断言，正是 CR9-25 要消灭的假闭环
   console.log(`\n!!! 断言缺口（全绿不等于全跑）：\n  - ${gaps.join("\n  - ")}`);
@@ -192,7 +219,7 @@ if (failedSuites.length) {
 // 日子里照样是 0（10-03 01:1x 的 p4 就是这么被糊过去的，靠人逐行读 `exit=` 才发现）。
 // 属假绿的第三种形态：CR9-25 是"条件跳过仍 exit 0"，CR9-36 是"多档计数"，这次是
 // **缺口已经被打印出来、却没被编码**。多档形态仍按 PLANNED 数组判（CR9-36 不变）。
-const bad = gaps.length + failedSuites.length;
+const bad = gaps.length + failedSuites.length + (reportWriteError ? 1 : 0);
 if (bad) {
   console.log(`\nGATE FAILED（${bad} 项）：详见上面 !!! 段落；这次读数不得记作"④ 全绿"`);
   process.exit(1);

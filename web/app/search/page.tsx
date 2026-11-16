@@ -2,6 +2,10 @@ import { Suspense } from "react";
 
 import SearchClient from "./search-client";
 
+// 根布局 Nav 依赖 useSearchParams；静态预渲染会在 Suspense 边界触发 CSR bailout，
+// 使 /search 的 SSR HTML 整段丢失导航。与其他一级页一致，请求时渲染。
+export const dynamic = "force-dynamic";
+
 export default function SearchPage() {
   return (
     <main className="mx-auto max-w-3xl px-6 py-8">

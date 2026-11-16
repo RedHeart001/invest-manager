@@ -26,13 +26,16 @@ const appendMessage = vi.fn().mockResolvedValue(undefined);
 const createSession = vi.fn().mockResolvedValue({ id: "s-1" });
 const getMessages = vi.fn().mockResolvedValue([]);
 const startResearch = vi.fn().mockResolvedValue({ status: "queued" });
+const chatStream = vi.fn();
 const chatStreamCalls: unknown[] = [];
 
 vi.mock("@/lib/llm", () => ({
-  LlmNotConfiguredError: class LlmNotConfiguredError extends Error {},
+  LlmNotConfiguredError: class LlmNotConfiguredError extends Error {
+    constructor(message = "LLM not configured") { super(message); }
+  },
   chatStream: (arg: unknown) => {
     chatStreamCalls.push(arg);
-    return (async function* nothing() {})();
+    return chatStream();
   },
 }));
 vi.mock("@/lib/gateway", () => ({
@@ -55,6 +58,7 @@ vi.mock("@/lib/research-target", () => ({ extractResearchTarget: () => null }));
 vi.mock("@/lib/context-budget", () => ({ trimContext: (m: unknown[]) => m }));
 vi.mock("@/lib/prisma", () => ({ prisma: { chatSession: { findUnique: vi.fn() } } }));
 
+import { LlmNotConfiguredError } from "@/lib/llm";
 import { POST } from "./route";
 
 let jsonCalls = 0;
@@ -75,6 +79,8 @@ beforeEach(() => {
   appendMessage.mockClear();
   createSession.mockClear();
   startResearch.mockClear();
+  chatStream.mockReset();
+  chatStream.mockImplementation(() => (async function* nothing() {})());
 });
 
 describe("CR10-12：/api/chat 的来源守卫", () => {
@@ -115,6 +121,33 @@ describe("CR10-12：/api/chat 的来源守卫", () => {
     const res = await POST(req({ message: "今天 A 股怎么走" }));
     expect(res.status).toBe(200);
     expect(appendMessage).toHaveBeenCalledWith("s-1", "user", "今天 A 股怎么走");
+  });
+
+  it("LLM 未配置 ⇒ 明确 error 终态、无 done，用户消息仍保存", async () => {
+    chatStream.mockImplementation(() => {
+      throw new LlmNotConfiguredError();
+    });
+    const res = await POST(req({ message: "未配置分支" }));
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    expect(text).toContain("event: error");
+    expect(text).toContain('"code":"llm_not_configured"');
+    expect(text).not.toContain("event: done");
+    expect(text).not.toContain("event: delta");
+    expect(appendMessage).toHaveBeenCalledWith("s-1", "user", "未配置分支");
+  });
+
+  it("真实 fetch 失败 ⇒ SSE 仅附底层 causeCode，不泄漏完整 cause", async () => {
+    chatStream.mockImplementation(() => {
+      throw Object.assign(new TypeError("fetch failed"), {
+        cause: { code: "ECONNRESET", message: "socket detail must not escape" },
+      });
+    });
+    const res = await POST(req({ message: "诊断分支" }));
+    const text = await res.text();
+    expect(text).toContain('"causeCode":"ECONNRESET"');
+    expect(text).not.toContain("socket detail must not escape");
+    expect(text).not.toContain("event: done");
   });
 
   it("同源 Origin ⇒ 放行（本站聊天框那一形不变）", async () => {

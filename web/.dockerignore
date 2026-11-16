@@ -19,7 +19,7 @@ prisma/*.db-shm
 *.tsbuildinfo
 coverage
 vitest.config.ts
-scripts/test-*.mjs
+# verify-all.mjs 已随镜像分发，其七个 test-*.mjs 也必须可执行，不能再只带启动器。
 scripts/_tmp*
 *.log
 

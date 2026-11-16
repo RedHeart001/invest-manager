@@ -163,13 +163,14 @@ describe("compose 的 WRITE_TOKEN 注入一致性（CR10-9 附项：只加测，
     expect(() => injectAfterIngest(noAnchor, 2, WEB_TOKEN)).toThrow(/未命中/);
   });
 
-  it("解析器的现值读数＝web 块 13 枚键／data-service 块 19 枚键（compose 改了要一起改这一行）", () => {
+  it("解析器的现值读数＝web 块 14 枚键／data-service 块 19 枚键（compose 改了要一起改这一行）", () => {
     const envs = parseServiceEnvs(COMPOSE);
     expect([...envs.get("web")!.keys()]).toEqual([
       "NODE_ENV",
       "PORT",
       "TZ",
       "DATABASE_URL",
+      "REFRESH_PROGRESS_FILE",
       "DATA_SERVICE_URL",
       "INGEST_TOKEN",
       "WRITE_TOKEN",

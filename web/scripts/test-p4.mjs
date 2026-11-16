@@ -257,7 +257,9 @@ async function main() {
 
   // ---------- 4. 多轮上下文记忆（同一会话指代消解） ----------
   console.log("[4] 多轮上下文（第二轮指代第一轮主体）");
-  {
+  if (!llmConfigured) {
+    console.log("  （LLM 未配置，跳过多轮上下文断言；真实能力保持未验）");
+  } else {
     // 新会话：第一轮问茅台，第二轮用"它"指代
     const mk = await fetch500(`${BASE}/api/chat/sessions`, {
       method: "POST",

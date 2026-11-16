@@ -53,6 +53,39 @@ describe("CR10-27：日 K 尾部复查允许修正缓存末日", () => {
     expect(result.fetchedDays).toBe(1);
   });
 
+  it("冷缓存整段回源已覆盖尾部：基金净值紧接二次访问不再重复回源", async () => {
+    const code = `CR1027-${Date.now()}-cold-tail`;
+    const cachedRows = [
+      { ...row("2026-11-10", 10), open: 10, high: 10, low: 10, volume: null },
+      { ...row("2026-11-11", 11), open: 11, high: 11, low: 11, volume: null },
+    ];
+    let warmed = false;
+    findMany.mockImplementation(async (args) => {
+      if (args?.select) return [];
+      if (!warmed) {
+        warmed = true;
+        return [];
+      }
+      return cachedRows;
+    });
+    dsGet.mockResolvedValue({
+      source: "akshare",
+      candles: [
+        { ...candle("2026-11-10", 10), open: 10, high: 10, low: 10, volume: null },
+        { ...candle("2026-11-11", 11), open: 11, high: 11, low: 11, volume: null },
+      ],
+    });
+
+    const first = await getKlineRange("fund", code, "2026-11-10", "2026-11-11");
+    const second = await getKlineRange("fund", code, "2026-11-10", "2026-11-11");
+
+    expect(first.fetchedDays).toBe(2);
+    expect(dsGet).toHaveBeenCalledTimes(1);
+    expect(second).toMatchObject({ cachedDays: 2, fetchedDays: 0, valueOnly: true });
+    expect(second.candles.map((x) => x.date)).toEqual(["2026-11-10", "2026-11-11"]);
+    expect(second.note).toContain("增量复查窗口内");
+  });
+
   it("30 分钟复查窗口仍生效：同一代码第二次不重复回源", async () => {
     const code = `CR1027-${Date.now()}-window`;
     findMany.mockImplementation(async (args) => {

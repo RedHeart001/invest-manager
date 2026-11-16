@@ -314,7 +314,11 @@ export async function getKlineRange(
       } else {
         fetched = await upsertCandles(type, code, ds.candles, ds.source);
         fetchedSource = ds.source;
-        lastChecked.set(cacheKey, Date.now());
+        // 整段回源已覆盖到 end，本身也是一次尾部复查。若只记头部窗口，紧接的
+        // 第二次请求会再拉缓存末日，并因 refreshExisting 把同一行计成 fetched=1。
+        const checkedAt = Date.now();
+        lastChecked.set(cacheKey, checkedAt);
+        lastCheckedTail.set(cacheKey, checkedAt);
       }
     } catch (e) {
       notes.push(`回源失败：${e instanceof Error ? e.message : "unknown"}`);

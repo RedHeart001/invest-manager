@@ -267,7 +267,17 @@ export async function POST(req: NextRequest) {
         // 实际激活的技能：keyword 档在 meta 已汇报；llm/hybrid 档由 loader 在此汇报
         send("done", { sessionId: sid, skills: mode === "keyword" ? sys.activeSkills : loader.loaded() });
       } catch (e) {
-        console.error("[chat] route error:", e instanceof Error ? `${e.name}: ${e.message}` : e);
+        // undici 把 DNS/连接/TLS 等原因放在 Error.cause；只取白名单式错误码，
+        // 不打印请求头、LLM 正文或完整 cause（其中可能含地址等敏感诊断）。
+        const causeCode =
+          e instanceof Error && typeof e.cause === "object" && e.cause !== null &&
+          "code" in e.cause && typeof e.cause.code === "string"
+            ? e.cause.code.slice(0, 80)
+            : undefined;
+        console.error(
+          `[chat] route error: ${e instanceof Error ? `${e.name}: ${e.message}` : String(e)}` +
+            (causeCode ? ` causeCode=${causeCode}` : ""),
+        );
         if (e instanceof LlmNotConfiguredError) {
           send("error", {
             code: "llm_not_configured",
@@ -275,7 +285,10 @@ export async function POST(req: NextRequest) {
               "LLM 未配置：请在 web/.env 设置 LLM_BASE_URL / LLM_API_KEY / LLM_MODEL（DeepSeek/GLM 等 OpenAI 兼容端点），保存后重启 dev server 生效。会话与消息已保存。",
           });
         } else {
-          send("error", { message: e instanceof Error ? e.message : "chat failed" });
+          send("error", {
+            message: e instanceof Error ? e.message : "chat failed",
+            ...(causeCode ? { causeCode } : {}),
+          });
         }
       } finally {
         if (!closed) {

@@ -88,8 +88,20 @@ async function chatMeta(message, sessionIds) {
   const events = await readSse(res);
   const meta = events.find((e) => e.ev === "meta")?.data ?? null;
   const done = events.find((e) => e.ev === "done")?.data ?? null;
+  const error = events.find((e) => e.ev === "error")?.data ?? null;
   if (meta?.sessionId) sessionIds.push(meta.sessionId);
-  return { meta, done, events };
+  return { meta, done, error, events };
+}
+
+function checkDoneSkills(label, result) {
+  const unconfigured = result.error?.code === "llm_not_configured" && !result.done;
+  ok(
+    `${label}：成功汇报 done.skills；未配置则明确 error 且无 done`,
+    result.done
+      ? !result.error && Array.isArray(result.done.skills)
+      : unconfigured,
+    JSON.stringify({ done: result.done, error: result.error }).slice(0, 240),
+  );
 }
 
 async function main() {
@@ -171,11 +183,7 @@ async function main() {
       (miss.meta?.toolCount ?? 0) >= (routerMode === "keyword" ? 10 : 11),
       `toolCount=${miss.meta?.toolCount}`,
     );
-    ok(
-      "done.skills 为数组（实际激活汇报）",
-      Array.isArray(miss.done?.skills),
-      JSON.stringify(miss.done?.skills),
-    );
+    checkDoneSkills("未命中技能", miss);
 
     const hot = await chatMeta("今天市场热点有哪些？", sessionIds);
     const fund = await chatMeta("110022 这只基金的季报怎么看", sessionIds);
@@ -187,13 +195,17 @@ async function main() {
       ok("命中基金报告技能", (fund.meta?.skills ?? []).includes("fund-report-analysis"), JSON.stringify(fund.meta?.skills));
       ok("命中技术面技能", (tech.meta?.skills ?? []).includes("tech-indicators"), JSON.stringify(tech.meta?.skills));
       ok("同时激活数被限制（≤3）", (multi.meta?.skills ?? []).length <= 3, JSON.stringify(multi.meta?.skills));
+      checkDoneSkills("多技能消息", multi);
     } else {
       // llm 档：构建期不再注入，meta.skills 恒为空；done.skills 由 loader 汇报实际加载
       ok("llm/hybrid 档：meta.skills 恒为空（正文注入已废除）", (hot.meta?.skills ?? []).length === 0, JSON.stringify(hot.meta?.skills));
       for (const [label, r] of [["热点", hot], ["基金", fund], ["技术面", tech]]) {
-        ok(`${label}消息：done.skills 结构正确（是否真加载由 LLM 决定）`, Array.isArray(r.done?.skills), JSON.stringify(r.done?.skills));
+        checkDoneSkills(`${label}消息`, r);
       }
-      ok("done.skills 不超过激活上限", (multi.done?.skills ?? []).length <= 3, JSON.stringify(multi.done?.skills));
+      checkDoneSkills("多技能消息", multi);
+      if (multi.done) {
+        ok("done.skills 不超过激活上限", (multi.done?.skills ?? []).length <= 3, JSON.stringify(multi.done?.skills));
+      }
     }
   }
 

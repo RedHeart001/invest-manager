@@ -12,6 +12,12 @@ import { INGEST_TOKEN } from "./ingest-token.mjs";
 
 const BASE = process.env.TEST_BASE ?? "http://localhost:3000";
 const DATA = process.env.TEST_DATA ?? "http://localhost:8000";
+// DS 的开关不一定会注入 Web 测试进程；由验收启动器显式声明，不能根据 jobs=[]
+// 反推“合法关闭”，否则调度启动失败也会被误判成可跳过。
+const schedulersEnabled = process.env.TEST_SCHEDULERS_ENABLED;
+if (!["0", "1"].includes(schedulersEnabled ?? "")) {
+  throw new Error("TEST_SCHEDULERS_ENABLED 必须显式设为 0 或 1（与副本 DS 实际配置一致）");
+}
 const prisma = new PrismaClient();
 
 let passed = 0;
@@ -42,7 +48,43 @@ function today() {
 }
 
 async function main() {
-  console.log(`\n== P3 验收：BFF=${BASE} data-service=${DATA}\n`);
+  console.log(`\n== P3 验收：BFF=${BASE} data-service=${DATA} schedulers=${schedulersEnabled}\n`);
+
+  // 真实管线必须先于列表和 Dashboard 读取，且整套只触发一次。此前空副本先读空表、
+  // 最后才运行 pipeline，既误判落库失败，也让页面断言依赖上一轮残留数据。
+  console.log("[0] 真实热点管线（唯一一次手动触发）");
+  const beforeBody = (await getJson(`${DATA}/hotspots/status`)).body;
+  const beforeRuns = Number(beforeBody.runs ?? 0);
+  const runRes = await fetch(`${DATA}/hotspots/run?trigger=test-p3`, { method: "POST" });
+  const runBody = await runRes.json();
+  ok(
+    "run 立即返回（accepted 或 already-running）",
+    runRes.status === 200 &&
+      (runBody.accepted === true ||
+        (runBody.accepted === false && String(runBody.note ?? "").includes("already running"))),
+    JSON.stringify(runBody).slice(0, 120),
+  );
+  const pollDeadline = Date.now() + 240_000;
+  let completed = false;
+  while (Date.now() < pollDeadline) {
+    await sleep(3000);
+    const statusBody = (await getJson(`${DATA}/hotspots/status`)).body;
+    if (statusBody.running === false && (statusBody.runs ?? 0) > beforeRuns) {
+      completed = true;
+      break;
+    }
+  }
+  ok("真实管线在限定时间内产生新终态", completed, `240s 内未观察到 runs ${beforeRuns} → ${beforeRuns + 1} 且 running=false`);
+  const terminalStatus = (await getJson(`${DATA}/hotspots/status`)).body;
+  const terminalResult = terminalStatus.lastResult ?? {};
+  ok(
+    "本轮真实管线为 test-p3 且未以异常失败",
+    terminalStatus.lastAttempt?.lastAttemptTrigger === "test-p3" &&
+      terminalStatus.lastAttempt?.lastAttemptOutcome !== "running" &&
+      terminalStatus.lastAttempt?.lastAttemptOutcome !== "failed" &&
+      !terminalResult.error,
+    JSON.stringify({ lastAttempt: terminalStatus.lastAttempt, error: terminalResult.error }).slice(0, 300),
+  );
 
   // ---------- 1. digest 落库与字段 ----------
   console.log("[1] digest 落库与字段完整性");
@@ -257,30 +299,16 @@ async function main() {
     );
   }
 
-  // ---------- 5. 调度状态（含启动补跑） ----------
-  console.log("[5] 调度状态与启动补跑");
+  // ---------- 5. 调度状态（复用 [0] 的真实执行，不再次出网） ----------
+  console.log("[5] 调度状态与执行结果");
   {
-    // M4：手动触发改为异步——POST 立即返回 accepted，轮询直至完成
-    const runRes = await fetch(`${DATA}/hotspots/run?trigger=test-p3`, { method: "POST" });
-    const runBody = await runRes.json();
-    ok(
-      "run 立即返回（accepted 或 already-running）",
-      runRes.status === 200 &&
-        (runBody.accepted === true ||
-          (runBody.accepted === false && String(runBody.note ?? "").includes("already running"))),
-      JSON.stringify(runBody).slice(0, 120),
-    );
-    const pollDeadline = Date.now() + 240_000;
-    let pollBody = null;
-    while (Date.now() < pollDeadline) {
-      await sleep(3000);
-      pollBody = await (await getJson(`${DATA}/hotspots/status`)).body;
-      if (pollBody.running === false && (pollBody.runs ?? 0) > 0) break;
-    }
-
     const { status, body } = await getJson(`${DATA}/hotspots/status`);
     ok("status 200", status === 200, `status=${status}`);
-    ok("盘前/盘后两个任务", (body.jobs ?? []).length === 2, JSON.stringify(body.jobs ?? []).slice(0, 160));
+    if (schedulersEnabled === "1") {
+      ok("盘前/盘后两个任务", (body.jobs ?? []).length === 2, JSON.stringify(body.jobs ?? []).slice(0, 160));
+    } else {
+      ok("显式关闭调度时 jobs 为空", (body.jobs ?? []).length === 0, JSON.stringify(body.jobs ?? []).slice(0, 160));
+    }
     ok("时区 Asia/Shanghai", body.timezone === "Asia/Shanghai", String(body.timezone));
     ok("已有执行记录（启动补跑/manual）", (body.runs ?? 0) > 0, `runs=${body.runs}`);
     const lr = body.lastResult ?? {};
