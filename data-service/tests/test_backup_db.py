@@ -160,6 +160,27 @@ def test_restore_rejects_unrelated_sqlite_schema() -> None:
         check("CR10-24🔁：冷启动备份恢复后确为 0 行", n == 0, str(n))
 
 
+def test_restore_uses_immutable_snapshot_without_touching_live_source() -> None:
+    """CR10-36：静态备份可走 :ro 挂载；在线备份源仍须读取活 WAL。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        target = os.path.join(tmp, "dev.db")
+        backup = os.path.join(tmp, "backup.db")
+        _make_restore_db(target, rows=5)
+        _make_restore_db(backup, rows=2)
+        before = open(backup, "rb").read()
+        with patch("backup_db._connect_ro", wraps=backup_db._connect_ro) as live_connect:
+            check("CR10-36：静态备份 restore 成功", backup_db.restore(backup, target) is True)
+            check("CR10-36：restore 不经过活库连接策略", live_connect.call_count == 0)
+        check("CR10-36：恢复不改变输入主库", open(backup, "rb").read() == before)
+        check("CR10-36：恢复不生成 WAL/SHM sidecar",
+              not os.path.exists(backup + "-wal") and not os.path.exists(backup + "-shm"))
+
+        out = os.path.join(tmp, "out")
+        with patch("backup_db._connect_snapshot_ro", wraps=backup_db._connect_snapshot_ro) as snapshot_connect:
+            check("CR10-36：在线备份仍成功", bool(backup_db.backup(target, out)))
+            check("CR10-36：在线备份不误用静态快照策略", snapshot_connect.call_count == 0)
+
+
 def test_restore_rename_failures_roll_back_every_file() -> None:
     """CR10-24：主库/WAL/SHM 任一改名失败，已挪走的文件全部还原。"""
     for suffix in ("", "-wal", "-shm"):
@@ -215,7 +236,7 @@ def test_restore_rollback_with_sidecars() -> None:
         good_backup = os.path.join(tmp, "good-bak.db")
         _make_restore_db(good_backup, rows=1)
 
-        # Connection 实例属性和 immutable 类型都不能 patch；在 _connect_ro 边界
+        # Connection 实例属性和 immutable 类型都不能 patch；在静态恢复源边界
         # 包装连接，让真正的 backup_db.restore() 调用这个受控失败替身。
         class FailingBackupConnection:
             def __init__(self, connection):
@@ -231,8 +252,8 @@ def test_restore_rollback_with_sidecars() -> None:
                 self._connection.close()
 
         with patch(
-            "backup_db._connect_ro",
-            return_value=FailingBackupConnection(backup_db._connect_ro(good_backup)),
+            "backup_db._connect_snapshot_ro",
+            return_value=FailingBackupConnection(backup_db._connect_snapshot_ro(good_backup)),
         ):
             ok = backup_db.restore(good_backup, live_db)
         check("D1：中途失败 → restore 返回 False", ok is False)
@@ -1130,6 +1151,7 @@ if __name__ == "__main__":
     test_backup_integrity_and_corrupt_cleanup()
     test_restore_rejects_invalid_backup()
     test_restore_rejects_unrelated_sqlite_schema()
+    test_restore_uses_immutable_snapshot_without_touching_live_source()
     test_restore_rename_failures_roll_back_every_file()
     test_restore_rollback_with_sidecars()
     test_restore_success_replaces_live()

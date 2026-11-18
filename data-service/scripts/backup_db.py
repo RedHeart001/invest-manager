@@ -28,8 +28,13 @@ DEFAULT_BACKUP_DIR = os.environ.get("BACKUP_DIR", "/backup")
 
 
 def _connect_ro(path: str) -> sqlite3.Connection:
-    """只读打开（uri 模式）：只读源不做任何写入，配合 backup API 取一致性快照。"""
+    """只读打开仍在运行的源库；不能用 immutable 忽略它尚未检查点的 WAL。"""
     return sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+
+
+def _connect_snapshot_ro(path: str) -> sqlite3.Connection:
+    """只读打开已经完成的静态备份，不向只读挂载目录请求 WAL/SHM 写权限。"""
+    return sqlite3.connect(f"file:{path}?mode=ro&immutable=1", uri=True)
 
 
 def backup(source: str, outdir: str) -> str:
@@ -84,7 +89,7 @@ def restore(backup_file: str, target: str) -> bool:
     # 且失败时自动回滚——此前若备份文件非法（空文件/非 SQLite），
     # sqlite3.connect 会静默创建空库，导致线上库被"恢复"成空文件。
     try:
-        src_check = _connect_ro(backup_file)
+        src_check = _connect_snapshot_ro(backup_file)
         try:
             integrity = src_check.execute("PRAGMA integrity_check").fetchone()
             if not integrity or integrity[0] != "ok":
@@ -133,9 +138,9 @@ def restore(backup_file: str, target: str) -> bool:
 
         # 用 backup API 反向写回（同样保证一致性）。
         write_started = True
-        # CR4（2026-09-15 review）：改只读打开备份源——此前用读写模式，
-        # 会在 /backup 旁生成 -wal/-shm，备份目录只读挂载时直接恢复失败。
-        src = _connect_ro(backup_file)
+        # CR10-36：备份是已经完成的静态快照。immutable 只读不会在 :ro 挂载目录
+        # 创建 -wal/-shm；该策略不能用于仍在写入的在线备份源。
+        src = _connect_snapshot_ro(backup_file)
         try:
             dst = sqlite3.connect(target)
             try:
