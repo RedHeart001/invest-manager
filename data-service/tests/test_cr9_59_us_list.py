@@ -109,9 +109,9 @@ def jsonp20(rows, tag="a", count="18241") -> str:
     return jsonp(padded, count)
 
 
-def page_of(symbols) -> str:
+def page_of(symbols, count="18241") -> str:
     """一整页由指定代码构成（数量须＝20 才算"满页"）。"""
-    return jsonp20([dict(NVDA, symbol=s) for s in symbols])
+    return jsonp20([dict(NVDA, symbol=s) for s in symbols], count=count)
 
 
 CALLS: list[dict] = []
@@ -377,10 +377,44 @@ def test_list_us_stocks_paging() -> None:
 
 
 def test_list_us_stocks_early_stop() -> None:
-    rows, meta = listed({1: page_of([f"A{i}" for i in range(PAGE_SIZE)]), 2: jsonp([NVDA])}, 6)
-    check("上游给不满一页 ⇒ 判定已到尾部", len(rows) == 21, str(len(rows)))
+    rows, meta = listed(
+        {1: page_of([f"A{i}" for i in range(PAGE_SIZE)], count="21"),
+         2: jsonp([NVDA])},
+        6,
+    )
+    check("声明总数已覆盖且末页不满 ⇒ 判定已到尾部", len(rows) == 21, str(len(rows)))
     check("停＝不再往后发请求（6 页的额度只用了 2 次）", len(CALLS) == 2, str(len(CALLS)))
     check("🔁 尾部不是失败：note 不提失败页数", "页失败" not in meta["note"], meta["note"][:160])
+
+
+def test_list_us_stocks_premature_short_page() -> None:
+    """CR10-37：声明总数未覆盖时，临时空/短页不得冒充真实尾页。"""
+    pages = {
+        1: page_of([f"A{i}" for i in range(PAGE_SIZE)], count="41"),
+        2: jsonp([]),
+        3: page_of([f"B{i}" for i in range(PAGE_SIZE)]),
+        4: jsonp([dict(NVDA, symbol="TAIL")]),
+    }
+    raised, msg = "", ""
+    try:
+        listed(pages, 6)
+    except Exception as e:  # noqa: BLE001
+        raised, msg = type(e).__name__, str(e)
+    check("CR10-37：声明 41 但第 2 页空页 ⇒ 拒绝交付部分名单",
+          raised == "ProviderError" and "拒绝交付部分名单" in msg and "41" in msg, f"{raised}｜{msg[:160]}")
+    check("CR10-37：异常空页直接失败，不跳过它继续拼后续页",
+          len(CALLS) == 2 and [c["params"]["page"] for c in CALLS] == ["1", "2"], str(len(CALLS)))
+
+    raised, msg = "", ""
+    try:
+        listed({1: page_of([f"A{i}" for i in range(PAGE_SIZE)], count="40"),
+                2: jsonp([NVDA])}, 6)
+    except Exception as e:  # noqa: BLE001
+        raised, msg = type(e).__name__, str(e)
+    check("CR10-37：声明 40、第 2 页仅 1 行 ⇒ 同样拒绝部分名单",
+          raised == "ProviderError" and "拒绝交付部分名单" in msg and "40" in msg, f"{raised}｜{msg[:160]}")
+    check("CR10-37：异常短页不重复购买，也不扫描后续页冒充全量",
+          len(CALLS) == 2 and [c["params"]["page"] for c in CALLS] == ["1", "2"], str(len(CALLS)))
 
 
 def test_list_us_stocks_partial_and_total_failure() -> None:
@@ -437,7 +471,7 @@ def test_category_gate() -> None:
 
     raised, msg = "", ""
     try:
-        listed({1: jsonp([VISA, QQQ, ZZZTX])}, 1)
+        listed({1: jsonp([VISA, QQQ, ZZZTX], count="3")}, 1)
     except Exception as e:  # noqa: BLE001
         raised, msg = type(e).__name__, str(e)
     check("整页都不带行业 ⇒ ProviderError（空名单不许冒充成功），成因带上剔了多少",
@@ -469,7 +503,7 @@ def test_us_yi_full_coverage() -> None:
         akp.US_LIST_WHOLE_TIMEOUT_S = saved
 
     # 用例②：末不满页＝翻完上游名单 ⇒ subset=False、degraded 仍 True、note 说"已取全"
-    p1 = page_of([f"A{i}" for i in range(PAGE_SIZE)])
+    p1 = page_of([f"A{i}" for i in range(PAGE_SIZE)], count="25")
     p2 = jsonp([dict(NVDA, symbol=f"T{i}") for i in range(5)], count="25")
     rows, meta = listed({1: p1, 2: p2}, 950)
     check("乙用例②：翻到尾部（25 只声明、2 页翻完）⇒ 25 行全留", len(rows) == 25, str(len(rows)))
@@ -495,7 +529,7 @@ def test_us_yi_full_coverage() -> None:
 
     # 用例④：翻到尾部但中途有失败页 ⇒ 仍声明子集（缺页的盘子不许冒充全量，R16）
     rows4, meta4 = listed(
-        {1: page_of([f"A{i}" for i in range(PAGE_SIZE)]),
+        {1: page_of([f"A{i}" for i in range(PAGE_SIZE)], count="21"),
          2: RuntimeError("RemoteDisconnected"),
          3: jsonp([dict(NVDA, symbol="TAIL")], count="21")},
         3,
@@ -509,6 +543,8 @@ def test_us_yi_full_coverage() -> None:
           akp._us_coverage_subset(3, False, "18241", []) is True)
     check("🔁 纯函数钻：尾部＋失败页形状必须判子集（恒 False 的改法在这里红）",
           akp._us_coverage_subset(3, True, "21", ["p2:RuntimeError"]) is True)
+    check("🔁 纯函数钻：累计实收覆盖声明数 ⇒ 全量；不能用页数×20 猜覆盖",
+          akp._us_coverage_subset(21, False, "21", []) is False)
     check("🔁 纯函数钻：翻完且零失败 ⇒ 全量；声明数不是数字 ⇒ 只认 exhausted",
           akp._us_coverage_subset(913, True, "18241", []) is False
           and akp._us_coverage_subset(913, False, "", []) is True)
@@ -542,6 +578,7 @@ if __name__ == "__main__":
     test_list_us_stocks_declaration()
     test_list_us_stocks_paging()
     test_list_us_stocks_early_stop()
+    test_list_us_stocks_premature_short_page()
     test_list_us_stocks_partial_and_total_failure()
     test_category_gate()
     test_us_yi_full_coverage()

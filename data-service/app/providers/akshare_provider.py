@@ -234,12 +234,12 @@ def _us_list_pages() -> int:
     )
 
 
-def _us_coverage_subset(pages_done: int, exhausted: bool, declared: str, failures: list[str]) -> bool:
-    """覆盖面判定（乙，11-12）：翻完上游名单（末不满页，或已翻页数×页宽 ≥ 上游声明数）
+def _us_coverage_subset(received: int, exhausted: bool, declared: str, failures: list[str]) -> bool:
+    """覆盖面判定（乙，11-12）：实际收到行数覆盖上游声明，或已到真实尾页，
     且中途零失败页 ⇒ 全量（False）；否则子集（True）。中途有失败页即便翻到尾部也声明
     子集——缺页的盘子不许冒充全量（R16）。纯函数，离线可钻。"""
     covered_all = exhausted or (
-        declared.isdigit() and pages_done * US_LIST_PAGE_SIZE >= int(declared)
+        declared.isdigit() and received >= int(declared)
     )
     return (not covered_all) or bool(failures)
 
@@ -1277,12 +1277,13 @@ class AkshareProvider(BaseProvider):
         """
         pages = _us_list_pages()
 
-        def _fetch() -> tuple[list[dict], str, list[str], int, int, bool]:
+        def _fetch() -> tuple[list[dict], str, list[str], int, int, bool, int]:
             rows: list[dict] = []
             seen: set[str] = set()
             declared = ""
             failures: list[str] = []
             dropped = 0  # #32 的 (2) 定案：按"没有行业标签"剔掉的行数（要能在 note 里看见）
+            received = 0
             pages_done = 0
             exhausted = False
             deadline = time.monotonic() + US_LIST_WHOLE_TIMEOUT_S
@@ -1318,6 +1319,19 @@ class AkshareProvider(BaseProvider):
                 if not declared:
                     declared = str(payload.get("count") or "")
                 data = payload.get("data") or []
+                received += len(data)
+                # CR10-37：11-18 第 53 页临时空/短页被当成尾部，18,393 只的盘子
+                # 只交付 52 页。只有**实际累计接收行数**覆盖第一页声明总数时，
+                # 短页才可能是真尾页；后续页 count 可能是另一份口径，不能采用。
+                if (
+                    len(data) < US_LIST_PAGE_SIZE
+                    and declared.isdigit()
+                    and received < int(declared)
+                ):
+                    raise ProviderError(
+                        f"us list premature short page p{page}: {len(data)} 行，"
+                        f"累计收到 {received} < 上游声明 {declared}；拒绝交付部分名单"
+                    )
                 for row in data:
                     product = _us_product(row)
                     if product is None or product["code"] in seen:
@@ -1331,10 +1345,10 @@ class AkshareProvider(BaseProvider):
                     rows.append(product)
                 if len(data) < US_LIST_PAGE_SIZE:
                     exhausted = True
-                    break  # 上游给不满一页＝已到尾部（10-03 实测第 913 页只回 1 行）
-            return rows, declared, failures, dropped, pages_done, exhausted
+                    break  # 实收已覆盖声明总数（或无声明可核对）才到这里＝真实尾页
+            return rows, declared, failures, dropped, pages_done, exhausted, received
 
-        rows, declared, failures, dropped, pages_done, exhausted = _ak_request(
+        rows, declared, failures, dropped, pages_done, exhausted, received = _ak_request(
             _fetch, US_LIST_WHOLE_TIMEOUT_S, "sina.us-list"
         )
         if not rows:
@@ -1349,7 +1363,7 @@ class AkshareProvider(BaseProvider):
             key = r["exchange"] or "?"
             markets[key] = markets.get(key, 0) + 1
         spread = "/".join(f"{k}×{v}" for k, v in sorted(markets.items()))
-        subset = _us_coverage_subset(pages_done, exhausted, declared, failures)
+        subset = _us_coverage_subset(received, exhausted, declared, failures)
         coverage = (
             (
                 f"美股主数据已取全上游名单（翻完 {pages_done} 页"
