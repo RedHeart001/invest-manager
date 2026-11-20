@@ -221,6 +221,7 @@ US_LIST_DEFAULT_PAGES = 950  # 乙全量（11-12 拍板）＝给到硬上限、�
 US_LIST_PAGE_CEILING = 950  # 硬上限：防"合法但手滑多打两个 0"的 env 值变成几千次上游请求；950×20=19,000 只＝对 11-12 盘子 18,377 留约半年增长余量
 US_LIST_PAGE_INTERVAL_S = 0.5  # 翻页之间的节流（新浪侧无声明，按对上游礼貌的常规间隔）
 US_LIST_REQUEST_TIMEOUT_S = 20.0  # 单页超时（实测 0.19–6.31s，最慢那一档留 3 倍余量）
+US_LIST_SHORT_PAGE_RETRIES = 2  # CR10-39：覆盖不足的异常短页最多同页重试 2 次；普通网络错误不重试
 US_LIST_WHOLE_TIMEOUT_S = 1500.0  # 整条看门狗（乙）：名义 950 页上限 × ≈1s ≈ 950s（11-12 实测 913 页 808s≈0.885s/页），1500s ≈ 1.58 倍余量；必须＞名义——超时＝整腿失败（timeout.py 返回 (None, TimeoutError)，没有部分交付）；名义 1s/页也装得下整个硬上限 950 页，见 test_cr9_59_us_list
 
 
@@ -1292,46 +1293,74 @@ class AkshareProvider(BaseProvider):
                 if time.monotonic() > deadline:
                     break
                 pages_done = page
-                if page > 1:
-                    time.sleep(US_LIST_PAGE_INTERVAL_S)
-                try:
-                    res = requests.get(
-                        US_LIST_URL,
-                        params={
-                            "page": str(page),
-                            "num": str(US_LIST_PAGE_SIZE),
-                            "sort": "",
-                            "asc": "0",
-                            "market": "",
-                            "id": "",
-                        },
-                        timeout=US_LIST_REQUEST_TIMEOUT_S,
+                data = None
+                payload = None
+                for attempt in range(US_LIST_SHORT_PAGE_RETRIES + 1):
+                    if time.monotonic() > deadline:
+                        break
+                    if page > 1 or attempt > 0:
+                        time.sleep(US_LIST_PAGE_INTERVAL_S)
+                    if time.monotonic() > deadline:
+                        break
+                    try:
+                        res = requests.get(
+                            US_LIST_URL,
+                            params={
+                                "page": str(page),
+                                "num": str(US_LIST_PAGE_SIZE),
+                                "sort": "",
+                                "asc": "0",
+                                "market": "",
+                                "id": "",
+                            },
+                            timeout=US_LIST_REQUEST_TIMEOUT_S,
+                        )
+                        res.raise_for_status()
+                        payload = _jsonp_payload(res.text)
+                    except Exception as e:  # noqa: BLE001 中途失败要能带着已拿到的行继续，成因要能转述
+                        # 记 **类型＋原话**（CR9-30 同族：只有类名的错误说明归不了因——
+                        # `RemoteDisconnected` 与 `Timeout` 都叫 `ConnectionError`）。截 60 字防
+                        # requests 把整条 URL 塞进 message。普通网络错误不顺带扩大重试范围。
+                        failures.append(f"p{page}:{type(e).__name__}: {str(e)[:60]}")
+                        logger.warning("us list page %s failed: %s", page, e)
+                        break
+                    if not declared:
+                        declared = str(payload.get("count") or "")
+                    data = payload.get("data") or []
+                    premature = (
+                        len(data) < US_LIST_PAGE_SIZE
+                        and declared.isdigit()
+                        and received + len(data) < int(declared)
                     )
-                    res.raise_for_status()
-                    payload = _jsonp_payload(res.text)
-                except Exception as e:  # noqa: BLE001 中途失败要能带着已拿到的行继续，成因要能转述
-                    # 记 **类型＋原话**（CR9-30 同族：只有类名的错误说明归不了因——
-                    # `RemoteDisconnected` 与 `Timeout` 都叫 `ConnectionError`）。截 60 字防
-                    # requests 把整条 URL 塞进 message。
-                    failures.append(f"p{page}:{type(e).__name__}: {str(e)[:60]}")
-                    logger.warning("us list page %s failed: %s", page, e)
+                    if not premature:
+                        break
+                    # CR10-39：只重试同一页，且只有最终采用的响应进入 received/rows。
+                    # 重试耗尽仍覆盖不足时沿用 CR10-37 fail-closed，不跳页交付部分名单。
+                    if attempt < US_LIST_SHORT_PAGE_RETRIES:
+                        logger.warning(
+                            "us list premature short page p%s attempt %s/%s: %s rows; retry same page",
+                            page, attempt + 1, US_LIST_SHORT_PAGE_RETRIES + 1, len(data),
+                        )
+                        continue
+                    raise ProviderError(
+                        f"us list premature short page p{page}: {len(data)} 行，"
+                        f"累计收到 {received + len(data)} < 上游声明 {declared}；"
+                        f"同页 {attempt + 1} 次尝试后仍不足，拒绝交付部分名单"
+                    )
+                if data is None:
                     continue
-                if not declared:
-                    declared = str(payload.get("count") or "")
-                data = payload.get("data") or []
-                received += len(data)
-                # CR10-37：11-18 第 53 页临时空/短页被当成尾部，18,393 只的盘子
-                # 只交付 52 页。只有**实际累计接收行数**覆盖第一页声明总数时，
-                # 短页才可能是真尾页；后续页 count 可能是另一份口径，不能采用。
                 if (
                     len(data) < US_LIST_PAGE_SIZE
                     and declared.isdigit()
-                    and received < int(declared)
+                    and received + len(data) < int(declared)
                 ):
+                    # 重试前/节流中跨过 deadline 时也不能把上一枚被弃短页当成最终响应。
                     raise ProviderError(
                         f"us list premature short page p{page}: {len(data)} 行，"
-                        f"累计收到 {received} < 上游声明 {declared}；拒绝交付部分名单"
+                        f"累计收到 {received + len(data)} < 上游声明 {declared}；"
+                        "同页重试未完成，拒绝交付部分名单"
                     )
+                received += len(data)
                 for row in data:
                     product = _us_product(row)
                     if product is None or product["code"] in seen:

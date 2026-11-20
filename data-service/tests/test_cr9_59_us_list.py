@@ -127,13 +127,24 @@ class FakeResponse:
 
 
 def install_fake(pages: dict[int, object]) -> None:
-    """把 provider 模块里的 `requests` 换掉；`pages` 没给的页号一律抛（＝越界可见）。"""
+    """把 provider 模块里的 `requests` 换掉；list/tuple 表示同页逐次尝试的响应。
+
+    序列耗尽后继续请求会抛错，令多买一次也可见；没备数据的页号同样抛错。
+    """
     CALLS.clear()
+    attempts: dict[int, int] = {}
 
     def fake_get(url, params=None, timeout=None, **kw):
         raw_page = str((params or {}).get("page", ""))
+        page = int(raw_page) if raw_page.isdigit() else -1
         CALLS.append({"url": url, "params": params or {}, "timeout": timeout})
-        spec = pages.get(int(raw_page) if raw_page.isdigit() else -1)
+        spec = pages.get(page)
+        if isinstance(spec, (list, tuple)):
+            attempt = attempts.get(page, 0)
+            if not spec or attempt >= len(spec):
+                raise AssertionError(f"第 {page} 页尝试次数超出假数据序列 {len(spec)}")
+            spec = spec[attempt]
+            attempts[page] = attempt + 1
         if isinstance(spec, Exception):
             raise spec
         if spec is None:
@@ -388,33 +399,119 @@ def test_list_us_stocks_early_stop() -> None:
 
 
 def test_list_us_stocks_premature_short_page() -> None:
-    """CR10-37：声明总数未覆盖时，临时空/短页不得冒充真实尾页。"""
-    pages = {
-        1: page_of([f"A{i}" for i in range(PAGE_SIZE)], count="41"),
-        2: jsonp([]),
-        3: page_of([f"B{i}" for i in range(PAGE_SIZE)]),
-        4: jsonp([dict(NVDA, symbol="TAIL")]),
-    }
+    """CR10-37/39：异常短页同页有界重试；恢复可继续，耗尽仍拒绝。"""
     raised, msg = "", ""
     try:
-        listed(pages, 6)
+        listed({
+            1: page_of([f"A{i}" for i in range(PAGE_SIZE)], count="41"),
+            2: [jsonp([])] * (akp.US_LIST_SHORT_PAGE_RETRIES + 1),
+            3: page_of([f"B{i}" for i in range(PAGE_SIZE)]),
+        }, 6)
     except Exception as e:  # noqa: BLE001
         raised, msg = type(e).__name__, str(e)
-    check("CR10-37：声明 41 但第 2 页空页 ⇒ 拒绝交付部分名单",
-          raised == "ProviderError" and "拒绝交付部分名单" in msg and "41" in msg, f"{raised}｜{msg[:160]}")
-    check("CR10-37：异常空页直接失败，不跳过它继续拼后续页",
-          len(CALLS) == 2 and [c["params"]["page"] for c in CALLS] == ["1", "2"], str(len(CALLS)))
+    check("CR10-39：异常空页重试耗尽后仍拒绝交付部分名单",
+          raised == "ProviderError" and "拒绝交付部分名单" in msg and "3 次尝试" in msg,
+          f"{raised}｜{msg[:160]}")
+    check("CR10-39：空页最多 3 次总尝试，不跳页读取后续名单",
+          len(CALLS) == 4 and [c["params"]["page"] for c in CALLS] == ["1", "2", "2", "2"],
+          str([c["params"]["page"] for c in CALLS]))
 
     raised, msg = "", ""
     try:
         listed({1: page_of([f"A{i}" for i in range(PAGE_SIZE)], count="40"),
-                2: jsonp([NVDA])}, 6)
+                2: [jsonp([NVDA])] * (akp.US_LIST_SHORT_PAGE_RETRIES + 1)}, 6)
     except Exception as e:  # noqa: BLE001
         raised, msg = type(e).__name__, str(e)
-    check("CR10-37：声明 40、第 2 页仅 1 行 ⇒ 同样拒绝部分名单",
-          raised == "ProviderError" and "拒绝交付部分名单" in msg and "40" in msg, f"{raised}｜{msg[:160]}")
-    check("CR10-37：异常短页不重复购买，也不扫描后续页冒充全量",
-          len(CALLS) == 2 and [c["params"]["page"] for c in CALLS] == ["1", "2"], str(len(CALLS)))
+    check("CR10-37：声明 40、第 2 页持续仅 1 行 ⇒ 同样拒绝部分名单",
+          raised == "ProviderError" and "拒绝交付部分名单" in msg and "40" in msg,
+          f"{raised}｜{msg[:160]}")
+    check("CR10-39：持续短页达到有界上限后停止，不扫描后续页冒充全量",
+          len(CALLS) == 4 and [c["params"]["page"] for c in CALLS] == ["1", "2", "2", "2"],
+          str([c["params"]["page"] for c in CALLS]))
+
+    # 第 2 页首次短页的 SHORT 绝不能进入结果；重试满页后正常进入第 3 页真实尾页。
+    short = [dict(NVDA, symbol=f"SHORT{i}") for i in range(18)]
+    recovered = [dict(NVDA, symbol=f"B{i}") for i in range(PAGE_SIZE)]
+    rows, meta = listed({
+        1: page_of([f"A{i}" for i in range(PAGE_SIZE)], count="41"),
+        2: [jsonp(short, count="41"), page_of([f"B{i}" for i in range(PAGE_SIZE)], count="41")],
+        3: jsonp([dict(NVDA, symbol="TAIL")], count="41"),
+    }, 6)
+    codes = [row["code"] for row in rows]
+    check("CR10-39：首次短页后同页恢复满页，继续到真实尾页并声明全量",
+          len(rows) == 41 and meta["intentionalSubset"] is False, str(meta)[:160])
+    check("CR10-39：恢复路径请求序列为 1,2,2,3，不跳页也不多买后续页",
+          [c["params"]["page"] for c in CALLS] == ["1", "2", "2", "3"],
+          str([c["params"]["page"] for c in CALLS]))
+    check("CR10-39：被弃短页的 18 行不重复计入实收或产品",
+          not any(code.startswith("SHORT") for code in codes)
+          and len([code for code in codes if code.startswith("B")]) == 20,
+          str(codes[:30]))
+    check("CR10-39：恢复后采用响应只登记一次，没有重复主键", len(codes) == len(set(codes)))
+
+    # 第二次也短、第三次恢复，钉住“最多 2 次重试”不是“只重试一次”。
+    rows, meta = listed({
+        1: page_of([f"A{i}" for i in range(PAGE_SIZE)], count="41"),
+        2: [jsonp(short, count="41"), jsonp(short, count="41"),
+            page_of([f"B{i}" for i in range(PAGE_SIZE)], count="41")],
+        3: jsonp([dict(NVDA, symbol="TAIL")], count="41"),
+    }, 6)
+    check("CR10-39：第二次重试恢复仍有效，最终 41 行且全量",
+          len(rows) == 41 and meta["intentionalSubset"] is False, str(meta)[:160])
+    check("CR10-39：第三次总尝试后不再多发同页请求",
+          [c["params"]["page"] for c in CALLS] == ["1", "2", "2", "2", "3"],
+          str([c["params"]["page"] for c in CALLS]))
+
+    # 节流跨过看门狗期限后，被弃短页不能从内层 break 漏进 received/rows。
+    install_fake({
+        1: page_of([f"A{i}" for i in range(PAGE_SIZE)], count="41"),
+        2: [jsonp(short, count="41"), page_of([f"B{i}" for i in range(PAGE_SIZE)], count="41")],
+    })
+    saved_sleep, saved_monotonic = akp.time.sleep, akp.time.monotonic
+    saved_timeout, saved_request = akp.US_LIST_WHOLE_TIMEOUT_S, akp._ak_request
+    clock = [0.0]
+    sleeps = [0]
+
+    def fake_sleep(_seconds):
+        sleeps[0] += 1
+        if sleeps[0] == 2:  # 第 2 页首次请求前的节流正常，短页后的重试节流才到期
+            clock[0] += 2000.0
+
+    try:
+        akp.time.sleep = fake_sleep
+        akp.time.monotonic = lambda: clock[0]
+        akp.US_LIST_WHOLE_TIMEOUT_S = 1500.0
+        akp._ak_request = lambda fn, seconds, name: fn()
+        raised, msg = "", ""
+        try:
+            with with_pages(6):
+                akp.AkshareProvider()._list_us_stocks()
+        except Exception as e:  # noqa: BLE001
+            raised, msg = type(e).__name__, str(e)
+    finally:
+        akp.time.sleep = saved_sleep
+        akp.time.monotonic = saved_monotonic
+        akp.US_LIST_WHOLE_TIMEOUT_S = saved_timeout
+        akp._ak_request = saved_request
+    check("CR10-39：重试节流跨过看门狗后仍拒绝，不采用被弃短页",
+          raised == "ProviderError" and "同页重试未完成" in msg,
+          f"{raised}｜{msg[:160]}")
+    check("CR10-39：看门狗到期后不再发同页重试",
+          [c["params"]["page"] for c in CALLS] == ["1", "2"],
+          str([c["params"]["page"] for c in CALLS]))
+
+    # 普通网络错误不顺带重试；后续到尾部也不能冒充全量。
+    rows, meta = listed({
+        1: page_of([f"A{i}" for i in range(PAGE_SIZE)], count="21"),
+        2: RuntimeError("RemoteDisconnected"),
+        3: jsonp([dict(NVDA, symbol="TAIL")], count="21"),
+    }, 3)
+    check("CR10-39：普通网络错误保持一次请求与失败页子集语义",
+          [c["params"]["page"] for c in CALLS] == ["1", "2", "3"]
+          and meta["intentionalSubset"] is True and "1 页失败" in meta["note"], str(meta)[:180])
+
+    # 已有 CR10-37 用例证明真实尾页只买一次；这里再钉重试常数与总尝试数的关系。
+    check("CR10-39：首次响应之外最多重试 2 次", akp.US_LIST_SHORT_PAGE_RETRIES == 2)
 
 
 def test_list_us_stocks_partial_and_total_failure() -> None:
