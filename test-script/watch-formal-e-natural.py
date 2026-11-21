@@ -283,10 +283,20 @@ def record_error(state, message):
         state["errorsDropped"] = int(state.get("errorsDropped", 0)) + 1
 
 
-def requirements_met(state):
-    if any(state.get(key) is None for key in ["naturalSync", "naturalHotspot", "naturalBackup"]):
+def hotspot_required(target):
+    """热点调度仅在工作日运行；周末无窗口不是业务失败或仪器缺测。"""
+    return date.fromisoformat(target).weekday() < 5
+
+
+def required_windows(target):
+    return ["naturalSync", "naturalBackup"] + (["naturalHotspot"] if hotspot_required(target) else [])
+
+
+def requirements_met(state, target):
+    windows = required_windows(target)
+    if any(state.get(key) is None for key in windows):
         return False
-    return all(state[key].get("outcome") == "completed" for key in ["naturalSync", "naturalHotspot", "naturalBackup"]) and bool((state.get("independentRestore") or {}).get("passed"))
+    return all(state[key].get("outcome") == "completed" for key in windows) and bool((state.get("independentRestore") or {}).get("passed"))
 
 
 def finish(state, args, status, note, code):
@@ -341,10 +351,10 @@ def main(argv=None):
             observe(state, args)
             if not args.observe_only:
                 emit(state, args, "observation persisted")
-            if requirements_met(state):
+            if requirements_met(state, args.target):
                 return finish(state, args, "finished", "all target natural requirements met", 0)
-            if all(state.get(key) is not None for key in ["naturalSync", "naturalHotspot", "naturalBackup"]):
-                return finish(state, args, "finished-not-met", "all natural terminal states captured; requirements not met", 2)
+            if all(state.get(key) is not None for key in required_windows(args.target)):
+                return finish(state, args, "finished-not-met", "all due natural terminal states captured; requirements not met", 2)
             if time.monotonic() >= deadline:
                 return finish(state, args, "deadline", "deadline reached without all target windows", 2)
         except KeyboardInterrupt:

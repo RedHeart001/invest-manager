@@ -221,7 +221,8 @@ US_LIST_DEFAULT_PAGES = 950  # 乙全量（11-12 拍板）＝给到硬上限、�
 US_LIST_PAGE_CEILING = 950  # 硬上限：防"合法但手滑多打两个 0"的 env 值变成几千次上游请求；950×20=19,000 只＝对 11-12 盘子 18,377 留约半年增长余量
 US_LIST_PAGE_INTERVAL_S = 0.5  # 翻页之间的节流（新浪侧无声明，按对上游礼貌的常规间隔）
 US_LIST_REQUEST_TIMEOUT_S = 20.0  # 单页超时（实测 0.19–6.31s，最慢那一档留 3 倍余量）
-US_LIST_SHORT_PAGE_RETRIES = 2  # CR10-39：覆盖不足的异常短页最多同页重试 2 次；普通网络错误不重试
+US_LIST_SHORT_PAGE_RETRIES = 2  # CR10-40：每页每轮最多 3 次总尝试；未解决页再集中修复
+US_LIST_REPAIR_ROUNDS = 2  # CR10-40：首轮之外最多 2 轮集中修复；所有轮次共享整条看门狗
 US_LIST_WHOLE_TIMEOUT_S = 1500.0  # 整条看门狗（乙）：名义 950 页上限 × ≈1s ≈ 950s（11-12 实测 913 页 808s≈0.885s/页），1500s ≈ 1.58 倍余量；必须＞名义——超时＝整腿失败（timeout.py 返回 (None, TimeoutError)，没有部分交付）；名义 1s/页也装得下整个硬上限 950 页，见 test_cr9_59_us_list
 
 
@@ -235,10 +236,22 @@ def _us_list_pages() -> int:
     )
 
 
+def _us_page_count(declared: int) -> int:
+    """完整采集的页义务；配置页数只允许降低请求额度，不能再发布截断名单。"""
+    if declared <= 0:
+        raise ProviderError(f"us list invalid declared total: {declared}")
+    return (declared + US_LIST_PAGE_SIZE - 1) // US_LIST_PAGE_SIZE
+
+
+def _us_expected_rows(page: int, declared: int) -> int:
+    pages = _us_page_count(declared)
+    if page < 1 or page > pages:
+        raise ValueError(f"page outside declared snapshot: {page}")
+    return min(US_LIST_PAGE_SIZE, declared - (page - 1) * US_LIST_PAGE_SIZE)
+
+
 def _us_coverage_subset(received: int, exhausted: bool, declared: str, failures: list[str]) -> bool:
-    """覆盖面判定（乙，11-12）：实际收到行数覆盖上游声明，或已到真实尾页，
-    且中途零失败页 ⇒ 全量（False）；否则子集（True）。中途有失败页即便翻到尾部也声明
-    子集——缺页的盘子不许冒充全量（R16）。纯函数，离线可钻。"""
+    """历史覆盖读数保留给旧调用方；CR10-40 主路径只允许完整快照交付。"""
     covered_all = exhausted or (
         declared.isdigit() and received >= int(declared)
     )
@@ -1263,173 +1276,207 @@ class AkshareProvider(BaseProvider):
         }
 
     def _list_us_stocks(self) -> tuple[list[dict], dict]:
-        """美股主数据＝新浪排行名单（CR9-59／#32：10-04 甲＝有界前 N 页 → 11-12 主人拍板**乙全量**）。
+        """美股主数据＝完整候选快照；不完整时绝不返回可提交产品行。
 
-        为什么全量这么贵（10-03/10-04 实测，不是推断）：`num` 被服务端硬截到 20 ⇒ 全量
-        18,241 只（10-04 盘子；11-12 实测已长到 18,377）＝**900+ 次请求**、串行名义 ≈15 分钟；
-        `market` 参数不生效（传 NASDAQ 照样混返回），想按交易所缩盘子只能全量再自筛。
-        乙的预算链（ds 看门狗 1500s ＜ web us 预算 1800s ＜ 传输层 2700s）见 docs/history/2026-11-12 轮明细。
-
-        `degraded` 恒 True：行业闸仍按设计剔行 ⇒ 留库行数小于上游声明总数，按 CR9-31
-        的口径必须让消费侧读得到。`intentionalSubset` 改按实际覆盖面判定（11-12）：
-        翻完上游名单且无失败页 ⇒ False；截断/中途有失败页 ⇒ True（web 缩水闸只在收到
-        这个声明时放行有意子集）。10-04 03:1x 主人的字（#32 的 (2)）那道**行业闸**不变＝
-        `category` 为 null 或空串的行不进库；闸在解析之后、翻页之前 ⇒ **请求数不受它影响**。
+        CR10-40：声明决定页义务，每页必须在共享看门狗内 resolved，尾部按页位应取
+        行数判断。候选还需原始代码数、稳定声明和穷尽空页证明；行业筛选发生在完整
+        采集之后，与 acquisitionComplete 分账。
         """
-        pages = _us_list_pages()
+        configured_pages = _us_list_pages()
 
-        def _fetch() -> tuple[list[dict], str, list[str], int, int, bool, int]:
+        def _fetch() -> tuple[list[dict], dict]:
+            deadline = time.monotonic() + US_LIST_WHOLE_TIMEOUT_S
+
+            class SnapshotChanged(ProviderError):
+                """声明漂移不是单页故障；不得把不同时点拼进同一候选。"""
+
+            def request_page(page: int, session) -> tuple[str, list[dict]]:
+                """单次 HTTP；所有异常统一由页义务层决定同页重试，禁止嵌套重试。"""
+                if time.monotonic() > deadline:
+                    raise ProviderError("us list whole deadline reached; incomplete snapshot rejected")
+                if page > 1:
+                    time.sleep(US_LIST_PAGE_INTERVAL_S)
+                if time.monotonic() > deadline:
+                    raise ProviderError("us list whole deadline reached before page retry")
+                res = session.get(
+                    US_LIST_URL,
+                    params={
+                        "page": str(page), "num": str(US_LIST_PAGE_SIZE),
+                        "sort": "", "asc": "0", "market": "", "id": "",
+                    },
+                    timeout=US_LIST_REQUEST_TIMEOUT_S,
+                )
+                res.raise_for_status()
+                payload = _jsonp_payload(res.text)
+                page_declared = str(payload.get("count") or "")
+                data = payload.get("data") or []
+                if not page_declared.isdigit() or not isinstance(data, list):
+                    raise ValueError("missing numeric count or list data")
+                return page_declared, data
+
+            # 集中修复使用新 Session，避免复用首轮失效连接；轻量测试替身可只有 get。
+            session = requests.Session() if hasattr(requests, "Session") else requests
+            raw_rows: list[dict] = []
+            probe_page = 0
+            declared = ""
+            total = 0
+            required_pages = 0
+            pages_data: dict[int, list[dict]] = {}
+            failures: dict[int, str] = {}
+
+            def request_obligation(page: int, page_session) -> None:
+                """同页立即恢复网络/解析/短页；成功才登记，失败留给集中修复。"""
+                for attempt in range(US_LIST_SHORT_PAGE_RETRIES + 1):
+                    try:
+                        page_declared, data = request_page(page, page_session)
+                        if declared and page_declared != declared:
+                            raise SnapshotChanged(
+                                f"us list declaration changed during snapshot: {declared} -> {page_declared}"
+                            )
+                        expected = _us_expected_rows(page, total)
+                        if len(data) != expected:
+                            raise ValueError(f"expected {expected} rows, got {len(data)}")
+                        pages_data[page] = data
+                        failures.pop(page, None)
+                        return
+                    except SnapshotChanged:
+                        raise
+                    except Exception as exc:  # noqa: BLE001 每页同页有界恢复
+                        logger.warning(
+                            "us list page %s obligation attempt %s/%s unresolved: %s",
+                            page, attempt + 1, US_LIST_SHORT_PAGE_RETRIES + 1, exc,
+                        )
+                failures[page] = f"unresolved after {US_LIST_SHORT_PAGE_RETRIES + 1} same-page attempts"
+
+            try:
+                # 首页先拿声明以建立页义务；网络/解析失败也受同页次数约束，不能一发即弃。
+                for attempt in range(US_LIST_SHORT_PAGE_RETRIES + 1):
+                    try:
+                        declared, first_rows = request_page(1, session)
+                        break
+                    except Exception as exc:  # noqa: BLE001 声明尚未建立，仅恢复单次请求故障
+                        logger.warning(
+                            "us list first page attempt %s/%s unresolved: %s",
+                            attempt + 1, US_LIST_SHORT_PAGE_RETRIES + 1, exc,
+                        )
+                if not declared:
+                    raise ProviderError("us list first page unresolved; no snapshot candidate")
+                total = int(declared)
+                required_pages = _us_page_count(total)
+                if required_pages > configured_pages:
+                    raise ProviderError(
+                        f"us list page budget {configured_pages} < required {required_pages}; "
+                        "truncated snapshots are not publishable"
+                    )
+                if len(first_rows) == _us_expected_rows(1, total):
+                    pages_data[1] = first_rows
+                else:
+                    failures[1] = "first response violates page obligation"
+                for page in range(1, required_pages + 1):
+                    if page not in pages_data:
+                        request_obligation(page, session)
+
+                # 首轮失败的页不丢弃、不拼成子集；最多再做两轮集中修复。
+                for repair_round in range(US_LIST_REPAIR_ROUNDS):
+                    if not failures:
+                        break
+                    pending = sorted(failures)
+                    logger.info("us list repair round %s: %s pages", repair_round + 1, len(pending))
+                    repair_session = requests.Session() if hasattr(requests, "Session") else requests
+                    try:
+                        for page in pending:
+                            request_obligation(page, repair_session)
+                    finally:
+                        close = getattr(repair_session, "close", None)
+                        if close:
+                            close()
+
+                if failures or len(pages_data) != required_pages:
+                    detail = "；".join(f"p{page}: {failures[page]}" for page in sorted(failures)[:5])
+                    raise ProviderError(
+                        f"us list incomplete snapshot: {len(pages_data)}/{required_pages} pages resolved"
+                        + (f"（{detail}）" if detail else "")
+                    )
+
+                raw_rows = [row for page in range(1, required_pages + 1) for row in pages_data[page]]
+                symbols = [str(row.get("symbol") or "").strip() for row in raw_rows if isinstance(row, dict)]
+                if len(raw_rows) != total or len(symbols) != total or any(not code for code in symbols):
+                    raise ProviderError("us list raw row/symbol count differs from declaration")
+                if len(set(symbols)) != total:
+                    raise ProviderError(
+                        f"us list duplicate symbols across snapshot: unique {len(set(symbols))} < declared {total}"
+                    )
+
+                # 声明范围之外必须为空，防止声明过小而漏掉仍存在的后续名单。
+                probe_page = required_pages + 1
+                probe_declared = ""
+                probe_rows: list[dict] | None = None
+                for attempt in range(US_LIST_SHORT_PAGE_RETRIES + 1):
+                    try:
+                        probe_declared, probe_rows = request_page(probe_page, session)
+                        break
+                    except Exception as exc:  # noqa: BLE001 穷尽证明本身也必须可恢复
+                        logger.warning(
+                            "us list exhaustion probe p%s attempt %s/%s failed: %s",
+                            probe_page, attempt + 1, US_LIST_SHORT_PAGE_RETRIES + 1, exc,
+                        )
+                if probe_rows is None:
+                    raise ProviderError(f"us list exhaustion probe p{probe_page} unresolved")
+                if probe_declared != declared:
+                    raise SnapshotChanged(
+                        f"us list declaration changed at exhaustion probe: {declared} -> {probe_declared}"
+                    )
+                if probe_rows:
+                    raise ProviderError(
+                        f"us list exhaustion probe p{probe_page} returned {len(probe_rows)} rows"
+                    )
+            finally:
+                close = getattr(session, "close", None)
+                if close:
+                    close()
+
             rows: list[dict] = []
             seen: set[str] = set()
-            declared = ""
-            failures: list[str] = []
-            dropped = 0  # #32 的 (2) 定案：按"没有行业标签"剔掉的行数（要能在 note 里看见）
-            received = 0
-            pages_done = 0
-            exhausted = False
-            deadline = time.monotonic() + US_LIST_WHOLE_TIMEOUT_S
-            for page in range(1, pages + 1):
-                # 看门狗到期后外层会弃线程（无取消机制）⇒ 这里自停，最多再买一页（11-12 加固）
-                if time.monotonic() > deadline:
-                    break
-                pages_done = page
-                data = None
-                payload = None
-                for attempt in range(US_LIST_SHORT_PAGE_RETRIES + 1):
-                    if time.monotonic() > deadline:
-                        break
-                    if page > 1 or attempt > 0:
-                        time.sleep(US_LIST_PAGE_INTERVAL_S)
-                    if time.monotonic() > deadline:
-                        break
-                    try:
-                        res = requests.get(
-                            US_LIST_URL,
-                            params={
-                                "page": str(page),
-                                "num": str(US_LIST_PAGE_SIZE),
-                                "sort": "",
-                                "asc": "0",
-                                "market": "",
-                                "id": "",
-                            },
-                            timeout=US_LIST_REQUEST_TIMEOUT_S,
-                        )
-                        res.raise_for_status()
-                        payload = _jsonp_payload(res.text)
-                    except Exception as e:  # noqa: BLE001 中途失败要能带着已拿到的行继续，成因要能转述
-                        # 记 **类型＋原话**（CR9-30 同族：只有类名的错误说明归不了因——
-                        # `RemoteDisconnected` 与 `Timeout` 都叫 `ConnectionError`）。截 60 字防
-                        # requests 把整条 URL 塞进 message。普通网络错误不顺带扩大重试范围。
-                        failures.append(f"p{page}:{type(e).__name__}: {str(e)[:60]}")
-                        logger.warning("us list page %s failed: %s", page, e)
-                        break
-                    if not declared:
-                        declared = str(payload.get("count") or "")
-                    data = payload.get("data") or []
-                    premature = (
-                        len(data) < US_LIST_PAGE_SIZE
-                        and declared.isdigit()
-                        and received + len(data) < int(declared)
-                    )
-                    if not premature:
-                        break
-                    # CR10-39：只重试同一页，且只有最终采用的响应进入 received/rows。
-                    # 重试耗尽仍覆盖不足时沿用 CR10-37 fail-closed，不跳页交付部分名单。
-                    if attempt < US_LIST_SHORT_PAGE_RETRIES:
-                        logger.warning(
-                            "us list premature short page p%s attempt %s/%s: %s rows; retry same page",
-                            page, attempt + 1, US_LIST_SHORT_PAGE_RETRIES + 1, len(data),
-                        )
-                        continue
-                    raise ProviderError(
-                        f"us list premature short page p{page}: {len(data)} 行，"
-                        f"累计收到 {received + len(data)} < 上游声明 {declared}；"
-                        f"同页 {attempt + 1} 次尝试后仍不足，拒绝交付部分名单"
-                    )
-                if data is None:
+            dropped = 0
+            for row in raw_rows:
+                product = _us_product(row)
+                if product is None:
+                    raise ProviderError("us list complete rows contain an unmappable product")
+                if product["code"] in seen:
+                    raise ProviderError(f"us list duplicate product code after mapping: {product['code']}")
+                seen.add(product["code"])
+                if not product["tags"]:
+                    dropped += 1
                     continue
-                if (
-                    len(data) < US_LIST_PAGE_SIZE
-                    and declared.isdigit()
-                    and received + len(data) < int(declared)
-                ):
-                    # 重试前/节流中跨过 deadline 时也不能把上一枚被弃短页当成最终响应。
-                    raise ProviderError(
-                        f"us list premature short page p{page}: {len(data)} 行，"
-                        f"累计收到 {received + len(data)} < 上游声明 {declared}；"
-                        "同页重试未完成，拒绝交付部分名单"
-                    )
-                received += len(data)
-                for row in data:
-                    product = _us_product(row)
-                    if product is None or product["code"] in seen:
-                        continue
-                    # 行业闸排在**去重登记之前**：被这道闸剔掉的代码不进 `seen`，所以同一
-                    # 代码在后一页带上行业时还能被救回来——口径闸不许冒充去重闸。
-                    if not product["tags"]:
-                        dropped += 1
-                        continue
-                    seen.add(product["code"])
-                    rows.append(product)
-                if len(data) < US_LIST_PAGE_SIZE:
-                    exhausted = True
-                    break  # 实收已覆盖声明总数（或无声明可核对）才到这里＝真实尾页
-            return rows, declared, failures, dropped, pages_done, exhausted, received
+                rows.append(product)
+            if not rows:
+                raise ProviderError("us list complete snapshot mapped to empty product list")
 
-        rows, declared, failures, dropped, pages_done, exhausted, received = _ak_request(
-            _fetch, US_LIST_WHOLE_TIMEOUT_S, "sina.us-list"
-        )
-        if not rows:
-            raise ProviderError(
-                "us list empty from all pages"
-                f"（{pages} 页{'，失败：' + '、'.join(failures[:5]) if failures else '全无载荷'}"
-                f"，剔无行业 {dropped} 行）"
+            markets: dict[str, int] = {}
+            for row in rows:
+                key = row["exchange"] or "?"
+                markets[key] = markets.get(key, 0) + 1
+            spread = "/".join(f"{key}×{value}" for key, value in sorted(markets.items()))
+            policy_subset = dropped > 0
+            note = (
+                f"美股上游完整快照已验证（声明 {declared} 只、{required_pages} 页、"
+                f"原始代码去重 {total} 只、穷尽页 p{probe_page} 为空）；"
+                f"按「没有行业标签即剔除」（#32 的 (2)）剔掉 {dropped} 行"
+                + f" ⇒ 本次留 {len(rows)} 只、交易所分布 {spread}。"
+                "⚠️ 行业筛法不等于「只留普通股」：带行业 ETF 可留下，无行业普通股会被剔除。"
             )
+            return rows, {
+                "source": "sina-us-category-list",
+                "degraded": policy_subset,
+                "acquisitionComplete": True,
+                "productPolicySubset": policy_subset,
+                "intentionalSubset": policy_subset,
+                "declaredCount": total,
+                "acquiredCount": total,
+                "note": note,
+            }
 
-        markets: dict[str, int] = {}
-        for r in rows:
-            key = r["exchange"] or "?"
-            markets[key] = markets.get(key, 0) + 1
-        spread = "/".join(f"{k}×{v}" for k, v in sorted(markets.items()))
-        subset = _us_coverage_subset(received, exhausted, declared, failures)
-        coverage = (
-            (
-                f"美股主数据已取全上游名单（翻完 {pages_done} 页"
-                + (f"，上游声明 {declared} 只" if declared else "")
-                + f" ⇒ 本次留 {len(rows)} 只）"
-            )
-            if not subset
-            else (
-                f"美股主数据只取前排 {pages_done} 页"
-                + (f"（上游声明盘子 {declared} 只 ⇒ 本次留 {len(rows)} 只）" if declared else "")
-            )
-        )
-        note = (
-            coverage
-            + f"；按「没有行业标签即剔除」的口径剔掉 {dropped} 行、交易所分布 {spread}。"
-            "⚠️ 这条筛法不等于「只留普通股」：新浪的行业字段缺失与品种无关"
-            "（实测 Visa/Meta 这一档常为空），所以带行业的 ETF 照样进来、"
-            "不带行业的普通股被砍（#32 的 (2)＝主人 10-04 定案，代价已知）"
-            + (
-                f"；本次 {len(failures)} 页失败（{'、'.join(failures[:3])}）"
-                "⇒ 行数可能低于前排应有规模"
-                if failures
-                else ""
-            )
-        )
-        # #35／CR9-63（主人 10-05 取「甲」）：`degraded` 与 `intentionalSubset` 是**两件事**，
-        # 各用一个键——前者说"这批不是上游声明的全量"（R16 的覆盖面可见性），后者说"缺口是我们自己的
-        # 产品口径造成的，不是上游劣化"。web 的降级缩水闸（`web/lib/sync.ts`）只在**收到这个声明**
-        # 时才放行有意子集，未声明时原判据一字不动（G2 防的备源劣化照旧挡）。
-        # 乙（11-12）：intentionalSubset 改按实际覆盖面判定（翻完且无失败页 ⇒ False）；
-        # degraded 仍恒 True——行业闸还在剔行，摘了就没有任何东西告诉消费侧"留库数 < 上游盘子"。
-        return rows, {
-            "source": "sina-us-category-list",
-            "degraded": True,
-            "intentionalSubset": subset,
-            "note": note,
-        }
+        return _ak_request(_fetch, US_LIST_WHOLE_TIMEOUT_S, "sina.us-list")
 
 
 _akshare = AkshareProvider()

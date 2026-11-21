@@ -49,7 +49,13 @@ def test_candidate_accounting():
     check("启动补跑不冒充自然同步", watch.sync_candidate({"lastAttempt": {"lastAttemptDate": "2026-11-21", "lastAttemptTrigger": "startup-catchup", "lastAttemptOutcome": "completed"}}, "2026-11-21") is None)
     check("非目标日不冒充本轮", watch.sync_candidate(natural_sync(), "2026-11-20") is None)
     check("非终态不提前封口", watch.sync_candidate({"lastAttempt": {"lastAttemptDate": "2026-11-21", "lastAttemptTrigger": "daily", "lastAttemptOutcome": "running"}}, "2026-11-21") is None)
-    check("自然失败是有效终态但不满足要求", watch.requirements_met({"naturalSync": {"outcome": "partial_failed"}, "naturalHotspot": {"outcome": "completed"}, "naturalBackup": {"outcome": "completed"}, "independentRestore": {"passed": True}}) is False)
+    complete = {"naturalSync": {"outcome": "completed"}, "naturalHotspot": {"outcome": "completed"}, "naturalBackup": {"outcome": "completed"}, "independentRestore": {"passed": True}}
+    check("自然失败是有效终态但不满足要求", watch.requirements_met({**complete, "naturalSync": {"outcome": "partial_failed"}}, "2026-11-21") is False)
+    check("工作日仍要求自然热点", watch.requirements_met(complete, "2026-11-20") is True)
+    check("工作日缺热点不得封口", watch.requirements_met({**complete, "naturalHotspot": None}, "2026-11-20") is False)
+    check("周六无热点不是失败", watch.hotspot_required("2026-11-21") is False and watch.requirements_met({**complete, "naturalHotspot": None}, "2026-11-21") is True)
+    check("周日无热点不是失败", watch.hotspot_required("2026-11-22") is False and watch.requirements_met({**complete, "naturalHotspot": None}, "2026-11-22") is True)
+    check("周末仍要求独立恢复", watch.requirements_met({**complete, "naturalHotspot": None, "independentRestore": None}, "2026-11-21") is False)
     check("自然热点与关键词降级分账", watch.hotspot_candidate(natural_hotspot(), "2026-11-21")["trigger"] == "pre-market")
     check("启动热点不计入自然证据", watch.hotspot_candidate({"lastAttempt": {"lastAttemptDate": "2026-11-21", "lastAttemptTrigger": "startup-catchup", "lastAttemptOutcome": "completed"}}, "2026-11-21") is None)
 

@@ -4,11 +4,11 @@
 （`lastResult.results[hk]` 只有 `error`、没有 `note`，而同夜 stock／us 两档降级成功）。
 
 成对形状（C34）：
-- 正向＝东财失败时新浪行被映射成与东财**同一 schema**；
-- 🔁 反向＝东财成功时**一次都没碰新浪**（这一枚不判别＝写个"降级会跑"的用例照样绿）；
-- 🔁 会红的样本＝两支都失败时必须抛 `ProviderError`，**不许静默返回空列表**
-  （把实现改成 `return []` 本套必须红——"没到货"与"到货 0 只"是两件事）；
-- 覆盖面声明＝主动停（预算／卡页／上限）才带 `intentionalSubset`，翻页取尽时不许声明。
+- 正向＝东财失败时新浪仍被有界探测，失败诊断保留实际行数、页数与停止原因；
+- 🔁 反向＝东财成功时**一次都没碰新浪**；
+- CR10-40：新浪没有声明总数，实测约 2,806 行与东财约 4,751 行不等价；无论取尽、
+  预算停止或卡页都**不得返回 products/intentionalSubset**，必须抛错保留旧数据；
+- 🔁 两支都失败同样抛 `ProviderError`，不静默返回空列表。
 
 记账这一维也被钉住：降级那一趟必须打 `akshare-obs` 族的 `sina.hk-list`，
 **不许自造账外账**（10-09 之后本项目的红线）。
@@ -81,103 +81,137 @@ def _sina_pages(p: hp.HkProvider, pages: dict[int, list[dict]], boom: Exception 
 
 
 def test_primary_success_never_touches_sina() -> None:
-    """🔁 反向（整套的牙齿）：东财成功 ⇒ 新浪一次都不该被调用，返回形状仍是裸 list。"""
+    """🔁 反向：东财完整成功 ⇒ 不碰新浪，并显式声明采集完整。"""
     p = hp.HkProvider()
     _em_ok(p)
     called = _sina_pages(p, {1: SINA_ROWS})
 
     out = p.list_products("hk")
-    check("🔁 东财成功时一次都没调新浪（这一枚不红＝「降级会不会跑」根本没法信）",
-          called == [], f"sina pages={called}")
-    check("东财成功仍返回裸 list（`test_g6_hk` 钉的那个形状没被改口）",
-          isinstance(out, list) and len(out) == 2, str(type(out)))
-    check("东财成功时不声明 degraded", not isinstance(out, tuple))
+    check("东财成功时一次都没调新浪", called == [], f"sina pages={called}")
+    check("东财完整主源带 (items, meta)",
+          isinstance(out, tuple) and len(out[0]) == 2, str(type(out)))
+    if isinstance(out, tuple):
+        items, meta = out
+        check("主源采集完整且非产品口径子集",
+              meta.get("acquisitionComplete") is True and meta.get("productPolicySubset") is False
+              and meta.get("declaredCount") == len(items) == 2, str(meta))
+
+
+def test_em_snapshot_integrity_guards() -> None:
+    """主源也必须证明声明页完整，不能用覆盖写把重复代码藏起来。"""
+    p = hp.HkProvider()
+
+    def duplicate(hosts, path, params):
+        return {"data": {"total": 2, "diff": [
+            {"f12": "00700", "f14": "腾讯控股"},
+            {"f12": "00700", "f14": "重复代码"},
+        ]}}
+
+    p._em_json = duplicate  # type: ignore[assignment]
+    called = _sina_pages(p, {})
+    raised = ""
+    try:
+        p._list_products_em()
+    except ProviderError as e:
+        raised = str(e)
+    check("东财首页重复代码 ⇒ 主候选失败", "duplicate/blank code" in raised, raised)
+    check("主候选失败不等于允许低覆盖诊断源交付", called == [], str(called))
+
+    p = hp.HkProvider()
+    p._em_json = lambda hosts, path, params: {"data": {"total": 10001, "diff": [
+        {"f12": str(i).zfill(5), "f14": f"名称{i}"} for i in range(100)
+    ]}}  # type: ignore[assignment]
+    raised = ""
+    try:
+        p._list_products_em()
+    except ProviderError as e:
+        raised = str(e)
+    check("声明页数超过硬上限 ⇒ 拒绝截断，不发后续页", "exceed cap" in raised, raised)
+
+    p = hp.HkProvider()
+    p._em_json = lambda hosts, path, params: {"data": {"total": 0, "diff": [
+        {"f12": "00700", "f14": "腾讯控股"},
+    ]}}  # type: ignore[assignment]
+    raised = ""
+    try:
+        p._list_products_em()
+    except ProviderError as e:
+        raised = str(e)
+    check("声明为零却有原始行 ⇒ 拒绝伪完整候选", "invalid declared total" in raised, raised)
 
 
 def test_all_hosts_down_falls_back() -> None:
-    """东财抛 ProviderError（02:00 那一夜的原文形状）⇒ 换新浪，schema 逐枚对。"""
+    """东财失败可探测新浪，但低覆盖诊断源永远不能成为提交候选。"""
     p = hp.HkProvider()
     _em_ok(p, rows=None)
     called = _sina_pages(p, {1: SINA_ROWS, 2: []})
 
-    out = p.list_products("hk")
-    check("东财全 host 失败 ⇒ 走到新浪（页码从 1 开始）", called[:1] == [1], str(called))
-    if not isinstance(out, tuple):
-        check("降级那支必须返回 (items, meta)", False, str(type(out)))
-        return
-    items, meta = out
-    check("新浪行与东财行同 schema（键面逐枚对，不预设列名）",
-          all(set(x.keys()) == EM_KEYS for x in items), str([sorted(x) for x in items][:1]))
-    check("新浪 symbol/name 映射正确（00001 长和）",
-          {x["code"]: x["name"] for x in items} == {"00001": "长和", "00700": "腾讯控股"},
-          str(items))
-    check("exchange 仍标 HK、type 仍标 hk（消费侧不分源）",
-          all(x["exchange"] == "HK" and x["type"] == "hk" for x in items))
-    check("pinyinInitials 非空（新浪短名同样要能拼音检索）",
-          all(x["pinyinInitials"] for x in items), str([x["pinyinInitials"] for x in items]))
+    raised, out = "", None
+    try:
+        out = p.list_products("hk")
+    except ProviderError as e:
+        raised = str(e)
+    check("东财全 host 失败 ⇒ 走到新浪诊断源", called == [1, 2], str(called))
+    check("即使新浪自身取尽也拒绝交付（无 total，不能证明与东财集合等价）",
+          out is None and "no equivalent complete source" in raised, raised[:220])
+    check("失败读数保留新浪行数、穷尽页与东财原因",
+          "2 行" in raised and "stop=exhausted" in raised and "eastmoney" in raised, raised[:240])
 
 
 def test_empty_first_page_also_falls_back() -> None:
-    """第二个失败出口也要换源：东财回 200 但 `diff` 为空（`hk list empty (all hosts)`）。"""
     p = hp.HkProvider()
-    _em_ok(p, rows=[])  # {"data": {"total": "0", "diff": []}} → 首页空 ⇒ 抛 ProviderError
+    _em_ok(p, rows=[])
     called = _sina_pages(p, {1: SINA_ROWS, 2: []})
-    out = p.list_products("hk")
-    check("东财首页空 diff 也触发降级（不止「全部 host 异常」那一条出口）",
-          called[:1] == [1] and isinstance(out, tuple), f"{called} / {type(out)}")
+    try:
+        p.list_products("hk")
+        out = "unexpected success"
+    except ProviderError:
+        out = "rejected"
+    check("东财首页空 diff 触发诊断源，但最终仍不交付",
+          called == [1, 2] and out == "rejected", f"{called} / {out}")
 
 
 def test_meta_and_envelope_source() -> None:
-    """CR9-31 的显式声明：meta 的 source／degraded／note，经归一后信封里读得到 sina-hk-spot。"""
+    """东财完整成功的主源元数据经 HTTP 归一不丢失；失败源无 meta 可透传。"""
     p = hp.HkProvider()
-    _em_ok(p, rows=None)
+    _em_ok(p)
     _sina_pages(p, {1: SINA_ROWS, 2: []})
-    items, meta = p.list_products("hk")
-
-    check("meta 声明 source=sina-hk-spot（落码后的现场判据就这一串）",
-          meta.get("source") == "sina-hk-spot", str(meta.get("source")))
-    check("meta 带 degraded=True", meta.get("degraded") is True, str(meta))
-    check("翻页取尽 ⇒ 不许声明 intentionalSubset（那是「我们自己的口径」那一档）",
-          meta.get("intentionalSubset") is False, str(meta.get("intentionalSubset")))
-    note = str(meta.get("note"))
-    check("note 写清短名这一枚对撞点（别让消费侧自己发现）",
-          "短名" in note and "00001" in note, note[:200])
-    check("note 写清是东财先不可用（可归因、不是静默换源）",
-          "东财港股列表不可用" in note, note[:120])
-
     got_items, envelope = base.list_products_with_meta(p, "hk")
-    check("list_products_with_meta 归一后信封里的出网源＝sina-hk-spot（web 拼的那句 note 靠它）",
-          envelope.get("source") == "sina-hk-spot" and len(got_items) == 2, str(envelope))
+    check("完整主源元数据声明来源与完整性",
+          envelope.get("source") == "akshare-hk" and envelope.get("acquisitionComplete") is True
+          and envelope.get("productPolicySubset") is False and len(got_items) == 2, str(envelope))
 
 
 def test_budget_stop_declares_subset() -> None:
-    """到 soft budget 主动停＝拿到多少算多少，且必须声明 intentionalSubset（缩水闸靠它放行）。"""
     orig = hp.HK_SINA_SOFT_BUDGET_S
     try:
-        hp.HK_SINA_SOFT_BUDGET_S = -1.0  # 逼第一页之后即停
+        hp.HK_SINA_SOFT_BUDGET_S = -1.0
         p = hp.HkProvider()
         _em_ok(p, rows=None)
         called = _sina_pages(p, {1: SINA_ROWS, 2: SINA_ROWS, 3: SINA_ROWS})
-        items, meta = p.list_products("hk")
-        check("预算用完就主动停（只发 1 页，绝不越界捶源）", called == [1], str(called))
-        check("主动停＝有意子集，meta 必须声明 intentionalSubset=True",
-              meta.get("intentionalSubset") is True, str(meta.get("intentionalSubset")))
-        check("主动停的覆盖面写进 note（页数与停止原因可读）",
-          "主动停" in str(meta.get("note")), str(meta.get("note"))[:200])
+        raised = ""
+        try:
+            p.list_products("hk")
+        except ProviderError as e:
+            raised = str(e)
+        check("预算用完只发 1 页，停止原因保留在失败诊断", called == [1] and "stop=budget" in raised, raised[:200])
+        check("主动停不再声明 intentionalSubset 或返回产品行", "no equivalent complete source" in raised)
     finally:
         hp.HK_SINA_SOFT_BUDGET_S = orig
 
 
 def test_stalled_pages_stop_early() -> None:
-    """上游反复回同一页 ⇒ 连停两页就收手（这一形＝再打就是白花钱，不能靠 ceiling 兜）。"""
     p = hp.HkProvider()
     _em_ok(p, rows=None)
     called = _sina_pages(p, {1: SINA_ROWS, 2: SINA_ROWS, 3: SINA_ROWS, 4: SINA_ROWS})
-    items, meta = p.list_products("hk")
-    check("重复页两连即停（≤3 页，不是一路翻到 90）", len(called) <= 3, str(called))
-    check("卡页也按有意子集声明（覆盖面缺口不是上游又劣化一档）",
-          meta.get("intentionalSubset") is True, str(meta.get("intentionalSubset")))
-    check("行数仍等于去重后的代码数（重复页不许把同一只数两次）", len(items) == 2, str(items))
+    raised = ""
+    try:
+        p.list_products("hk")
+    except ProviderError as e:
+        raised = str(e)
+    check("重复页两连即停，不一路翻到 ceiling", len(called) <= 3, str(called))
+    check("卡页诊断同样拒绝候选，保留去重后的 2 行读数",
+          "stop=stalled" in raised and "2 行" in raised, raised[:220])
 
 
 def test_both_down_raises_never_empty() -> None:
@@ -206,7 +240,7 @@ def test_sina_empty_rows_also_raises() -> None:
         out = p.list_products("hk")
         check("🔁 新浪空数组＝抛错，不返回 []", False, str(out))
     except ProviderError as e:
-        check("🔁 新浪空数组＝抛错，不返回 []", "empty from both sources" in str(e), str(e)[:200])
+        check("🔁 新浪空数组＝抛错，不返回 []", "no equivalent complete source" in str(e) and "0 行" in str(e), str(e)[:200])
 
 
 def test_other_type_guard() -> None:
@@ -228,7 +262,10 @@ def test_fallback_books_to_akshare_obs_family() -> None:
     p = hp.HkProvider()
     _em_ok(p, rows=None)
     _sina_pages(p, {1: SINA_ROWS, 2: []})
-    p.list_products("hk")
+    try:
+        p.list_products("hk")
+    except ProviderError:
+        pass
 
     seen = ap.AK_OBS_LIMITER.state()["seen"]
     check("降级那趟 observe 打在 sina.hk-list（逐函数维度＝下一次调参的唯一依据）",
@@ -238,6 +275,7 @@ def test_fallback_books_to_akshare_obs_family() -> None:
 
 if __name__ == "__main__":
     test_primary_success_never_touches_sina()
+    test_em_snapshot_integrity_guards()
     test_all_hosts_down_falls_back()
     test_empty_first_page_also_falls_back()
     test_meta_and_envelope_source()

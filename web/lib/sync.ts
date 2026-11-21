@@ -213,10 +213,32 @@ async function _syncTypeInner(type: string): Promise<SyncResult> {
       source?: string;
       degraded?: boolean;
       note?: string;
-      // #35／CR9-63：上游声明"这一类本来就是有意取的子集"（不是上游劣化）。
-      // 只有带这个声明的载荷才允许通过下面的缩水闸；未声明者原判据一字不动。
+      // #35／CR9-63：只有完整采集后的产品口径子集才允许通过下面的缩水闸。
       intentionalSubset?: boolean;
+      // CR10-40：采集完整性与产品口径是两个事实；前者显式为假时没有任何提交资格。
+      acquisitionComplete?: boolean;
+      productPolicySubset?: boolean;
+      declaredCount?: number;
+      acquiredCount?: number;
     }>("/products", { type }, productsBudgetMs(type));
+    // 不完整候选不是“有意子集”。这一闸在随机 id、去重、读库计数和暂存表之前，
+    // 保证即使上游误把 products 与 intentionalSubset 一起带回，也绝不写正式 Product。
+    if (data.acquisitionComplete === false) {
+      return {
+        type,
+        error:
+          "incomplete acquisition candidate rejected, existing data kept" +
+          `${data.note ? `：${data.note}` : ""}`,
+        tookMs: Date.now() - started,
+      };
+    }
+    if (data.intentionalSubset && data.productPolicySubset === false) {
+      return {
+        type,
+        error: "non-product subset cannot bypass shrink guard, existing data kept",
+        tookMs: Date.now() - started,
+      };
+    }
     let rows = (data.products ?? []).map((p) => ({
       id: randomUUID(),
       type: p.type,

@@ -297,17 +297,24 @@ class HkProvider(BaseProvider):
         港股约 4700 只 → 约 48 次请求（受源族限速，实测约 4 分钟）。
         故本方法**只应在每日同步任务中调用**，不得用于行情路径。
 
-        降级那一支（CR10-5）＝返回 `(items, meta)` 按 CR9-31 显式声明出网源；主源成功时
-        **仍返回裸 `list[dict]`**（`test_g6_hk` 那三枚断言钉的就是这个形状，不改既有取舍）。
+        CR10-40：主源成功显式声明完整采集；新浪无声明总数且覆盖不等价，仅作诊断，
+        不再返回可提交产品行。其他类型的 provider 形状不受这里影响。
         """
         if type_ != "hk":
             raise ProviderError(f"unsupported list type: {type_}")
         try:
-            return self._list_products_em()
+            items = self._list_products_em()
+            return items, {
+                "source": self.source,
+                "acquisitionComplete": True,
+                "productPolicySubset": False,
+                "declaredCount": len(items),
+                "acquiredCount": len(items),
+            }
         except ProviderError as em_err:
             # 只在这一枚出口上换源：`_em_json` 的"全部 host 失败"与"首页 diff 为空"都归到这里，
             # 两条都是"东财这一夜答不出"，不是"港股没有 4700 只"。
-            log.warning("hk list primary (em clist) failed: %s ⇒ 降级至新浪全量列表", em_err)
+            log.warning("hk list primary (em clist) failed: %s ⇒ 探测非等价新浪诊断源", em_err)
             return self._list_products_sina(f"{type(em_err).__name__}: {em_err}")
 
     def _list_products_em(self) -> list[dict]:
@@ -330,8 +337,17 @@ class HkProvider(BaseProvider):
         data = payload.get("data") or {}
         diff = data.get("diff") or []
         total = int(data.get("total") or 0)
+        if total <= 0:
+            raise ProviderError(f"hk list invalid declared total: {total}")
         if not diff:
             raise ProviderError("hk list empty (all hosts)")
+
+        collected: dict[str, dict] = {}
+        for x in diff:
+            code = str(x.get("f12") or "").strip()
+            if not code or code in collected:
+                raise ProviderError("hk list duplicate/blank code in first page")
+            collected[code] = x
 
         if total and len(diff) < total:
             page_size = len(diff) or 100
@@ -340,18 +356,31 @@ class HkProvider(BaseProvider):
             # min(pages, 100)。上游 total 异常（被刷/接口变更）时若无上限，
             # range(2, pages+1) 会以每页一发东财请求长时间捶打源族（R15）。
             if pages > 100:
-                log.warning("hk list pages=%d exceeds cap, truncating to 100", pages)
-                pages = 100
-            collected = {str(x.get("f12")): x for x in diff}
+                raise ProviderError(
+                    f"hk list declared pages {pages} exceed cap 100; truncated snapshot rejected"
+                )
             for pn in range(2, pages + 1):
                 page = self._em_json(
                     HK_SPOT_HOSTS,
                     "/api/qt/clist/get",
                     {**base_params, "pn": str(pn), "pz": str(page_size)},
                 )
-                for x in ((page.get("data") or {}).get("diff")) or []:
-                    collected[str(x.get("f12"))] = x
-            diff = list(collected.values())
+                page_data = page.get("data") or {}
+                page_total = int(page_data.get("total") or 0)
+                if page_total != total:
+                    raise ProviderError(
+                        f"hk list declaration changed during snapshot: {total} -> {page_total}"
+                    )
+                for x in page_data.get("diff") or []:
+                    code = str(x.get("f12") or "").strip()
+                    if not code or code in collected:
+                        raise ProviderError("hk list duplicate/blank code across declared pages")
+                    collected[code] = x
+        diff = list(collected.values())
+        if total and len(diff) != total:
+            raise ProviderError(
+                f"hk list unique code count {len(diff)} != declaration {total}; candidate rejected"
+            )
 
         products: list[dict] = []
         for item in diff:
@@ -370,6 +399,10 @@ class HkProvider(BaseProvider):
                     "exchange": "HK",
                     "tags": [],
                 }
+            )
+        if total and len(products) != total:
+            raise ProviderError(
+                f"hk list mapped rows {len(products)} != declaration {total}; candidate rejected"
             )
         if not products:
             # 有行但一行都映射不出来＝上游换了字段名，与"整条不可用"同判：交给下一支，
@@ -464,32 +497,15 @@ class HkProvider(BaseProvider):
                     "tags": [],
                 }
             )
-        if not products:
-            raise ProviderError(
-                f"hk list empty from both sources: eastmoney（{em_reason}）；"
-                f"sina 翻页 {pages} 页后停止（{stop}）、0 行"
-            )
         elapsed = round(time.monotonic() - t0, 1)
-        complete = stop == "exhausted"
-        log.info("hk list degraded to sina: %d rows, %d pages, stop=%s, %.1fs", len(products), pages, stop, elapsed)
-        return products, {
-            "source": "sina-hk-spot",
-            "degraded": True,
-            # #35／CR9-63 那两件事分开：`degraded`＝"这批不是东财那批"，`intentionalSubset`＝
-            # "缺口是我们自己的预算造成的、不是上游又劣化了一档"⇒ web 的降级缩水闸据此放行。
-            # 翻页取尽（`exhausted`）时**不许**声明子集。
-            "intentionalSubset": not complete,
-            "note": (
-                f"东财港股列表不可用（{em_reason}），已降级至新浪 getHKStockData（node=qbgg_hk）："
-                f"本次 {len(products)} 只、翻页 {pages} 页后{'取尽' if complete else f'主动停（{stop}）'}、"
-                f"耗时 {elapsed}s（每页硬顶 {HK_SINA_PAGE_ROWS} 行——服务端无视 `num`；soft budget "
-                # ⚠️ 2026-11-07 更正：这里原写「调用侧 120s」＝10-22 之前的错锚，真值 **600s**
-                # （`web/lib/sync.ts` 的 `dsGet("/products", …, 600_000)`；120_000 那处是 Prisma
-                # `$transaction`）。这句会经 `note` 上屏，所以说错等于对主人报错数。
-                f"{HK_SINA_SOFT_BUDGET_S}s，调用侧预算 600s）；新浪的名称列是短名（实测 00001＝「长和」）、"
-                "与东财 `f14` 不同形 ⇒ 换源那夜会有整批名字被改写；响应里没有 total ⇒ 覆盖面无法与上游盘子对账"
-            ),
-        }
+        # CR10-40：这个源没有声明总数，且已实测约 2,806 行、东财约 4,751 行；即使它
+        # 自己翻到空页，也只证明该源页序结束，不证明与东财产品集合等价。保留探测读数
+        # 便于归因，但绝不返回 products 或 intentionalSubset 让 Web 全表替换。
+        raise ProviderError(
+            f"hk list has no equivalent complete source: eastmoney（{em_reason}）；"
+            f"sina 非等价诊断源（{len(products)} 行、{pages} 页、stop={stop}、{elapsed}s，"
+            "无声明总数且名称口径不同），已拒绝交付候选并保留旧数据"
+        )
 
 
 def _register() -> None:

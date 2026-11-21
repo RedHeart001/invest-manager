@@ -28,33 +28,31 @@ def check(name: str, cond, detail: str = "") -> None:
 
 
 def test_hk_pagination_cap() -> None:
-    """① total 异常大 → 分页被截到 100 页，超出的页不再请求。"""
+    """① total 异常大 → 首页即拒绝，后续页与诊断源都不能把截断名单变成产品。"""
     import app.providers.hk_provider as hp
 
-    calls = {"clist": 0}
+    calls = {"clist": 0, "sina": 0}
 
     def _fake_em_json(hosts, path, params):
-        if path.endswith("/ulist.np/get"):
-            return {"data": {"diff": [{"f12": "00700", "f14": "腾讯控股"}]}}
         if path.endswith("/clist/get"):
-            pn = str(params.get("pn", "1"))
-            if pn == "1":
-                # total 声称 100 万条（异常值）→ 按每页 1 条会算出 100 万页
-                return {"data": {"total": 1_000_000, "diff": [{"f12": "00700", "f14": "腾讯控股"}]}}
             calls["clist"] += 1
+            # total 声称 100 万条（异常值）→ 按每页 1 条会算出 100 万页
             return {"data": {"total": 1_000_000, "diff": [{"f12": "00700", "f14": "腾讯控股"}]}}
         raise AssertionError(path)
 
     p = hp.HkProvider()
     p._em_json = _fake_em_json  # type: ignore[assignment]
-    products = p.list_products("hk")
-    # 上限 100 页 → clist 额外调用 ≤ 99 次（第 1 页不计）；无上限会是 ~100 万次
-    check(
-        "D3：分页调用被上限截断（≤99 次额外请求）",
-        0 < calls["clist"] <= 99,
-        f"实际额外调用 {calls['clist']} 次",
-    )
-    check("D3：列表仍产出（截断不阻塞主流程）", len(products) >= 1, str(len(products)))
+    p._sina_hk_page = lambda page: calls.__setitem__("sina", calls["sina"] + 1) or []  # type: ignore[assignment]
+    try:
+        p.list_products("hk")
+        error = ""
+    except Exception as exc:  # noqa: BLE001 测试要核对最终 fail-closed 文案
+        error = str(exc)
+    check("D3：异常声明只读首页，后续页零请求", calls["clist"] == 1, str(calls))
+    check("D3：超过上限明确拒绝，不再交付截断名单",
+          "declared pages 1000000 exceed cap 100" in error
+          and "no equivalent complete source" in error, error[:180])
+    check("D3：诊断源即使读尽也不改变拒绝结论", calls["sina"] == 1, str(calls))
 
 
 def test_hk_pagination_normal_unaffected() -> None:
@@ -71,18 +69,18 @@ def test_hk_pagination_normal_unaffected() -> None:
             if pn == "1":
                 return {"data": {"total": 3, "diff": [{"f12": "89988", "f14": "阿里巴巴-WR"}]}}
             calls["clist"] += 1
-            return {"data": {"total": 3, "diff": [
-                {"f12": "00700", "f14": "腾讯控股"},
-                {"f12": "09988", "f14": "阿里巴巴-W"},
-            ]}}
+            code, name = (("00700", "腾讯控股") if pn == "2" else ("09988", "阿里巴巴-W"))
+            return {"data": {"total": 3, "diff": [{"f12": code, "f14": name}]}}
         raise AssertionError(path)
 
     p = hp.HkProvider()
     p._em_json = _fake_em_json  # type: ignore[assignment]
-    products = p.list_products("hk")
+    products, meta = p.list_products("hk")
     # page_size=1（首页 diff 1 条）→ 3 条共 3 页 → 第 2、3 页各一发 clist
     check("D3：正常分页不误伤（第 2、3 页各一发）", calls["clist"] == 2, str(calls))
-    check("D3：正常列表产出 3 条", len(products) == 3, str(len(products)))
+    check("D3：正常列表产出 3 条且声明完整采集",
+          len(products) == 3 and meta["acquisitionComplete"] is True
+          and meta["declaredCount"] == 3 and meta["acquiredCount"] == 3, str(meta))
 
 
 def test_mcp_list_products_watchdog() -> None:

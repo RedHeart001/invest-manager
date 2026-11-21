@@ -59,10 +59,9 @@ def test_quote_and_list_parsing() -> None:
             pn = params.get("pn", "1")
             if pn == "1":
                 return {"data": {"total": 3, "diff": [{"f12": "89988", "f14": "阿里巴巴-WR"}]}}
-            return {"data": {"total": 3, "diff": [
-                {"f12": "00700", "f14": "腾讯控股"},
-                {"f12": "09988", "f14": "阿里巴巴-W"},
-            ]}}
+            # 首页仅 1 行 ⇒ 本替身页宽=1；后续页也必须各回 1 行，不能用 2 行制造伪重复。
+            code, name = ("00700", "腾讯控股") if pn == "2" else ("09988", "阿里巴巴-W")
+            return {"data": {"total": 3, "diff": [{"f12": code, "f14": name}]}}
         raise AssertionError(path)
 
     p = hp.HkProvider()
@@ -78,8 +77,11 @@ def test_quote_and_list_parsing() -> None:
     qs = p.get_quotes("hk", ["00700", "09988"])
     check("G6：批量行情 2/2（ulist）", len(qs) == 2 and qs["09988"]["price"] == 80.0, str(list(qs.keys())))
 
-    prods = p.list_products("hk")
+    listed = p.list_products("hk")
+    prods, list_meta = listed if isinstance(listed, tuple) else (listed, {})
     check("G6：列表分页合并（1+2=3 条）", len(prods) == 3, str(len(prods)))
+    check("CR10-40：东财主源显式声明完整采集",
+          list_meta.get("acquisitionComplete") is True and list_meta.get("declaredCount") == 3, str(list_meta))
     check("G6：列表字段齐备（exchange/pinyin）",
           all(x["exchange"] == "HK" and x["pinyinInitials"] for x in prods) and {x["code"] for x in prods} == {"89988", "00700", "09988"},
           str([x["code"] for x in prods]))

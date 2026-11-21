@@ -1,38 +1,16 @@
-"""CR9-59 离线单测：美股主数据列表（#32 甲＝新浪排行名单的**有界**前 N 页）。
+"""CR9-59/CR10-40 离线单测：美股完整候选快照事务。
 
-背景（10-03 探针／10-04 落码实测，见 docs/FIX-LEDGER.md 的 #32 与 CR9-59 两行）：
-`Product` 里 `us` 长期只有 1 行、`/product/us/AAPL` 404、搜索 0 结果，根因是
-**美股从来没有列表 provider**（`register_list` 里根本没有 us）。甲的口径（10-04→11-12 的历史形态）＝
-只取前排 N 页（20N 行，实测 15 页＝300 行）；**乙（2026-11-12 主人拍板）＝默认全量**：
-给到硬上限 950 页、由"末不满页即早停"按上游实盘定实买页数（首跑实测盘子 18,377 只⇒919 页；
-钉死 913 会差 6 页冒充全量），
-`intentionalSubset` 改按实际覆盖面判定（翻完且零失败页 ⇒ False）。这轮**不开美股 tab** 那句已被
-10-07 主人撤销；10-04 03:1x 的 (2) 定案**行业闸**不变（无 `category` 的行不进库 ⇒ 300 行实测留 ≈179），
-闸在解析之后、翻页之前 ⇒ **请求数不受影响**。
+CR10-40 明确替代“失败页/配置截断也可作为有意子集交付”的旧语义。声明建立页义务，
+网络/解析/行数异常同页有界恢复，首轮后集中修复；稳定声明、原始代码唯一性和尾页后
+空页共同构成可观测的完整性证明。行业筛选只在完整采集后发生。
 
-本套件钉住四类事：
-1. **解析按实测字节，不按想象**——jsonp 外层、`count`/`data` 内层、中文名 `cname` 优先、
-   `category` 既有 null 也有空串、`market` 原样进 `exchange`（`lib/profile.ts:91` 与
-   `tencent_provider.CURRENCY_BY_TYPE` 早已按 `us`/`NASDAQ` 写死）。
-2. **额度闸**：`US_LIST_PAGES` 的默认值、非法回落、"合法但手滑"的巨大值被硬上限夹住；
-   上游给不满一页就**不再往后发**——"少花钱"必须有断言，不然它只是一句注释。
-3. **两道闸分层，且第二道是主人的口径**（不是我的判断）：**结构闸**在行级映射里
-   （无 symbol、或两个名字都缺 ⇒ 建不出主键，`_us_product` 返回 None）；**行业闸**在列表层
-   （10-04 03:1x 的字＝"剔除没行业的"＝#32 的 (2) 定案 ⇒ `category` 为 null/空串的行不进库）。
-   分层是有意为之：映射函数不看行业，才能分别报出"结构丢弃"与"按口径剔除"是两个数。
-4. **覆盖面必须自己说话**（CR9-31/R16）：`degraded=True` ＋ note 带盘子总数、**剔掉的无行业
-   行数**、交易所分布、中途失败的页数与成因；且 note 明写**这条筛法不等于"只留普通股"**
-   （行业字段缺失与品种无关 ⇒ 带行业的 ETF 会留下、不带行业的普通股被砍）。
+本套件零出网，假模块对未备页和超额尝试直接抛错；除映射与配额外，重点故障注入：
+- 两枚独立失败页首轮未解决、集中修复恢复；
+- 真实尾页不重试，持续短尾绝不交付；
+- 声明变化、重复/缺失代码、非空穷尽页、配置不足均 fail-closed；
+- 看门狗到期不采用被弃响应，所有恢复轮次共享期限。
 
-零出网：provider 模块里的 `requests` 整个换成假模块（不动全局 `requests`，免得污染同进程
-其他套件，也免得"这条路没真出网"变成一句自我声明）。假对象对**没备数据的页号直接抛**——
-"多发了一个请求"在本套件里是可见的失败，不是静默的省钱。
-
-⚠️ 备页一律凑满 20 行（`jsonp20`）：新浪的真实页宽就是 20，而"给不满一页即视为到尾部"
-是下面要单独断言的行为——测试输入若不凑满，就会把那个早停逻辑意外触发成前置条件。
-
-运行方式（无需任何服务在跑）：
-    PYTHONPATH=. .venv/Scripts/python tests/test_cr9_59_us_list.py
+运行：PYTHONPATH=. .venv/Scripts/python tests/test_cr9_59_us_list.py
 """
 
 import json
@@ -115,6 +93,7 @@ def page_of(symbols, count="18241") -> str:
 
 
 CALLS: list[dict] = []
+SESSIONS: list[object] = []
 
 
 class FakeResponse:
@@ -132,6 +111,7 @@ def install_fake(pages: dict[int, object]) -> None:
     序列耗尽后继续请求会抛错，令多买一次也可见；没备数据的页号同样抛错。
     """
     CALLS.clear()
+    SESSIONS.clear()
     attempts: dict[int, int] = {}
 
     def fake_get(url, params=None, timeout=None, **kw):
@@ -151,7 +131,19 @@ def install_fake(pages: dict[int, object]) -> None:
             raise AssertionError(f"越界请求了第 {raw_page} 页（假数据只备了 {sorted(pages)}）")
         return FakeResponse(spec)
 
-    akp.requests = types.SimpleNamespace(get=fake_get)  # type: ignore[attr-defined]
+    class FakeSession:
+        def __init__(self) -> None:
+            self.closed = False
+            SESSIONS.append(self)
+
+        def get(self, *args, **kwargs):
+            return fake_get(*args, **kwargs)
+
+        def close(self) -> None:
+            self.closed = True
+
+    # 使用真 Session 生命周期形状，确保集中修复确实换会话且所有会话被关闭。
+    akp.requests = types.SimpleNamespace(get=fake_get, Session=FakeSession)  # type: ignore[attr-defined]
 
 
 def with_pages(value):
@@ -323,163 +315,147 @@ def test_env_file_layer_still_works() -> None:
 def test_list_us_stocks_declaration() -> None:
     em_before = get_limiter("eastmoney").state()
     obs_before = get_limiter("akshare-obs").state()
-    rows, meta = listed({1: jsonp20([NVDA, VISA, QQQ, ZZZTX], "d")}, 1)
-    check("一页 20 行 ⇒ 留 17（NVDA＋16 个有行业的填充行）", len(rows) == 17, str(len(rows)))
-    check("source 声明＝新浪美股名单（不是 akshare 主源）", meta["source"] == "sina-us-category-list", str(meta)[:90])
-    check("覆盖面按设计缩水 ⇒ 恒带 degraded 声明", meta.get("degraded") is True, str(meta)[:90])
-    check("#35／CR9-63：『有意子集』另带自己的键（degraded 与 intentionalSubset 是两件事、不是一个布尔）",
-          meta.get("intentionalSubset") is True, str(meta)[:90])
-    check("note 带上游自己声明的盘子数", "18241" in meta["note"], meta["note"][:160])
-    check("note 报**剔了多少行**（VISA 空串／QQQ／ZZZTX 为 null）——砍掉 40% 的名单不许隐身",
-          "剔掉 3 行" in meta["note"], meta["note"][:200])
-    check("note 带交易所分布（只数留下来的行：17 行全 NASDAQ）",
-          "NASDAQ×17" in meta["note"], meta["note"][:160])
-    check("🔁 被剔的行不进交易所分布（VISA/ZZZTX 是 NYSE，留下来的 17 行里没有 NYSE）",
-          "NYSE" not in meta["note"], meta["note"][:200])
-    check("note 带着这条口径的出处（#32 的 (2)），日后谁改口径能看到是谁定的",
-          "#32" in meta["note"], meta["note"][:160])
-    check("note 明写这条筛法**不等于只留普通股**（带行业的 ETF 会进来）",
-          "不等于" in meta["note"] and "ETF" in meta["note"], meta["note"][:220])
-    check("note 说清只取前排 N 页＝子集", "只取前排 1 页" in meta["note"], meta["note"][:160])
-
+    rows, meta = listed({
+        1: jsonp20([NVDA, VISA, QQQ, ZZZTX], "d", count="20"),
+        2: jsonp([], count="20"),
+    }, 1)
+    check("完整 20 行采集后按行业口径留 17", len(rows) == 17, str(len(rows)))
+    check("source 声明＝新浪美股名单", meta["source"] == "sina-us-category-list", str(meta)[:90])
+    check("采集完整与产品口径子集分账",
+          meta.get("acquisitionComplete") is True and meta.get("productPolicySubset") is True
+          and meta.get("intentionalSubset") is True, str(meta)[:150])
+    check("原始声明与实收分别记账", meta.get("declaredCount") == 20 and meta.get("acquiredCount") == 20)
+    check("note 带声明数、原始去重和穷尽页证明",
+          all(x in meta["note"] for x in ("声明 20", "原始代码去重 20", "穷尽页 p2 为空")), meta["note"][:220])
+    check("note 报剔掉 3 行及交易所分布", "剔掉 3 行" in meta["note"] and "NASDAQ×17" in meta["note"])
+    check("行业口径出处和 ETF 限制仍可见", "#32" in meta["note"] and "ETF" in meta["note"])
+    check("成功/失败路径均关闭 Session", len(SESSIONS) == 1 and all(s.closed for s in SESSIONS))
     em_after = get_limiter("eastmoney").state()
-    check("整条美股列表一次都不占东财桶（granted/denied/seenTotal 逐项未变）",
+    check("美股列表不占东财桶",
           (em_after["granted"], em_after["denied"], em_after["seenTotal"])
-          == (em_before["granted"], em_before["denied"], em_before["seenTotal"]),
-          f"granted {em_before['granted']}→{em_after['granted']}")
+          == (em_before["granted"], em_before["denied"], em_before["seenTotal"]))
     obs_after = get_limiter("akshare-obs").state()
-    check("但记进观测面一笔（#27 的计数覆盖到这条路）",
-          obs_after["seenTotal"] - obs_before["seenTotal"] == 1,
-          str(obs_after["seenTotal"] - obs_before["seenTotal"]))
-    check("观测口径＝一次调用一笔，不是 N 页 N 笔（1 笔观测 ≠ 1 个 HTTP 请求，CR9-3 同族陷阱）",
-          "sina.us-list" in obs_after["seen"], str(obs_after["seen"])[:120])
+    check("整条逻辑请求只记一笔观测，不是每页一笔",
+          obs_after["seenTotal"] - obs_before["seenTotal"] == 1 and "sina.us-list" in obs_after["seen"])
 
 
 def test_list_us_stocks_paging() -> None:
-    # CR9-68（#40 丁）：两页的 NVDA 行**内容必须可区分**，否则"留前排那次"这条断言
-    # 只比了代码在不在，把去重改成"后来者覆盖"照样绿——活下来的其实是第 4 页那份而没人看过内容。
-    # 第 1 页那份＝真名单的形状；第 4 页那份故意换中文名与行业（`name` 取 `cname` 优先，
-    # `category` 进 `tags`，两处都是会被覆盖的字段）。
-    nvda_first = dict(NVDA, cname="英伟达公司")  # 与 NVDA 原样一致
-    nvda_last = dict(NVDA, cname="英伟达后排重复", category="消费电子", price="1.11")
-    p1 = [nvda_first] + [dict(NVDA, symbol=f"A{i}") for i in range(PAGE_SIZE - 1)]
-    p4 = [nvda_last] + [dict(NVDA, symbol=f"D{i}") for i in range(PAGE_SIZE - 1)]
     pages = {
-        1: jsonp20(p1, "p1"),
-        2: page_of([f"B{i}" for i in range(PAGE_SIZE)]),
-        3: page_of([f"C{i}" for i in range(PAGE_SIZE)]),
-        4: jsonp20(p4, "p4"),
+        1: page_of([f"A{i}" for i in range(PAGE_SIZE)], count="80"),
+        2: page_of([f"B{i}" for i in range(PAGE_SIZE)], count="80"),
+        3: page_of([f"C{i}" for i in range(PAGE_SIZE)], count="80"),
+        4: page_of([f"D{i}" for i in range(PAGE_SIZE)], count="80"),
+        5: jsonp([], count="80"),
     }
     rows, meta = listed(pages, 4)
-    check("env=4 ⇒ 恰好 4 次请求", len(CALLS) == 4, str(len(CALLS)))
-    check("每页都按 num=20 要（服务端本来就截到 20）",
-          all(c["params"].get("num") == "20" for c in CALLS))
-    check("page 参数逐页递增", [c["params"].get("page") for c in CALLS] == ["1", "2", "3", "4"],
-          str([c["params"].get("page") for c in CALLS]))
-    codes = [r["code"] for r in rows]
-    check("跨页重复代码去重（80 行里 NVDA 两次 ⇒ 79）", len(codes) == 79, str(len(codes)))
-    check("去重后不出现重复主键", len(set(codes)) == len(codes))
-    check("去重留前排那次（第 1 页优先，不被后面的页覆盖）", codes[0] == "NVDA", str(codes[:3]))
-    check("🔁 活下来的那份**内容**就是第 1 页的（名字与行业都取前排那次，后排那份没盖上来）",
-          rows[0]["name"] == "英伟达公司" and rows[0]["tags"] == ["半导体"], str(rows[0])[:200])
-    check("🔁 后排那份的内容在结果里一条都读不到（既不是两份都留，也不是字段级合并）",
-          not any("后排" in str(r) or "消费电子" in str(r) for r in rows), "后排那份出现在结果里")
-    check("四页都满 ⇒ note 不提失败页数", "页失败" not in meta["note"], meta["note"][:160])
+    check("声明 80 ⇒ 4 页义务＋1 页穷尽，恰好 5 次请求", len(CALLS) == 5, str(len(CALLS)))
+    check("每页 num=20，页序列连续并有穷尽页",
+          all(c["params"].get("num") == "20" for c in CALLS)
+          and [c["params"]["page"] for c in CALLS] == ["1", "2", "3", "4", "5"])
+    check("80 个唯一代码全量交付，不提前按配置页数早停",
+          len(rows) == 80 and len({r["code"] for r in rows}) == 80)
+    check("完整且没有行业剔除 ⇒ 两类子集声明均为 False",
+          meta["acquisitionComplete"] is True and meta["productPolicySubset"] is False
+          and meta["intentionalSubset"] is False and meta["degraded"] is False)
 
 
 def test_list_us_stocks_early_stop() -> None:
-    rows, meta = listed(
-        {1: page_of([f"A{i}" for i in range(PAGE_SIZE)], count="21"),
-         2: jsonp([NVDA])},
-        6,
-    )
-    check("声明总数已覆盖且末页不满 ⇒ 判定已到尾部", len(rows) == 21, str(len(rows)))
-    check("停＝不再往后发请求（6 页的额度只用了 2 次）", len(CALLS) == 2, str(len(CALLS)))
-    check("🔁 尾部不是失败：note 不提失败页数", "页失败" not in meta["note"], meta["note"][:160])
+    rows, meta = listed({
+        1: [jsonp([NVDA], count="21"), page_of([f"A{i}" for i in range(PAGE_SIZE)], count="21")],
+        2: jsonp([dict(NVDA, symbol="TAIL")], count="21"),
+        3: jsonp([], count="21"),
+    }, 6)
+    check("首页异常短页也走同一页义务恢复，不多一次也不少一次",
+          len(rows) == 21 and [c["params"]["page"] for c in CALLS] == ["1", "1", "2", "3"])
+
+    rows, meta = listed({
+        1: [RuntimeError("first disconnected"), "not json",
+            page_of([f"A{i}" for i in range(PAGE_SIZE)], count="20")],
+        2: jsonp([], count="20"),
+    }, 2)
+    check("首页网络与解析失败同页最多三次恢复，第三次成功仍建完整候选",
+          len(rows) == 20 and [c["params"]["page"] for c in CALLS] == ["1", "1", "1", "2"])
+
+    rows, meta = listed({
+        1: page_of([f"A{i}" for i in range(PAGE_SIZE)], count="21"),
+        2: jsonp([dict(NVDA, symbol="TAIL")], count="21"),
+        3: jsonp([], count="21"),
+    }, 6)
+    check("真实尾页按页位应有 1 行，恢复 21 行", len(rows) == 21, str(len(rows)))
+    check("真实尾页只请求一次，再加一枚空页证明穷尽",
+          [c["params"]["page"] for c in CALLS] == ["1", "2", "3"])
+    check("完整采集元数据真实声明", meta["acquisitionComplete"] is True and meta["acquiredCount"] == 21)
+
+    rows, _ = listed({
+        1: page_of([f"A{i}" for i in range(PAGE_SIZE)], count="21"),
+        2: jsonp([dict(NVDA, symbol="TAIL")], count="21"),
+        3: [RuntimeError("probe disconnected"), jsonp([], count="21")],
+    }, 6)
+    check("穷尽探测断连同页恢复，不把无证明的候选交付",
+          len(rows) == 21 and [c["params"]["page"] for c in CALLS] == ["1", "2", "3", "3"])
+
+    msg = _raises(lambda: listed({
+        1: page_of([f"A{i}" for i in range(PAGE_SIZE)], count="21"),
+        2: jsonp([dict(NVDA, symbol="TAIL")], count="21"),
+        3: [RuntimeError("probe down")] * 3,
+    }, 6))
+    check("穷尽探测持续失败 ⇒ 即使声明页齐全也拒绝候选", "exhaustion probe p3 unresolved" in msg, msg[:180])
 
 
 def test_list_us_stocks_premature_short_page() -> None:
-    """CR10-37/39：异常短页同页有界重试；恢复可继续，耗尽仍拒绝。"""
+    short = [dict(NVDA, symbol=f"SHORT{i}") for i in range(18)]
+    full = page_of([f"B{i}" for i in range(PAGE_SIZE)], count="41")
+    rows, meta = listed({
+        1: page_of([f"A{i}" for i in range(PAGE_SIZE)], count="41"),
+        2: [jsonp(short, count="41"), full],
+        3: jsonp([dict(NVDA, symbol="TAIL")], count="41"),
+        4: jsonp([], count="41"),
+    }, 6)
+    codes = [row["code"] for row in rows]
+    check("异常短页同页立即恢复，最终完整 41 行", len(rows) == 41 and meta["acquisitionComplete"] is True)
+    check("恢复序列 1,2,2,3,4；被弃 18 行不进入结果",
+          [c["params"]["page"] for c in CALLS] == ["1", "2", "2", "3", "4"]
+          and not any(c.startswith("SHORT") for c in codes))
+
+    rows, _ = listed({
+        1: page_of([f"A{i}" for i in range(PAGE_SIZE)], count="41"),
+        2: [jsonp(short, count="41"), jsonp(short, count="41"), full],
+        3: jsonp([dict(NVDA, symbol="TAIL")], count="41"),
+        4: jsonp([], count="41"),
+    }, 6)
+    check("第二次重试才恢复也有效，最多三次总尝试",
+          len(rows) == 41 and [c["params"]["page"] for c in CALLS] == ["1", "2", "2", "2", "3", "4"])
+
     raised, msg = "", ""
     try:
         listed({
-            1: page_of([f"A{i}" for i in range(PAGE_SIZE)], count="41"),
-            2: [jsonp([])] * (akp.US_LIST_SHORT_PAGE_RETRIES + 1),
-            3: page_of([f"B{i}" for i in range(PAGE_SIZE)]),
+            1: page_of([f"A{i}" for i in range(PAGE_SIZE)], count="40"),
+            2: [jsonp([NVDA], count="40")] * 9,
         }, 6)
     except Exception as e:  # noqa: BLE001
         raised, msg = type(e).__name__, str(e)
-    check("CR10-39：异常空页重试耗尽后仍拒绝交付部分名单",
-          raised == "ProviderError" and "拒绝交付部分名单" in msg and "3 次尝试" in msg,
-          f"{raised}｜{msg[:160]}")
-    check("CR10-39：空页最多 3 次总尝试，不跳页读取后续名单",
-          len(CALLS) == 4 and [c["params"]["page"] for c in CALLS] == ["1", "2", "2", "2"],
-          str([c["params"]["page"] for c in CALLS]))
+    check("持续短尾在首轮＋两轮修复共 9 次后仍整份拒绝",
+          raised == "ProviderError" and "incomplete snapshot" in msg and "1/2 pages resolved" in msg,
+          f"{raised}｜{msg[:180]}")
+    check("持续短尾请求有界且不读穷尽页冒充成功",
+          len(CALLS) == 10 and CALLS[-1]["params"]["page"] == "2")
+    check("重试常数与集中修复轮数有界", akp.US_LIST_SHORT_PAGE_RETRIES == 2 and akp.US_LIST_REPAIR_ROUNDS == 2)
 
-    raised, msg = "", ""
-    try:
-        listed({1: page_of([f"A{i}" for i in range(PAGE_SIZE)], count="40"),
-                2: [jsonp([NVDA])] * (akp.US_LIST_SHORT_PAGE_RETRIES + 1)}, 6)
-    except Exception as e:  # noqa: BLE001
-        raised, msg = type(e).__name__, str(e)
-    check("CR10-37：声明 40、第 2 页持续仅 1 行 ⇒ 同样拒绝部分名单",
-          raised == "ProviderError" and "拒绝交付部分名单" in msg and "40" in msg,
-          f"{raised}｜{msg[:160]}")
-    check("CR10-39：持续短页达到有界上限后停止，不扫描后续页冒充全量",
-          len(CALLS) == 4 and [c["params"]["page"] for c in CALLS] == ["1", "2", "2", "2"],
-          str([c["params"]["page"] for c in CALLS]))
-
-    # 第 2 页首次短页的 SHORT 绝不能进入结果；重试满页后正常进入第 3 页真实尾页。
-    short = [dict(NVDA, symbol=f"SHORT{i}") for i in range(18)]
-    recovered = [dict(NVDA, symbol=f"B{i}") for i in range(PAGE_SIZE)]
-    rows, meta = listed({
-        1: page_of([f"A{i}" for i in range(PAGE_SIZE)], count="41"),
-        2: [jsonp(short, count="41"), page_of([f"B{i}" for i in range(PAGE_SIZE)], count="41")],
-        3: jsonp([dict(NVDA, symbol="TAIL")], count="41"),
-    }, 6)
-    codes = [row["code"] for row in rows]
-    check("CR10-39：首次短页后同页恢复满页，继续到真实尾页并声明全量",
-          len(rows) == 41 and meta["intentionalSubset"] is False, str(meta)[:160])
-    check("CR10-39：恢复路径请求序列为 1,2,2,3，不跳页也不多买后续页",
-          [c["params"]["page"] for c in CALLS] == ["1", "2", "2", "3"],
-          str([c["params"]["page"] for c in CALLS]))
-    check("CR10-39：被弃短页的 18 行不重复计入实收或产品",
-          not any(code.startswith("SHORT") for code in codes)
-          and len([code for code in codes if code.startswith("B")]) == 20,
-          str(codes[:30]))
-    check("CR10-39：恢复后采用响应只登记一次，没有重复主键", len(codes) == len(set(codes)))
-
-    # 第二次也短、第三次恢复，钉住“最多 2 次重试”不是“只重试一次”。
-    rows, meta = listed({
-        1: page_of([f"A{i}" for i in range(PAGE_SIZE)], count="41"),
-        2: [jsonp(short, count="41"), jsonp(short, count="41"),
-            page_of([f"B{i}" for i in range(PAGE_SIZE)], count="41")],
-        3: jsonp([dict(NVDA, symbol="TAIL")], count="41"),
-    }, 6)
-    check("CR10-39：第二次重试恢复仍有效，最终 41 行且全量",
-          len(rows) == 41 and meta["intentionalSubset"] is False, str(meta)[:160])
-    check("CR10-39：第三次总尝试后不再多发同页请求",
-          [c["params"]["page"] for c in CALLS] == ["1", "2", "2", "2", "3"],
-          str([c["params"]["page"] for c in CALLS]))
-
-    # 节流跨过看门狗期限后，被弃短页不能从内层 break 漏进 received/rows。
     install_fake({
         1: page_of([f"A{i}" for i in range(PAGE_SIZE)], count="41"),
-        2: [jsonp(short, count="41"), page_of([f"B{i}" for i in range(PAGE_SIZE)], count="41")],
+        2: [jsonp(short, count="41"), full],
     })
     saved_sleep, saved_monotonic = akp.time.sleep, akp.time.monotonic
     saved_timeout, saved_request = akp.US_LIST_WHOLE_TIMEOUT_S, akp._ak_request
-    clock = [0.0]
-    sleeps = [0]
+    clock, sleeps = [0.0], [0]
 
     def fake_sleep(_seconds):
         sleeps[0] += 1
-        if sleeps[0] == 2:  # 第 2 页首次请求前的节流正常，短页后的重试节流才到期
+        if sleeps[0] == 2:
             clock[0] += 2000.0
 
     try:
-        akp.time.sleep = fake_sleep
-        akp.time.monotonic = lambda: clock[0]
+        akp.time.sleep, akp.time.monotonic = fake_sleep, lambda: clock[0]
         akp.US_LIST_WHOLE_TIMEOUT_S = 1500.0
         akp._ak_request = lambda fn, seconds, name: fn()
         raised, msg = "", ""
@@ -489,162 +465,161 @@ def test_list_us_stocks_premature_short_page() -> None:
         except Exception as e:  # noqa: BLE001
             raised, msg = type(e).__name__, str(e)
     finally:
-        akp.time.sleep = saved_sleep
-        akp.time.monotonic = saved_monotonic
-        akp.US_LIST_WHOLE_TIMEOUT_S = saved_timeout
-        akp._ak_request = saved_request
-    check("CR10-39：重试节流跨过看门狗后仍拒绝，不采用被弃短页",
-          raised == "ProviderError" and "同页重试未完成" in msg,
-          f"{raised}｜{msg[:160]}")
-    check("CR10-39：看门狗到期后不再发同页重试",
-          [c["params"]["page"] for c in CALLS] == ["1", "2"],
-          str([c["params"]["page"] for c in CALLS]))
-
-    # 普通网络错误不顺带重试；后续到尾部也不能冒充全量。
-    rows, meta = listed({
-        1: page_of([f"A{i}" for i in range(PAGE_SIZE)], count="21"),
-        2: RuntimeError("RemoteDisconnected"),
-        3: jsonp([dict(NVDA, symbol="TAIL")], count="21"),
-    }, 3)
-    check("CR10-39：普通网络错误保持一次请求与失败页子集语义",
-          [c["params"]["page"] for c in CALLS] == ["1", "2", "3"]
-          and meta["intentionalSubset"] is True and "1 页失败" in meta["note"], str(meta)[:180])
-
-    # 已有 CR10-37 用例证明真实尾页只买一次；这里再钉重试常数与总尝试数的关系。
-    check("CR10-39：首次响应之外最多重试 2 次", akp.US_LIST_SHORT_PAGE_RETRIES == 2)
+        akp.time.sleep, akp.time.monotonic = saved_sleep, saved_monotonic
+        akp.US_LIST_WHOLE_TIMEOUT_S, akp._ak_request = saved_timeout, saved_request
+    check("重试节流跨过看门狗后拒绝，不采用被弃短页",
+          raised == "ProviderError" and "incomplete snapshot" in msg, f"{raised}｜{msg[:160]}")
+    check("看门狗到期后不再发请求，Session 仍关闭",
+          [c["params"]["page"] for c in CALLS] == ["1", "2"] and all(s.closed for s in SESSIONS))
 
 
 def test_list_us_stocks_partial_and_total_failure() -> None:
-    rows, meta = listed(
-        {1: jsonp20([NVDA, VISA], "x"), 2: RuntimeError("RemoteDisconnected"), 3: jsonp20([QQQ], "y")},
-        3,
-    )
-    check("中途一页失败 ⇒ 已拿到的行照常返回（不整轮作废；40 行里剔掉 VISA/QQQ 两个无行业的＝38）",
-          len(rows) == 38, str(len(rows)))
-    check("失败的页数必须自己说话", "1 页失败" in meta["note"], meta["note"][:160])
-    check("🔁 「剔了多少行」与「失败了几页」是两个数，不许混成一句",
-          "剔掉 2 行" in meta["note"] and "1 页失败" in meta["note"], meta["note"][:220])
-    check("失败成因带在 note 里（不看日志也能归因）", "RemoteDisconnected" in meta["note"], meta["note"][:200])
-    check("部分到货仍算一次成功（degraded 只有一份语义，不新增失败态）",
-          meta.get("degraded") is True, str(meta)[:90])
+    # 两枚不同故障页在集中修复中恢复；第二页首轮三次失败，第三页首轮短页三次失败。
+    short = jsonp([NVDA], count="61")
+    rows, meta = listed({
+        1: page_of([f"A{i}" for i in range(PAGE_SIZE)], count="61"),
+        2: [RuntimeError("RemoteDisconnected")] * 3 + [page_of([f"B{i}" for i in range(PAGE_SIZE)], count="61")],
+        3: [short] * 3 + [page_of([f"C{i}" for i in range(PAGE_SIZE)], count="61")],
+        4: jsonp([dict(NVDA, symbol="TAIL")], count="61"),
+        5: jsonp([], count="61"),
+    }, 6)
+    check("CR10-40：两枚失败页首轮不丢弃，集中修复后完整交付 61 行",
+          len(rows) == 61 and meta["acquisitionComplete"] is True, str(meta)[:180])
+    check("集中修复换新 Session 且全部关闭", len(SESSIONS) == 2 and all(s.closed for s in SESSIONS))
+    seq = [c["params"]["page"] for c in CALLS]
+    check("修复只点未解决页，不重买已成功页", seq == ["1", "2", "2", "2", "3", "3", "3", "4", "2", "3", "5"], str(seq))
+
+    # 一页永久失败不能阻止另一页恢复，但最终仍无候选。
+    raised = ""
+    try:
+        listed({
+            1: page_of([f"A{i}" for i in range(PAGE_SIZE)], count="61"),
+            2: [RuntimeError("down")] * 9,
+            3: [short] * 3 + [page_of([f"C{i}" for i in range(PAGE_SIZE)], count="61")],
+            4: jsonp([dict(NVDA, symbol="TAIL")], count="61"),
+            5: jsonp([], count="61"),
+        }, 6)
+    except Exception as e:  # noqa: BLE001
+        raised = str(e)
+    check("一页持续失败时仍独立修复其他页，最终 3/4 页而拒绝",
+          "incomplete snapshot" in raised and "3/4 pages resolved" in raised, raised[:180])
 
     raised = ""
     try:
-        listed({1: RuntimeError("conn aborted"), 2: RuntimeError("conn aborted")}, 2)
+        listed({1: [RuntimeError("conn aborted")] * 3}, 2)
     except Exception as e:  # noqa: BLE001
         raised = type(e).__name__
-    check("全页皆失败 ⇒ ProviderError（空列表不许冒充成功）", raised == "ProviderError", raised)
+    check("首页全失败 ⇒ ProviderError，不伪造声明或空名单",
+          raised == "ProviderError" and len(CALLS) == 3, f"{raised} / {len(CALLS)}")
 
 
 # ---------- 4b. 行业闸（#32 的 (2) 定案＝10-04 03:1x 主人的字"剔除没行业的"） ----------
 
 
 def test_category_gate() -> None:
-    no_key = {"symbol": "NOKEY", "name": "No Key Inc.", "cname": "无键公司"}  # 连键都没有
-    blank = dict(NVDA, symbol="BLANK", category="   ")  # 全空白：strip 之后为空
-    rows, meta = listed({1: jsonp20([NVDA, VISA, QQQ, no_key, blank], "g")}, 1)
+    blank = dict(NVDA, symbol="BLANK", category="   ")
+    rows, meta = listed({
+        1: jsonp20([NVDA, VISA, QQQ, {"symbol": "NO_KEY", "name": "No Key", "cname": "无键"}, blank], "g", count="20"),
+        2: jsonp([], count="20"),
+    }, 1)
     codes = [r["code"] for r in rows]
-    check("『没有行业』的四种形态（空串／null／缺键／全空白）由同一道闸剔掉",
-          len(rows) == 16 and "剔掉 4 行" in meta["note"],
-          f"{len(rows)} 行｜{meta['note'][:150]}")
-    check("🔁 带行业的行一条都没被误剔（NVDA＋15 个填充行全在）",
-          "NVDA" in codes and sum(1 for c in codes if c.startswith("Fg")) == 15, str(codes[:4]))
-
-    # 闸排在**去重登记之前**：被剔的代码不进 `seen` ⇒ 后一页带上行业时还能救回来
-    rows2, meta2 = listed(
-        {1: jsonp20([VISA], "h1"), 2: jsonp20([dict(VISA, category="金融服务")], "h2")}, 2,
-    )
-    codes2 = [r["code"] for r in rows2]
-    check("同一代码第 1 页无行业被剔、第 2 页带行业 ⇒ 仍入库且不重复（口径闸不冒充去重闸）",
-          "V" in codes2 and codes2.count("V") == 1, str(codes2[:3]))
-    check("救回来只算剔了 1 行（不是两次都不见）", "剔掉 1 行" in meta2["note"], meta2["note"][:150])
-
-    rows3, meta3 = listed(
-        {1: jsonp20([{"name": "No Symbol", "cname": "无代码"}, dict(VISA)], "t")}, 1,
-    )
-    check("🔁 两道闸分开计：无 symbol 那行走的是**结构丢弃**，不进『剔掉 N 行』（1 行而非 2 行）",
-          len(rows3) == 18 and "剔掉 1 行" in meta3["note"],
-          f"{len(rows3)} 行｜{meta3['note'][:140]}")
+    check("空串／null／全空白行业都由同一产品口径剔除",
+          len(rows) == 16 and "剔掉 4 行" in meta["note"], f"{len(rows)}｜{meta['note'][:160]}")
+    check("带行业的行没有误剔，原始 acquiredCount 仍是 20",
+          len(codes) == 16 and meta["acquiredCount"] == 20 and meta["declaredCount"] == 20)
 
     raised, msg = "", ""
     try:
-        listed({1: jsonp([VISA, QQQ, ZZZTX], count="3")}, 1)
+        listed({
+            1: jsonp([VISA, QQQ, ZZZTX], count="3"),
+            2: jsonp([], count="3"),
+        }, 1)
     except Exception as e:  # noqa: BLE001
         raised, msg = type(e).__name__, str(e)
-    check("整页都不带行业 ⇒ ProviderError（空名单不许冒充成功），成因带上剔了多少",
-          raised == "ProviderError" and "剔无行业 3 行" in msg, f"{raised}｜{msg[:140]}")
+    check("完整采集但行业筛选后为空 ⇒ ProviderError，不交空载荷",
+          raised == "ProviderError" and "mapped to empty" in msg, f"{raised}｜{msg[:140]}")
 
-    # 闸**不省钱**：筛在解析之后、翻页之前 ⇒ 上游请求数一页都不少
-    full_none = jsonp([dict(VISA, symbol=f"X{i}") for i in range(PAGE_SIZE)])
-    raised2 = ""
+    raised, msg = "", ""
     try:
-        listed({1: full_none, 2: full_none, 3: full_none}, 3)
+        listed({
+            1: jsonp20([{"name": "No Symbol", "cname": "无代码"}], "bad", count="20"),
+            2: jsonp([], count="20"),
+        }, 1)
     except Exception as e:  # noqa: BLE001
-        raised2 = type(e).__name__
-    check("三页满页全被剔 ⇒ 恰好 3 次请求（名单缩到 0 也不会少打一页，别把这道闸读成省钱）",
-          raised2 == "ProviderError" and len(CALLS) == 3, f"{raised2}｜{len(CALLS)} 次")
+        raised, msg = type(e).__name__, str(e)
+    check("原始行缺 symbol 属完整性失败，不算产品口径剔除",
+          raised == "ProviderError" and "raw row/symbol count" in msg, f"{raised}｜{msg[:140]}")
+
+    raised, msg = "", ""
+    try:
+        listed({
+            1: jsonp20([dict(NVDA, symbol="NO_NAME", name="", cname="")], "bad", count="20"),
+            2: jsonp([], count="20"),
+        }, 1)
+    except Exception as e:  # noqa: BLE001
+        raised, msg = type(e).__name__, str(e)
+    check("有代码但名称完全缺失属源数据畸形，不借 intentionalSubset 放行",
+          raised == "ProviderError" and "unmappable product" in msg, f"{raised}｜{msg[:140]}")
 
 
-# ---------- 4c. 乙全量档（11-12）：覆盖面判定四枚＋反向钻 ----------
+# ---------- 4c. CR10-40：候选完整性反向证明 ----------
+
+
+def _raises(fn) -> str:
+    try:
+        fn()
+    except Exception as e:  # noqa: BLE001
+        return str(e)
+    return ""
 
 
 def test_us_yi_full_coverage() -> None:
-    # 用例①的反向钻＝monkeypatch 看门狗回甲的 150s ⇒ 名义装不下硬上限，判据必须翻红
     saved = akp.US_LIST_WHOLE_TIMEOUT_S
     try:
         akp.US_LIST_WHOLE_TIMEOUT_S = 150.0
-        check("🔁 反向钻：看门狗设回 150 ⇒ 乙用例①的判据当场不成立（证明它真在量这件事）",
-              not (akp.US_LIST_WHOLE_TIMEOUT_S >= akp.US_LIST_PAGE_CEILING * 1.0),
-              str(akp.US_LIST_WHOLE_TIMEOUT_S))
+        check("看门狗反向钻仍有判别力", not (akp.US_LIST_WHOLE_TIMEOUT_S >= akp.US_LIST_PAGE_CEILING * 1.0))
     finally:
         akp.US_LIST_WHOLE_TIMEOUT_S = saved
 
-    # 用例②：末不满页＝翻完上游名单 ⇒ subset=False、degraded 仍 True、note 说"已取全"
-    p1 = page_of([f"A{i}" for i in range(PAGE_SIZE)], count="25")
-    p2 = jsonp([dict(NVDA, symbol=f"T{i}") for i in range(5)], count="25")
-    rows, meta = listed({1: p1, 2: p2}, 950)
-    check("乙用例②：翻到尾部（25 只声明、2 页翻完）⇒ 25 行全留", len(rows) == 25, str(len(rows)))
-    check("乙用例②：早停仍生效（950 的额度只发 2 次请求）", len(CALLS) == 2, str(len(CALLS)))
-    check("乙用例②：全量 ⇒ intentionalSubset=False（不再恒 True）",
-          meta.get("intentionalSubset") is False, str(meta)[:90])
-    check("乙用例②：degraded 仍恒 True（行业闸还在剔行，摘了＝谎报全量）",
-          meta.get("degraded") is True, str(meta)[:90])
-    check("乙用例②：note 全量档说『已取全』且不再说『只取前排』",
-          "已取全" in meta["note"] and "只取前排" not in meta["note"], meta["note"][:160])
+    msg = _raises(lambda: listed({
+        1: page_of([f"A{i}" for i in range(PAGE_SIZE)], count="61"),
+    }, 2))
+    check("配置页数不足以覆盖声明 ⇒ 立即失败，只买首页，不交截断名单",
+          "page budget 2 < required 4" in msg and len(CALLS) == 1, msg[:180])
 
-    # 用例③：env 截断（3 页 < 声明盘子）⇒ subset=True，note 保留原子串"只取前排 N 页"
-    rows3, meta3 = listed(
-        {1: page_of([f"A{i}" for i in range(PAGE_SIZE)]),
-         2: page_of([f"B{i}" for i in range(PAGE_SIZE)]),
-         3: page_of([f"C{i}" for i in range(PAGE_SIZE)])},
-        3,
-    )
-    check("乙用例③：截断 ⇒ intentionalSubset=True（缩水闸放行有意子集的那半）",
-          meta3.get("intentionalSubset") is True, str(meta3)[:90])
-    check("乙用例③：note 保留『只取前排 3 页』原子串（test:323 钉着的那句）",
-          "只取前排 3 页" in meta3["note"], meta3["note"][:160])
+    msg = _raises(lambda: listed({
+        1: page_of([f"A{i}" for i in range(PAGE_SIZE)], count="21"),
+        2: jsonp([dict(NVDA, symbol="TAIL")], count="22"),
+    }, 6))
+    check("抓取期间声明变化 ⇒ 整份候选失败，不重采拼接",
+          "declaration changed" in msg
+          and [c["params"]["page"] for c in CALLS] == ["1", "2"], msg[:180])
 
-    # 用例④：翻到尾部但中途有失败页 ⇒ 仍声明子集（缺页的盘子不许冒充全量，R16）
-    rows4, meta4 = listed(
-        {1: page_of([f"A{i}" for i in range(PAGE_SIZE)], count="21"),
-         2: RuntimeError("RemoteDisconnected"),
-         3: jsonp([dict(NVDA, symbol="TAIL")], count="21")},
-        3,
-    )
-    check("乙用例④：尾部到了但有失败页 ⇒ intentionalSubset 仍 True",
-          meta4.get("intentionalSubset") is True, str(meta4)[:90])
-    check("乙用例④：失败页数照旧自己说话", "1 页失败" in meta4["note"], meta4["note"][:160])
+    msg = _raises(lambda: listed({
+        1: page_of([f"A{i}" for i in range(PAGE_SIZE)], count="40"),
+        2: jsonp([dict(NVDA, symbol=f"B{i}") for i in range(PAGE_SIZE)], count="41"),
+    }, 6))
+    check("后续页声明漂移立即失败，不能吞进失败页账本继续翻页",
+          "declaration changed" in msg and [c["params"]["page"] for c in CALLS] == ["1", "2"], msg[:180])
 
-    # 纯函数钻＝"subset 恒 False"的改法会让③④的形状当场红（不落盘的合成件）
-    check("🔁 纯函数钻：截断形状必须判子集（恒 False 的改法在这里红）",
-          akp._us_coverage_subset(3, False, "18241", []) is True)
-    check("🔁 纯函数钻：尾部＋失败页形状必须判子集（恒 False 的改法在这里红）",
-          akp._us_coverage_subset(3, True, "21", ["p2:RuntimeError"]) is True)
-    check("🔁 纯函数钻：累计实收覆盖声明数 ⇒ 全量；不能用页数×20 猜覆盖",
-          akp._us_coverage_subset(21, False, "21", []) is False)
-    check("🔁 纯函数钻：翻完且零失败 ⇒ 全量；声明数不是数字 ⇒ 只认 exhausted",
-          akp._us_coverage_subset(913, True, "18241", []) is False
-          and akp._us_coverage_subset(913, False, "", []) is True)
+    p1 = [dict(NVDA, symbol="DUP")] + [dict(NVDA, symbol=f"A{i}") for i in range(19)]
+    p2 = [dict(NVDA, symbol="DUP")]
+    msg = _raises(lambda: listed({
+        1: jsonp(p1, count="21"), 2: jsonp(p2, count="21"), 3: jsonp([], count="21"),
+    }, 6))
+    check("页数与行数齐全但原始代码重复 ⇒ 完整性失败", "duplicate symbols" in msg, msg[:180])
+
+    msg = _raises(lambda: listed({
+        1: page_of([f"A{i}" for i in range(PAGE_SIZE)], count="20"),
+        2: jsonp([dict(NVDA, symbol="EXTRA")], count="20"),
+    }, 6))
+    check("穷尽页非空 ⇒ 声明与页序矛盾，拒绝候选", "exhaustion probe" in msg, msg[:180])
+
+    check("页义务算术按声明，不看累计失败缺口",
+          akp._us_page_count(18424) == 922
+          and akp._us_expected_rows(921, 18424) == 20
+          and akp._us_expected_rows(922, 18424) == 4)
+    check("声明非正数拒绝建立页义务", bool(_raises(lambda: akp._us_page_count(0))))
 
 
 # ---------- 5. 注册与派发 ----------
@@ -652,10 +627,13 @@ def test_us_yi_full_coverage() -> None:
 
 def test_registration_and_dispatch() -> None:
     check("us 真的进了列表注册表", get_list_provider("us") is akp._akshare, "not registered")
-    install_fake({1: jsonp20([NVDA], "r")})
+    install_fake({
+        1: jsonp20([NVDA], "r", count="20"),
+        2: jsonp([], count="20"),
+    })
     with with_pages(1):
         items, meta = list_products_with_meta(akp._akshare, "us")
-    check("env 读的是**调用时**的值（1 页 ⇒ 恰好 1 次请求）", len(CALLS) == 1, str(len(CALLS)))
+    check("env 在调用时生效；一页义务之外仍需一枚穷尽页", len(CALLS) == 2, str(len(CALLS)))
     check("list_products 派发到 us 分支", len(items) == 20 and items[0]["type"] == "us", str(items)[:90])
     check("(items, meta) 归一化后 source 仍是声明值（CR9-31 形态不被包装吃掉）",
           meta["source"] == "sina-us-category-list", str(meta)[:90])

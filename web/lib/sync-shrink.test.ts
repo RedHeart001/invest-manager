@@ -139,6 +139,56 @@ describe("sync 降级缩水保护（G2 回归）", () => {
     expect(wrote).toBe(true);
   });
 
+  it("CR10-40：不完整候选即使夹带 products/intentionalSubset 也零写入，且连库内计数都不读", async () => {
+    count.mockResolvedValue(300);
+    dsGet.mockResolvedValue({
+      count: 179,
+      products: products(179),
+      acquisitionComplete: false,
+      productPolicySubset: false,
+      intentionalSubset: true,
+      note: "两页仍未解决",
+    });
+    const r = await syncType("us");
+    expect(r.error).toContain("incomplete acquisition candidate rejected");
+    expect(r.count).toBeUndefined();
+    expect(count).not.toHaveBeenCalled();
+    expect(executeRawUnsafe).not.toHaveBeenCalled();
+  });
+
+  it("🔁 CR10-40：非产品口径子集不能借 intentionalSubset 绕过 70% 闸", async () => {
+    count.mockResolvedValue(300);
+    dsGet.mockResolvedValue({
+      count: 179,
+      products: products(179),
+      acquisitionComplete: true,
+      productPolicySubset: false,
+      intentionalSubset: true,
+    });
+    const r = await syncType("us");
+    expect(r.error).toContain("non-product subset cannot bypass shrink guard");
+    expect(count).not.toHaveBeenCalled();
+    expect(executeRawUnsafe).not.toHaveBeenCalled();
+  });
+
+  it("CR10-40：完整采集＋产品口径子集可以提交，两个事实不再混用", async () => {
+    count.mockResolvedValue(300);
+    dsGet.mockResolvedValue({
+      count: 179,
+      products: products(179),
+      source: "sina-us-category-list",
+      acquisitionComplete: true,
+      productPolicySubset: true,
+      intentionalSubset: true,
+      declaredCount: 300,
+      acquiredCount: 300,
+    });
+    const r = await syncType("us");
+    expect(r.error).toBeUndefined();
+    expect(r.count).toBe(179);
+    expect(r.note).toContain("按上游声明放行有意子集");
+  });
+
   it("🔁 声明了却回 0 行 → 仍走 C1 空载荷保护（放行通道不覆盖空载荷）", async () => {
     count.mockResolvedValue(300);
     dsGet.mockResolvedValue({ count: 0, products: [], intentionalSubset: true });

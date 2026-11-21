@@ -105,7 +105,8 @@ export const DS_CONTRACT: readonly EndpointContract[] = [
     requiredTop: ["count", "products", "source"],
     requiredRows: { products: ["type", "code", "name"] },
     readBy: ["web/lib/sync.ts"],
-    note: "降级时另带 degraded/note/intentionalSubset；那三个是「可选但有语义」，不列进 required",
+    note: "降级/子集元数据是「可选但有语义」，不列进 required：acquisitionComplete=false 时 Web 零写入；"
+      + "只有完整采集后的 productPolicySubset/intentionalSubset 可通过 70% 缩水闸，declaredCount/acquiredCount 记录原始完整性",
   },
   {
     path: "/news",
