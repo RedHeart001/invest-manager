@@ -101,6 +101,53 @@ describe("HotspotFeed 请求生命周期（CR10-29）", () => {
     expect(screen.getByText("数据日期：2026-11-14")).toBeTruthy();
   });
 
+  it("同日期 digest 按 id 去重增量插入", async () => {
+    const { container } = render(<HotspotFeed initialDate="2026-11-13" initialRows={[digest("old", "旧热点")]} />);
+    await act(async () => {
+      EventSourceMock.instances[0].emitDigest({
+        date: "2026-11-13",
+        rows: [digest("new", "新热点"), digest("old", "重复旧热点")],
+      });
+    });
+    expect(screen.getByText("数据日期：2026-11-13")).toBeTruthy();
+    expect(screen.getByText("新热点")).toBeTruthy();
+    expect(screen.getAllByText("旧热点")).toHaveLength(1);
+    expect(screen.queryByText("重复旧热点")).toBeNull();
+    expect(container.querySelectorAll("li")).toHaveLength(2);
+  });
+
+  it("跨日期 digest 自动切换日期并整表替换", async () => {
+    const { container } = render(<HotspotFeed initialDate="2026-11-12" initialRows={[digest("old", "昨日热点", "2026-11-12")]} />);
+    await act(async () => {
+      EventSourceMock.instances[0].emitDigest({ date: "2026-11-13", rows: [digest("new", "今日热点")] });
+    });
+    expect(screen.getByText("数据日期：2026-11-13")).toBeTruthy();
+    expect(screen.getByText("今日热点")).toBeTruthy();
+    expect(screen.queryByText("昨日热点")).toBeNull();
+    expect(container.querySelectorAll("li")).toHaveLength(1);
+  });
+
+  it("空行的跨日期 digest 也切换日期并清空旧行", async () => {
+    const { container } = render(<HotspotFeed initialDate="2026-11-12" initialRows={[digest("old", "昨日热点", "2026-11-12")]} />);
+    await act(async () => {
+      EventSourceMock.instances[0].emitDigest({ date: "2026-11-13", rows: [] });
+    });
+    expect(screen.getByText("数据日期：2026-11-13")).toBeTruthy();
+    expect(screen.queryByText("昨日热点")).toBeNull();
+    expect(container.querySelectorAll("li")).toHaveLength(0);
+  });
+
+  it("全重复的跨日期 digest 不沿用旧行内容", async () => {
+    const { container } = render(<HotspotFeed initialDate="2026-11-12" initialRows={[digest("same", "昨日热点", "2026-11-12")]} />);
+    await act(async () => {
+      EventSourceMock.instances[0].emitDigest({ date: "2026-11-13", rows: [digest("same", "次日同 id 热点")] });
+    });
+    expect(screen.getByText("数据日期：2026-11-13")).toBeTruthy();
+    expect(screen.getByText("次日同 id 热点")).toBeTruthy();
+    expect(screen.queryByText("昨日热点")).toBeNull();
+    expect(container.querySelectorAll("li")).toHaveLength(1);
+  });
+
   it("SSE 重连补拉遵守同一刷新代次，新 digest 作废在途旧快照", async () => {
     const older = deferred<Response>();
     const newer = deferred<Response>();

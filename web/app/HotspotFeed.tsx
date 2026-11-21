@@ -180,7 +180,12 @@ export default function HotspotFeed({
         refreshAbortRef.current?.abort();
         refreshAbortRef.current = null;
         setPending(false);
+        // CR10-41：在 updater 外固定本事件是否跨日，避免连续事件共用一个事后 ref。
+        const dateChanged = data.date !== dateRef.current;
+        dateRef.current = data.date;
         setRows((prev) => {
+          // 跨日即使 rows 为空或 id 全重复也整表替换；同日才按 id 去重增量插入。
+          if (dateChanged) return data.rows ?? [];
           const seen = new Set(prev.map((r) => r.id));
           const fresh = (data.rows ?? []).filter((r) => !seen.has(r.id));
           if (fresh.length === 0) return prev;
