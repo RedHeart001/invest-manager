@@ -219,6 +219,8 @@ export function builderMsFor(committedMs: number, isDirty: boolean, nowMs: numbe
  *  登记表为空＝L3 两条牙齿都在跑：清单外的过期当场红，清单里的不再过期也红（逼着摘）。
  *  每条的 `why` 有 ≥20 字符的下限（`ds-contract.test.ts` 里那两条 `why.trim().length` 断言），且要写清"谁把构造面改新的＋哪一轮重采"。 */
 export const KNOWN_STALE_SNAPSHOTS: Record<string, string> = {
+  // CR10-43（11-22）只改 us 行级名称类型判据，不改响应键面；同日快照按日期口径不判陈旧，
+  // 不登记已知陈旧或重复购买上游请求。下次契约重采时复核 `/products` 行面语义。
   // 11-15 18:28～18:30 独立副本 `window_contract.py --live --write` 重采后销账：
   // 11-12 美股乙登记的 10 条整块删除。默认 9 条与单独 `/products` 均取得真响应并回写；
   // `/hotspots/status` 的 jobs 行面因调度关闭不可复核，保留 `rows=null`，不是字段删除证据。

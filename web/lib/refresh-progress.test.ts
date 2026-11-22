@@ -29,6 +29,7 @@ import {
   hasCompletionLedger,
   lastCompletedAt,
   readRefreshProgress,
+  refreshProgressView,
   recordRefreshResult,
   startRefreshProgress,
 } from "./refresh-progress";
@@ -64,6 +65,34 @@ describe("刷新腿进度状态位（CR9-60／#33 甲）", () => {
     else process.env.REFRESH_PROGRESS_FILE = prevEnv;
     fs.rmSync(dir, { recursive: true, force: true });
     vi.restoreAllMocks();
+  });
+
+  it("owner 进程消失时派生 interrupted，但不改写原始证据", () => {
+    startRefreshProgress(TYPES);
+    const previous = readRefreshProgress();
+    expect(previous?.ownerPid).toBe(process.pid);
+    const kill = vi.spyOn(process, "kill").mockImplementation(() => {
+      throw Object.assign(new Error("gone"), { code: "ESRCH" });
+    });
+    const view = refreshProgressView();
+    expect(view?.outcome).toBe("interrupted");
+    expect(view?.persistedOutcome).toBe("running");
+    expect(view?.current).toBe("stock");
+    expect(readRefreshProgress()?.outcome).toBe("running");
+    expect(JSON.parse(fs.readFileSync(file(), "utf8")).outcome).toBe("running");
+    expect(kill).toHaveBeenCalledWith(process.pid, 0);
+  });
+
+  it("owner 存活或旧文件缺 PID 时，不把 running 猜成历史中断", () => {
+    startRefreshProgress(TYPES);
+    expect(refreshProgressView()?.outcome).toBe("running");
+    expect(refreshProgressView()?.persistedOutcome).toBeUndefined();
+    const legacy = { ...readRefreshProgress() };
+    delete legacy.ownerPid;
+    fs.writeFileSync(file(), JSON.stringify(legacy));
+    const kill = vi.spyOn(process, "kill");
+    expect(refreshProgressView()?.outcome).toBe("running");
+    expect(kill).not.toHaveBeenCalled();
   });
 
   it("起跑就落一次盘：running／types 全／current 是第一类／done 空", () => {

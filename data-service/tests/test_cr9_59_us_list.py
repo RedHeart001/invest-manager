@@ -222,6 +222,12 @@ def test_us_product_mapping() -> None:
     check("🔁 缺名称字段属结构漂移，不借代码回退吞掉",
           akp._us_product({"symbol": "MISSING_NAMES", "category": "半导体"}) is None)
     check("🔁 非字符串非 false 名称属结构漂移", akp._us_product({"symbol": "BAD", "name": 1, "cname": ""}) is None)
+    check("🔁 布尔 true 不是空名，不得变成展示名",
+          akp._us_product({"symbol": "TRUE_BOTH", "name": True, "cname": True}) is None)
+    check("🔁 name 单侧 true 仍拒绝",
+          akp._us_product({"symbol": "TRUE_NAME", "name": True, "cname": ""}) is None)
+    check("🔁 cname 单侧 true 仍拒绝",
+          akp._us_product({"symbol": "TRUE_CNAME", "name": "Valid Name", "cname": True}) is None)
 
     check("🔁 category 为空串 ⇒ tags 为空（不是 ['']）", v["tags"] == [], str(v)[:80])
     check("交易所不被改写（NYSE 原样）", v["exchange"] == "NYSE", str(v)[:80])

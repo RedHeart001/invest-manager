@@ -28,6 +28,8 @@ import { beijingDateOf, beijingToday } from "./time";
 export type RefreshProgress = {
   /** 本轮起跑时刻（ISO）——跨天读数时靠它判这份进度是不是今天这轮的 */
   startedAt: string;
+  /** 写入本轮状态的 Web 进程；旧文件缺省时不据此猜中断。 */
+  ownerPid?: number;
   /** 本轮被要求刷的类型（顺序即执行顺序） */
   types: string[];
   /** 正在刷的那一类；全部跑完为 null */
@@ -46,6 +48,12 @@ export type RefreshProgress = {
    * 前一晚"stock 已完成"的证据清掉，那次刷新就白烧。
    */
   lastCompleted: Record<string, string>;
+};
+
+export type RefreshProgressView = Omit<RefreshProgress, "outcome"> & {
+  outcome: RefreshProgress["outcome"] | "interrupted";
+  persistedOutcome?: "running";
+  interruptionNote?: string;
 };
 
 const nowIso = () => new Date().toISOString();
@@ -87,11 +95,37 @@ export function readRefreshProgress(): RefreshProgress | null {
   }
 }
 
+function ownerAlive(pid: number | undefined): boolean | null {
+  if (!Number.isInteger(pid) || (pid ?? 0) <= 0) return null;
+  try {
+    process.kill(pid as number, 0);
+    return true;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ESRCH") return false;
+    if (code === "EPERM") return true;
+    return null;
+  }
+}
+
+/** 仅健康检查的展示视图：owner 进程已消失时，未收尾 running 是中断残留。 */
+export function refreshProgressView(): RefreshProgressView | null {
+  const progress = readRefreshProgress();
+  if (!progress || progress.outcome !== "running" || ownerAlive(progress.ownerPid) !== false) return progress;
+  return {
+    ...progress,
+    outcome: "interrupted",
+    persistedOutcome: "running",
+    interruptionNote: "写入本轮进度的 Web 进程已不存在且没有收尾记录；按历史中断展示，原始进度文件未改写。",
+  };
+}
+
 /** 刷新腿起跑时写一次 ⇒ "这一轮开始了、打算刷哪几类"从第一毫秒就可读。 */
 export function startRefreshProgress(types: string[]): void {
   const prev = readRefreshProgress();
   writeProgress({
     startedAt: nowIso(),
+    ownerPid: process.pid,
     types,
     current: types[0] ?? null,
     done: [],
@@ -124,6 +158,7 @@ export function recordRefreshResult(result: SnapshotResult): void {
   }
   writeProgress({
     startedAt: prev?.startedAt ?? nowIso(),
+    ownerPid: prev?.ownerPid ?? process.pid,
     types,
     done,
     current: done.length < types.length ? types[done.length] : null,
@@ -138,6 +173,7 @@ export function finishRefreshProgress(outcome: "completed" | "failed"): void {
   const prev = readRefreshProgress();
   writeProgress({
     startedAt: prev?.startedAt ?? nowIso(),
+    ownerPid: prev?.ownerPid ?? process.pid,
     types: prev?.types ?? [],
     done: prev?.done ?? [],
     current: null,

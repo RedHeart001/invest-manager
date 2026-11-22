@@ -25,7 +25,7 @@ P0–P7 主功能已完成；round4 完整七套、真实 LLM 对话/工具链�
 | 改代码 | [CONSTRAINTS.md](CONSTRAINTS.md) | 不得回退的约束、跨服务契约、数据源事实和部署约束 |
 | 查功能状态与验收欠账 | [FIX-LEDGER.md](FIX-LEDGER.md) | 逐项状态、有效判据、验证门槛的唯一来源 |
 | 查里程碑与真实阻塞 | [PROGRESS.md](PROGRESS.md) | P0–P7 与当前里程碑，不复制逐项状态 |
-| 查当前轮发现 | [CODE-REVIEW.md](CODE-REVIEW.md) | 当前开放轮次完整发现与误报排除表 |
+| 查审查发现 | [CODE-REVIEW.md](CODE-REVIEW.md) | 各轮发现原文与误报排除表；近期发现另见 history，现值状态只认 FIX-LEDGER |
 | 回顾重要事件 | [history/](history/) | 根因、决策、验收、自然窗口与事故报告；[索引](history/README.md) |
 | 评估候选优化 | [BACKLOG-PLAN.md](BACKLOG-PLAN.md) | 候选项的可行性、落地方案与代价，不是当前状态账本 |
 | 查旧收尾计划 | [END_PLAN.md](END_PLAN.md) | 2026-10-23 历史快照，不是现值；其中行号和计数不采信 |

@@ -283,8 +283,9 @@ def _us_product(row: dict) -> dict | None:
     （`lib/profile.ts:91` 与 `tencent_provider.CURRENCY_BY_TYPE` 早已按 `us`/`NASDAQ` 写死）。
     """
     code = str(row.get("symbol") or "").strip()
-    # false 是新浪真实的空值形态；缺字段/非字符串结构仍拒绝，不能借代码回退吞掉漂移。
-    if not code or not isinstance(row.get("name"), (str, bool)) or not isinstance(row.get("cname"), (str, bool)):
+    # false 是新浪真实的空值形态；true 不是空值，缺字段/其他非字符串结构也拒绝。
+    names = (row.get("name"), row.get("cname"))
+    if not code or any(not isinstance(value, str) and value is not False for value in names):
         return None
     cn = str(row.get("cname") or "").strip()
     en = str(row.get("name") or "").strip()

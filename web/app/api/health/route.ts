@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { prisma } from "@/lib/prisma";
-import { readRefreshProgress } from "@/lib/refresh-progress";
+import { refreshProgressView } from "@/lib/refresh-progress";
 
 // 容器健康检查端点（P7）：校验应用可响应 **且** 数据库连通
 // - docker compose 的 service_healthy 依赖它（data-service 等 web 就绪）
@@ -15,7 +15,7 @@ import { readRefreshProgress } from "@/lib/refresh-progress";
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  const refresh = readRefreshProgress();
+  const refresh = refreshProgressView();
   try {
     await prisma.$queryRaw`SELECT 1`;
     return NextResponse.json({ status: "ok", db: "ok", refresh });
