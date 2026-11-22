@@ -274,19 +274,21 @@ def _jsonp_payload(text: str) -> dict:
 def _us_product(row: dict) -> dict | None:
     """一行新浪美股记录 ⇒ 主数据 schema；**结构不可用**时返回 None。
 
-    这里只管结构（无 `symbol` 或两个名字都缺 ⇒ 建不出 (type,code) 主键、展示不出名字），
-    **不看品种、也不看行业**：行业那道闸在 `_list_us_stocks` 的循环里（主人的口径是
+    这里只管结构（缺 `symbol` ⇒ 建不出 (type,code) 主键；名称字段存在但为空/false 时
+    以代码作可展示的稳定回退名），**不看品种、也不看行业**：行业那道闸在
+    `_list_us_stocks` 的循环里（主人的口径是
     "名单层面筛"，见 #32 的 (2)＝10-04 03:1x 定案），映射函数保持纯净，才能分别报出
     "结构丢弃"与"按口径剔除"是两个数。中文名优先（与 A股/港股同一套展示与拼音检索），
     `category`（行业，实测有 null 与空串）进 tags 与板块检索，`market` 原样进 `exchange`
     （`lib/profile.ts:91` 与 `tencent_provider.CURRENCY_BY_TYPE` 早已按 `us`/`NASDAQ` 写死）。
     """
     code = str(row.get("symbol") or "").strip()
+    # false 是新浪真实的空值形态；缺字段/非字符串结构仍拒绝，不能借代码回退吞掉漂移。
+    if not code or not isinstance(row.get("name"), (str, bool)) or not isinstance(row.get("cname"), (str, bool)):
+        return None
     cn = str(row.get("cname") or "").strip()
     en = str(row.get("name") or "").strip()
-    name = cn or en
-    if not code or not name:
-        return None
+    name = cn or en or code
     full, initials = _pinyin_pair(name)
     category = str(row.get("category") or "").strip()
     return {

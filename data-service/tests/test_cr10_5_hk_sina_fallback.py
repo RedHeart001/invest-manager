@@ -63,6 +63,11 @@ def _em_ok(p: hp.HkProvider, rows: list[dict] | None = EM_ROWS) -> list[str]:
         return {"data": {"total": str(len(rows)), "diff": rows}}
 
     p._em_json = _fake  # type: ignore[assignment]
+    # CR10-42：本套件判别的是“官方备源也失败后的新浪诊断”，必须显式钉死中间腿，禁止离线测试出网。
+    def _hkex_down():
+        raise ProviderError("hkex offline fixture")
+
+    p._list_products_hkex = _hkex_down  # type: ignore[assignment]
     return seen
 
 

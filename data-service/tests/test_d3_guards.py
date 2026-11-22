@@ -42,6 +42,11 @@ def test_hk_pagination_cap() -> None:
 
     p = hp.HkProvider()
     p._em_json = _fake_em_json  # type: ignore[assignment]
+
+    def _hkex_down():
+        raise hp.ProviderError("hkex offline fixture")
+
+    p._list_products_hkex = _hkex_down  # type: ignore[assignment]
     p._sina_hk_page = lambda page: calls.__setitem__("sina", calls["sina"] + 1) or []  # type: ignore[assignment]
     try:
         p.list_products("hk")

@@ -35,8 +35,11 @@ data-service **没有任何 provider 注册 hk** → 对 type=hk 调 /quote、/k
 
 from __future__ import annotations
 
+import datetime as dt
+import io
 import json
 import logging
+import re
 import time
 
 import requests
@@ -96,6 +99,111 @@ HK_SINA_PAGE_INTERVAL_S = 0.5  # 页间自睡（`sina-us-category-list` 同形�
 # 看门狗 420s 兜底，两者都 < 客户端 600s，也 < MCP 那枚 450s。
 HK_SINA_SOFT_BUDGET_S = 300.0
 HK_SINA_WHOLE_TIMEOUT_S = 420.0
+
+# CR10-42：东财断连后的完整备源＝港交所官方中英文证券表（不是覆盖不等价的新浪）。
+# 旧 hk 范围实测由 Equity/REIT/ETP/Debt 四类构成；衍生权证、牛熊证、股本权证仍排除。
+HKEX_LIST_BASE = "https://www.hkex.com.hk"
+HKEX_EN_LIST_URL = f"{HKEX_LIST_BASE}/eng/services/trading/securities/securitieslists/ListOfSecurities.xlsx"
+HKEX_CN_LIST_URL = f"{HKEX_LIST_BASE}/chi/services/trading/securities/securitieslists/ListOfSecurities_c.xlsx"
+HKEX_HEADERS = {"User-Agent": "Mozilla/5.0", "Referer": "https://www.hkex.com.hk/"}
+HKEX_INCLUDED_CATEGORIES = {
+    "Equity", "Real Estate Investment Trusts", "Exchange Traded Products", "Debt Securities",
+}
+HKEX_WHOLE_TIMEOUT_S = 120.0
+HKEX_MAX_AGE_DAYS = 7
+HKEX_MAX_FUTURE_DAYS = 3  # 周末可预发布下一交易日；超过 3 天仍按日期异常拒绝
+
+
+def _hkex_table(content: bytes, *, chinese: bool) -> tuple[str, dict[str, tuple[str, str]]]:
+    """解析港交所证券表；不信其错误的 worksheet dimension（实测曾写成 A1:R8）。"""
+    try:
+        from openpyxl import load_workbook
+
+        workbook = load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+        if workbook.sheetnames != ["ListOfSecurities"]:
+            raise ProviderError("hkex list unexpected sheet structure")
+        sheet = workbook[workbook.sheetnames[0]]
+        sheet.reset_dimensions()
+        iterator = sheet.iter_rows(values_only=True)
+        title = next(iterator, None)
+        updated_row = next(iterator, None)
+        header = next(iterator, None)
+        expected = ("股份代號", "股份名稱") if chinese else ("Stock Code", "Name of Securities")
+        if not title or not updated_row or not header or tuple(header[:2]) != expected:
+            raise ProviderError("hkex list header changed")
+        match = re.search(r"(\d{2}/\d{2}/\d{4})", str(updated_row[0] or ""))
+        if not match:
+            raise ProviderError("hkex list missing update date")
+        updated = dt.datetime.strptime(match.group(1), "%d/%m/%Y").date().isoformat()
+        rows: dict[str, tuple[str, str]] = {}
+        for values in iterator:
+            if not values or values[0] is None:
+                continue
+            code = str(values[0] or "").strip().zfill(5)
+            name = str(values[1] or "").strip()
+            category = str(values[2] or "").strip()
+            if not re.fullmatch(r"\d{5}", code):
+                raise ProviderError("hkex list invalid stock code")
+            if code in rows:
+                raise ProviderError("hkex list duplicate stock code")
+            if not name or not category:
+                raise ProviderError("hkex list blank name/category")
+            rows[code] = (name, category)
+        if not rows:
+            raise ProviderError("hkex list parsed to empty table")
+        return updated, rows
+    except ProviderError:
+        raise
+    except Exception as exc:  # noqa: BLE001 文件/结构失败不得变成空候选
+        raise ProviderError(f"hkex list workbook parse failed: {type(exc).__name__}: {exc}") from exc
+    finally:
+        if "workbook" in locals():
+            workbook.close()
+
+
+def _hkex_products(en_content: bytes, cn_content: bytes, *, today: dt.date | None = None) -> tuple[list[dict], dict]:
+    """双官方表同集合校验后映射；分类筛选在完整采集之后，完整性不因此缩水。"""
+    from .akshare_provider import _pinyin_pair
+
+    updated, english = _hkex_table(en_content, chinese=False)
+    cn_updated, chinese = _hkex_table(cn_content, chinese=True)
+    current = today or dt.datetime.now().date()
+    if updated != cn_updated:
+        raise ProviderError(f"hkex list update dates differ: {updated} != {cn_updated}")
+    updated_date = dt.date.fromisoformat(updated)
+    age = (current - updated_date).days
+    if age > HKEX_MAX_AGE_DAYS or age < -HKEX_MAX_FUTURE_DAYS:
+        raise ProviderError(f"hkex list stale/future snapshot: {updated}, today={current.isoformat()}")
+    if set(english) != set(chinese):
+        raise ProviderError("hkex list English/Chinese code set differs")
+    products: list[dict] = []
+    category_counts: dict[str, int] = {}
+    for code, (_, category) in english.items():
+        category_counts[category] = category_counts.get(category, 0) + 1
+        if category not in HKEX_INCLUDED_CATEGORIES:
+            continue
+        name = chinese[code][0]
+        full, initials = _pinyin_pair(name)
+        products.append({
+            "type": "hk", "code": code, "name": name, "pinyin": full,
+            "pinyinInitials": initials, "exchange": "HK", "tags": [],
+        })
+    if not products:
+        raise ProviderError("hkex list complete snapshot mapped to empty hk product list")
+    spread = "/".join(f"{key}×{value}" for key, value in sorted(category_counts.items()))
+    return products, {
+        "source": "hkex-securities-list",
+        "degraded": True,
+        "acquisitionComplete": True,
+        "productPolicySubset": True,
+        "intentionalSubset": True,
+        "declaredCount": len(english),
+        "acquiredCount": len(english),
+        "note": (
+            f"港交所官方中英文证券表 {updated}，完整原始集合 {len(english)} 只（{spread}），"
+            f"代码唯一且双表同集合；按既有 hk 范围仅保留 Equity/REIT/ETP/Debt ⇒ {len(products)} 只。"
+        ),
+    }
 
 
 class HkProvider(BaseProvider):
@@ -297,8 +405,8 @@ class HkProvider(BaseProvider):
         港股约 4700 只 → 约 48 次请求（受源族限速，实测约 4 分钟）。
         故本方法**只应在每日同步任务中调用**，不得用于行情路径。
 
-        CR10-40：主源成功显式声明完整采集；新浪无声明总数且覆盖不等价，仅作诊断，
-        不再返回可提交产品行。其他类型的 provider 形状不受这里影响。
+        CR10-40/42：主源成功显式声明完整采集；东财失败走港交所官方完整表。
+        新浪无声明总数且覆盖不等价，仅作最后诊断，不返回可提交产品行。
         """
         if type_ != "hk":
             raise ProviderError(f"unsupported list type: {type_}")
@@ -312,10 +420,28 @@ class HkProvider(BaseProvider):
                 "acquiredCount": len(items),
             }
         except ProviderError as em_err:
-            # 只在这一枚出口上换源：`_em_json` 的"全部 host 失败"与"首页 diff 为空"都归到这里，
-            # 两条都是"东财这一夜答不出"，不是"港股没有 4700 只"。
-            log.warning("hk list primary (em clist) failed: %s ⇒ 探测非等价新浪诊断源", em_err)
-            return self._list_products_sina(f"{type(em_err).__name__}: {em_err}")
+            # CR10-42：先走港交所官方完整表；新浪仍是诊断，不参与拼接。
+            em_reason = f"{type(em_err).__name__}: {em_err}"
+            log.warning("hk list primary (em clist) failed: %s ⇒ 港交所官方完整备源", em_err)
+            try:
+                return self._list_products_hkex()
+            except ProviderError as hkex_err:
+                log.warning("hk list HKEX fallback failed: %s ⇒ 探测非等价新浪诊断源", hkex_err)
+                return self._list_products_sina(f"eastmoney（{em_reason}）；hkex（{hkex_err}）")
+
+    def _list_products_hkex(self) -> tuple[list[dict], dict]:
+        """一次各取中英文官方表；两次 HTTP 共享一族令牌和 120 秒看门狗。"""
+        from .akshare_provider import _ak_request
+
+        def _fetch() -> tuple[list[dict], dict]:
+            contents = []
+            for url in (HKEX_EN_LIST_URL, HKEX_CN_LIST_URL):
+                response = requests.get(url, headers=HKEX_HEADERS, timeout=40)
+                response.raise_for_status()
+                contents.append(response.content)
+            return _hkex_products(contents[0], contents[1])
+
+        return _ak_request(_fetch, HKEX_WHOLE_TIMEOUT_S, "hkex.securities-list")
 
     def _list_products_em(self) -> list[dict]:
         """东财主源那一支（原 `list_products` 本体，一字未改语义）。"""

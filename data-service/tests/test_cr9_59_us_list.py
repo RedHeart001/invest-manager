@@ -213,6 +213,16 @@ def test_us_product_mapping() -> None:
     check("category 进 tags ⇒ 板块检索有词", row["tags"] == ["半导体"], str(row)[:80])
 
     v = akp._us_product(VISA)
+    fallback = akp._us_product(dict(NVDA, symbol="NAMELESS", name="", cname="", category=None))
+    check("11-22 真实空名行以代码作稳定展示名，行业仍由上游 category 决定",
+          fallback is not None and fallback["name"] == "NAMELESS" and fallback["tags"] == [], str(fallback))
+    false_names = akp._us_product(dict(NVDA, symbol="FALSE_NAME", name=False, cname=False, category=None))
+    check("11-22 真实 false 名称同样回退，不整批拒绝",
+          false_names is not None and false_names["name"] == "FALSE_NAME", str(false_names))
+    check("🔁 缺名称字段属结构漂移，不借代码回退吞掉",
+          akp._us_product({"symbol": "MISSING_NAMES", "category": "半导体"}) is None)
+    check("🔁 非字符串非 false 名称属结构漂移", akp._us_product({"symbol": "BAD", "name": 1, "cname": ""}) is None)
+
     check("🔁 category 为空串 ⇒ tags 为空（不是 ['']）", v["tags"] == [], str(v)[:80])
     check("交易所不被改写（NYSE 原样）", v["exchange"] == "NYSE", str(v)[:80])
 
@@ -230,7 +240,7 @@ def test_us_product_mapping() -> None:
         akp._us_product({"symbol": "   ", "name": "Blank Symbol", "cname": ""}),
     ]
     check("🔁 无 symbol ⇒ 丢（建不出 (type,code) 主键）", outs[0] is None, str(outs[0])[:80])
-    check("🔁 两个名字都缺 ⇒ 丢（无法展示）", outs[1] is None, str(outs[1])[:80])
+    check("两个名称值为空但有合法代码 ⇒ 回退代码名", outs[1] is not None and outs[1]["name"] == "ABC", str(outs[1])[:80])
     check("🔁 只有空白的 symbol ⇒ 丢（strip 后判空）", outs[2] is None, str(outs[2])[:80])
 
     z = akp._us_product(ZZZTX)
@@ -550,15 +560,27 @@ def test_category_gate() -> None:
     check("原始行缺 symbol 属完整性失败，不算产品口径剔除",
           raised == "ProviderError" and "raw row/symbol count" in msg, f"{raised}｜{msg[:140]}")
 
+    rows, meta = listed({
+        1: jsonp20([dict(NVDA, symbol="NO_NAME", name="", cname="", category=None)], "nameless", count="20"),
+        2: jsonp([], count="20"),
+    }, 1)
+    check("有代码但名称为空且行业为空 ⇒ 完整采集后按既有行业口径剔除",
+          len(rows) == 19 and meta["acquiredCount"] == 20 and meta["declaredCount"] == 20, str(meta))
+    rows, _ = listed({
+        1: jsonp20([dict(NVDA, symbol="NO_NAME", name="", cname="", category="半导体")], "nameless", count="20"),
+        2: jsonp([], count="20"),
+    }, 1)
+    check("有代码、空名但有行业 ⇒ 回退代码名并保留该行",
+          any(row["code"] == "NO_NAME" and row["name"] == "NO_NAME" for row in rows), str(rows)[-220:])
     raised, msg = "", ""
     try:
         listed({
-            1: jsonp20([dict(NVDA, symbol="NO_NAME", name="", cname="")], "bad", count="20"),
+            1: jsonp20([{"symbol": "MISSING_NAMES", "category": None}], "bad", count="20"),
             2: jsonp([], count="20"),
         }, 1)
     except Exception as e:  # noqa: BLE001
         raised, msg = type(e).__name__, str(e)
-    check("有代码但名称完全缺失属源数据畸形，不借 intentionalSubset 放行",
+    check("名称字段缺失仍是结构失败，不借 intentionalSubset 放行",
           raised == "ProviderError" and "unmappable product" in msg, f"{raised}｜{msg[:140]}")
 
 
