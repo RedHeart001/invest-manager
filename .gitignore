@@ -60,3 +60,4 @@ data-service/runtime/
 # 注意：本目录里会出现 `cr9119-layer-*/.env` 这类**测试夹具**（内容是空的假键，
 # 不是真配置）⇒ 忽略它同时挡住了"误 add 夹具"这一形。
 .tmp/
+backups-local/
