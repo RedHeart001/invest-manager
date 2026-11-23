@@ -58,6 +58,8 @@ CR10-29～32 的实现、定向验证与隔离边界见 [隔离修复验收](his
 - **手动补验另账（02:50，不改写上面的 `partial_failed`）**：`POST /api/sync?type=crypto` → 248 只、`ok=true`；`POST /api/market/refresh?type=crypto` → 248/248 带快照。全库六类齐＝**43,240 行**。DS 重启后调度作业仍在（备份 `nextRun=03:30`、热点 `08:30/16:30`），且 `/sync/status` 的 `skippedReason` 原样保留 `outcome=partial_failed` 与「不再重买列表」判定——补验记在补验的账上，自然轮终态不动。
 - **03:30 自然备份与独立恢复（本机取证链闭环）**：`dev-20261124-033000.db` 36,638,720 B；`/health` 的 `dbBackup`＝`lastRun 03:30:09／outcome completed／runs 1／nextRun 11-25 03:30`。监听器自动把该备份恢复到新卷 `invest-e-restore-1124`，读回 `integrity ok`、Product **43,240**、迁移 12、`passed=true`，SHA-256 `13dc17b8…105ae3`。同日 02:32:50 另有一枚同尺寸备份，出自 `data-service/app/backup_scheduler.py:537` 的每小时 stale check（#54 乙，`startup_catch_up(label="hourly")`），不是重复调度。旧 `backups/` 仍为 12 件，`BACKUP_HOST_DIR` 隔离生效。
 - **本机取证四项当前状态（不并入真环境 E）**：备份 ✅、独立恢复 ✅、同步 ❌ `partial_failed`（唯一失败腿 crypto＝上述仪器自伤，修复在 02:49 生效、补验另账）、盘前热点待 08:30 判定。
+- **空卷首灌的缩水闸口径（必须与"库已有底"的日子分开读）**：`web/lib/sync.ts:294` 的 70% 闸条件是 `existingCount > 0 && rows.length < existingCount * 0.7`，本机新卷首轮 `existingCount=0` ⇒ **该闸不参与**。因此本机一次就落 bond 1,068／hk 4,596／us 3,343，这些数字不能用来说明缩水闸的判定行为；真环境 11-23「bond 新浪 328 < 1,068×70% 被拒并保留旧数据」那一形在本机今天不可能复现，反向验证也不成立。后续任何拿本机首灌数当闸判据证据的说法都不作数。
+- **出网账（盘上 `/data/runtime/limiter-state.json`，日键 `2026-11-24`）**：`eastmoney granted=167／denied=0`、`akshare-obs granted=5`（`seen` 含 `ak.fund_name_em:1`、`hkex.securities-list:1`、`ak.stock_zh_a_spot:1`、`ak.fund_open_fund_daily_em:1`）、`realtime-obs seenTotal=4`（纯观测族按设计不计 `granted`）。其中 fund 名单在真轮里**恰好 1 发且不占东财桶**，是 CR10-44 L2-A 的机器可读证据；而 `eastmoney denied=0` 说明本机这一轮没有触发同族熔断连坐——它与真环境 11-23 的 `granted=3／denied=150` 是两种不同的上游态，不可互推。
 
 ## 自然观察与外部边界
 
