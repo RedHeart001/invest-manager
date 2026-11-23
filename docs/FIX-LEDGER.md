@@ -56,6 +56,8 @@ CR10-29～32 的实现、定向验证与隔离边界见 [隔离修复验收](his
 - **链式快照刷新（02:38:57 收尾，`outcome=completed`）**：stock 5,574/5,580（`failedBatches=0`）、fund 23,721/28,405、bond 314/1,068、hk 3,267/4,596（`failedEmpty=8`，成因位原样写「回了 100 条报价，但整批没有一条带得出价格」）、us 3,261/3,343；合计 36,137 行带快照。bond 只 314 与 hk 那 8 个空报价批是本机首灌的真实观察，没有放宽任何闸门。
 - **crypto 那一腿的定性＝仪器自伤，不是外部源态**：`ProxyError: Unable to connect to proxy … Failed to resolve 'host.docker.internal'`——上面那条自定义 `dns:` 顶掉了 Docker Desktop 内建别名的解析。修法＝同一 override 补 `extra_hosts: host.docker.internal:host-gateway`；修后复核 `host.docker.internal→192.168.65.254`、服务名 `data-service` 仍可解析、CoinGecko `/api/v3/ping` 200。**教训面**：给容器指外部 DNS 前必须同时锁回 `host.docker.internal`，否则"境外腿经宿主代理"这条设计整体失效，而失败信息看起来像上游不可用。
 - **手动补验另账（02:50，不改写上面的 `partial_failed`）**：`POST /api/sync?type=crypto` → 248 只、`ok=true`；`POST /api/market/refresh?type=crypto` → 248/248 带快照。全库六类齐＝**43,240 行**。DS 重启后调度作业仍在（备份 `nextRun=03:30`、热点 `08:30/16:30`），且 `/sync/status` 的 `skippedReason` 原样保留 `outcome=partial_failed` 与「不再重买列表」判定——补验记在补验的账上，自然轮终态不动。
+- **03:30 自然备份与独立恢复（本机取证链闭环）**：`dev-20261124-033000.db` 36,638,720 B；`/health` 的 `dbBackup`＝`lastRun 03:30:09／outcome completed／runs 1／nextRun 11-25 03:30`。监听器自动把该备份恢复到新卷 `invest-e-restore-1124`，读回 `integrity ok`、Product **43,240**、迁移 12、`passed=true`，SHA-256 `13dc17b8…105ae3`。同日 02:32:50 另有一枚同尺寸备份，出自 `data-service/app/backup_scheduler.py:537` 的每小时 stale check（#54 乙，`startup_catch_up(label="hourly")`），不是重复调度。旧 `backups/` 仍为 12 件，`BACKUP_HOST_DIR` 隔离生效。
+- **本机取证四项当前状态（不并入真环境 E）**：备份 ✅、独立恢复 ✅、同步 ❌ `partial_failed`（唯一失败腿 crypto＝上述仪器自伤，修复在 02:49 生效、补验另账）、盘前热点待 08:30 判定。
 
 ## 自然观察与外部边界
 
