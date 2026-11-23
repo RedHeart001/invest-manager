@@ -238,3 +238,15 @@ describe("美股进同步阶梯（CR9-59／#32 甲，主人 2026-10-04 定案）
     expect(writes).toHaveLength(0);
   });
 });
+
+describe("CR10-44：无备源腿前置（2026-11-23）", () => {
+  it("fund 排在 SYNC_TYPES 首位，先于 stock 等东财腿", () => {
+    expect(SYNC_TYPES[0]).toBe("fund");
+    expect(SYNC_TYPES.indexOf("fund")).toBeLessThan(SYNC_TYPES.indexOf("stock"));
+  });
+
+  it("六类名单不丢不重（改序不是改白名单）", () => {
+    expect([...SYNC_TYPES].sort()).toEqual(["bond", "crypto", "fund", "hk", "stock", "us"]);
+    expect(new Set(SYNC_TYPES).size).toBe(SYNC_TYPES.length);
+  });
+});

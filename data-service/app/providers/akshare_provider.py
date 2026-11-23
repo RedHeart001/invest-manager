@@ -1166,11 +1166,17 @@ class AkshareProvider(BaseProvider):
         return products
 
     def _list_funds(self) -> list[dict]:
-        """全量公募基金列表（akshare 封装，单次请求）。"""
+        """全量公募基金列表（akshare 封装，单次请求）。
+
+        CR10-44（2026-11-23）：这条腿没有等价备源，且与 stock/bond/hk 的成败无关；
+        改走 `_ak_request`（`akshare-obs` 族，不设熔断），避免被东财族熔断连坐。
+        仍受该族 `min_interval=1.0` 限速，每天仍只 1 发；这是对“撞桶被拒的是别人”
+        红线的显式破口，账本已登记。
+        """
         import akshare as ak
 
         try:
-            df = _em_ak_request(ak.fund_name_em, 90.0, "ak.fund_name_em")
+            df = _ak_request(ak.fund_name_em, 90.0, "ak.fund_name_em")
         except Exception as e:  # noqa: BLE001
             raise ProviderError(f"akshare fund list failed: {e}") from e
 

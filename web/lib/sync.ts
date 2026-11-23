@@ -18,7 +18,9 @@ import { beijingStamp } from "./time";
 // `SNAPSHOT_TYPES`（CR9-74，实测 179 行 2 批、不打东财 ⇒ 刻意仍不进 `EM_SNAPSHOT_TYPES`）
 // 与 `BROWSE_TYPES`（CR9-75）。上面那段"为什么当时不进"的理由没有作废——它记录的是
 // "入口不存在时不要给这一类打价"这条依赖方向，将来谁摘掉 tab，刷新腿要跟着摘。
-export const SYNC_TYPES = ["stock", "fund", "bond", "crypto", "hk", "us"] as const;
+// CR10-44（2026-11-23）：fund 是唯一没有等价备源的列表腿，放在首位，先于任何东财请求；
+// 这样同族熔断不会在本轮开始前就把它拒掉。其余类型相对顺序不动。
+export const SYNC_TYPES = ["fund", "stock", "bond", "crypto", "hk", "us"] as const;
 export type SyncType = (typeof SYNC_TYPES)[number];
 
 // 分型同步单飞锁（C17：进程内单例挂 globalThis，避免 dev HMR 重建模块作用域后失效）
