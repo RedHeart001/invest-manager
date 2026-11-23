@@ -92,7 +92,12 @@ def get_json(url: str, timeout: float = 15.0):
 
 
 def bucket_state() -> dict | None:
-    """容器内 limiter 账（只读）。取不到就交 None，不猜。"""
+    """容器内 limiter 账（只读）。取不到就交 None，不猜。
+
+    盘上形状是 `{"day": ..., "days": {"<day>": {"<family>": {...}}}}`；
+    `realtime-obs` 是纯观测族，`granted` 恒 0，出网证据在 `seenTotal`／`seen` 上，
+    所以三个计数都取，别把"观测族不计 granted"读成"没出网"。
+    """
     try:
         p = subprocess.run(
             ["docker", "compose", "exec", "-T", "data-service", "cat", "/data/runtime/limiter-state.json"],
@@ -101,14 +106,16 @@ def bucket_state() -> dict | None:
         if p.returncode != 0:
             return None
         data = json.loads(p.stdout)
+        day = data.get("day")
+        fams = (data.get("days") or {}).get(day) or {}
     except Exception:
         return None
-    fams = data.get("families") or data
     out = {}
-    for name, st in (fams.items() if isinstance(fams, dict) else []):
+    for name, st in fams.items():
         if isinstance(st, dict):
-            out[name] = {"granted": st.get("granted"), "denied": st.get("denied"), "cooldownUntil": st.get("cooldownUntil")}
-    return out
+            out[name] = {"granted": st.get("granted"), "denied": st.get("denied"),
+                         "seenTotal": st.get("seenTotal")}
+    return out or None
 
 
 def one_round(base: str, subjects: list[str], tick: int) -> list[dict]:
@@ -213,9 +220,10 @@ def main(argv=None) -> int:
                 if cur and prev:
                     for fam, st in cur.items():
                         p = prev.get(fam, {})
-                        if st.get("granted") is not None and p.get("granted") is not None:
-                            deltas[fam] = {"granted": st["granted"] - p["granted"], "denied": (st.get("denied") or 0) - (p.get("denied") or 0)}
-                emit({"event": "bucket_delta", "tick": tick, "deltas": deltas, "egress": (sum(d["granted"] for d in deltas.values()) > 0) if deltas else None})
+                        deltas[fam] = {k: (st.get(k) or 0) - (p.get(k) or 0) for k in ("granted", "denied", "seenTotal")}
+                    moved = any(v["granted"] > 0 or v["seenTotal"] > 0 for v in deltas.values())
+                emit({"event": "bucket_delta", "tick": tick, "deltas": deltas,
+                      "egress": moved if deltas else None})
                 prev = cur
             tick += 1
             if tick < max_rounds:
