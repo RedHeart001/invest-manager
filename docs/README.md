@@ -15,7 +15,7 @@
 
 P0–P7 主功能已完成；round4 完整七套、真实 LLM 对话/工具链及 A 股、美股完整研报已通过。CR10-40 DS/Web、CR10-41 Web、CR10-42 DS、CR10-43 DS/Web 与 CR10-44 DS/Web 已正式装载，复用原正式卷，未人工触发同步。CR10-42 修复 us 真实空名导致的整批映射失败，并接入 HKEX 官方完整备源；CR10-43 拒绝 us 名称 `true` 并补齐刷新进度 owner 归属；CR10-44 把无备源的 fund 名单移出东财熔断连坐并前置同步顺序。
 
-11-22 原始自然同步因 hk/us 失败为 `daily/partial_failed`；11-23 自然同步因 fund/bond 为 `daily/partial_failed`，备份、独立恢复与 08:30 工作日热点通过，自然 E 未通过。CR10-44 已执行并装载，11-24 自然轮待判，状态见 [FIX-LEDGER.md](FIX-LEDGER.md)，11-23 实测、归因与执行读数见 [CR10-44 方案](history/2026-11-23-CR10-44-同族熔断连坐与无备源腿.md)。
+11-22 原始自然同步因 hk/us 失败为 `daily/partial_failed`；11-23 自然同步因 fund/bond 为 `daily/partial_failed`，备份、独立恢复与 08:30 工作日热点通过。11-24 正式无 02:00 自然轮；15:33 为 `startup-catchup`、`partial_failed`（宿主 DNS 解析失败），15:09 备份与 15:11 热点均为启动补跑，自然 E 未通过。CR10-44 已执行并装载，回归测试已补交 `5dc5dde`；CR10-45 副本机取证另账，原始回执本机未独立复核，不进入正式 E。状态见 [FIX-LEDGER.md](FIX-LEDGER.md)，11-23 实测、归因与执行读数见 [CR10-44 方案](history/2026-11-23-CR10-44-同族熔断连坐与无备源腿.md)，副本机首日取证见 [CR10-45 报告](history/2026-11-24-本机dev副本实例与首日取证.md)。
 
 ## 文档地图
 
