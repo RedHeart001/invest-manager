@@ -45,6 +45,8 @@ CR10-29～32 的实现、定向验证与隔离边界见 [隔离修复验收](his
 
 ### CR10-45 本机实例明细（2026-11-24 现查）
 
+> 完整事件档案（含每条读数的现查命令、两枚网络坑的修法与未验边界）见 [本机 dev 副本实例与首日取证](history/2026-11-24-本机dev副本实例与首日取证.md)。
+
 - **落点**：Compose project `invest-manager`，容器 `invest-manager-web-1`／`invest-manager-data-service-1`，命名卷 `invest-manager_prisma-data`（本机此前不存在该卷）。镜像 Web `sha256:704831b9…52f447`、DS `sha256:842bfbcc…6511ea`，均由本机树现建；容器内已核 `akshare_provider.py:1179` 的 `_ak_request(ak.fund_name_em)`（CR10-44 L2-A）与 11-15 之后新增的 `web/scripts/verify-isolated.mjs` 都在，证明装的是新码不是 11-02 旧镜像。
 - **空卷初始化**：web 入口自动 `prisma migrate deploy` → Product 0、迁移 12。备份改指 `BACKUP_HOST_DIR=./backups-local`，首份 `dev-20261124-001509.db`（151,552 B，`integrity_check=ok`，`/health` 的 `dbBackup.outcome=completed`）。旧 `backups/` 的 11-01～11-03 共 12 件未被 `BACKUP_KEEP=7` 轮转删除——不另指目录就会被首次备份轮吞掉，这是本机独有的风险。
 - **机器级网络发现（本轮唯一真实阻塞）**：本机宿主 DNS 对所有外网域名 `getaddrinfo` 失败，而容器对公网 IP 有直连出口（实测 `223.5.5.5:53`、`1.1.1.1:443` 可连）⇒ 首次 `docker compose build web` 的红是 `npm ci` 的 `ENOTFOUND`，不是依赖冲突（`npm error Exit handler never called!` 只是 npm 的收口表象）。修法只落本机：新建 gitignored 的 `docker-compose.override.yml` 给两服务指 `223.5.5.5/223.6.6.6`；未改 tracked 的 `docker-compose.yml`，也未改 `data-service/app/main.py:13` 的 `no_proxy="*"` 语义（国内直连、境外腿另走显式代理的设计不变）。境外腿经 `HTTPS_PROXY=http://host.docker.internal:7897`。
