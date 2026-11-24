@@ -63,6 +63,9 @@ CR10-29～32 的实现、定向验证与隔离边界见 [隔离修复验收](his
 - **空卷首灌的缩水闸口径（必须与"库已有底"的日子分开读）**：`web/lib/sync.ts:294` 的 70% 闸条件是 `existingCount > 0 && rows.length < existingCount * 0.7`，本机新卷首轮 `existingCount=0` ⇒ **该闸不参与**。因此本机一次就落 bond 1,068／hk 4,596／us 3,343，这些数字不能用来说明缩水闸的判定行为；真环境 11-23「bond 新浪 328 < 1,068×70% 被拒并保留旧数据」那一形在本机今天不可能复现，反向验证也不成立。后续任何拿本机首灌数当闸判据证据的说法都不作数。
 - **出网账（盘上 `/data/runtime/limiter-state.json`，日键 `2026-11-24`）**：`eastmoney granted=167／denied=0`、`akshare-obs granted=5`（`seen` 含 `ak.fund_name_em:1`、`hkex.securities-list:1`、`ak.stock_zh_a_spot:1`、`ak.fund_open_fund_daily_em:1`）、`realtime-obs seenTotal=4`（纯观测族按设计不计 `granted`）。其中 fund 名单在真轮里**恰好 1 发且不占东财桶**，是 CR10-44 L2-A 的机器可读证据；而 `eastmoney denied=0` 说明本机这一轮没有触发同族熔断连坐——它与真环境 11-23 的 `granted=3／denied=150` 是两种不同的上游态，不可互推。
 - **实时监听持续性（03:38–04:23 美股时段）**：`data-service/runtime/realtime-watch-20261124.jsonl` 跑满 45 轮、157 行，其中 94 行 `http=200` 且带价，`quoteSource` 全为 `tencent`（yfinance 主源在本机经代理仍不可用，降级如实标），AAPL 段内 348.5→349.78；`bucket_delta.egress=true` 的判据取 `seenTotal` 增量而非 `granted`（`realtime-obs` 是纯观测族，按设计不计 `granted`，读错层级会把出网证据读成零）。A 股时段窗口另在 09:30 后取，那一档要同时验午休段零请求。
+- **盘中监听 11-24 全天档（09:32–13:39，本机首跑正式轮）**：`realtime-watch-20261124.jsonl` 共 940 行／239 轮。A 股与 ETF 带价行 600519 149／510300 148／000001 148（上午盘 331 发、下午盘 114 发），另有隔夜美股 AAPL 48／MSFT 46；`quoteSource` 全为 `tencent`，`degraded` 行 24，带当日分时日期的行 74。**午休零请求已由时刻边界证明**：午休前最后一发 `11:29:14`、午休后第一发 `13:00:47`，中间 90 轮全部是 `idle`（约 91 分钟零出网），不是"发了但没数据"。
+- **同档真实失败面**：`10:43:52` 有一轮两只标的同时 502，字面成因 `data-service timeout after 12000ms`——即 `web/lib/realtime.ts:72` 的 12s BFF 预算在 DS 未按时应答时主动断开而不是排队，属预期形状。该轮耗时分布 p50 734ms／p95 1359ms／max 12031ms。**本机耗时受上述 DNS／代理形态影响，不得与真环境实时区读数互比。**
+- **监听件自身缺陷（同轮修）**：`idle`／`finished` 事件行原先不带 `ts`，使午休那 90 行只有计数、没有时刻，而"非交易时段零请求"这条判据要的恰恰是时间边界；现由 `emit()` 统一补时。本次文件里的 idle 行仍是旧形状，边界靠相邻标的行的时刻推得。
 
 ## 自然观察与外部边界
 

@@ -193,6 +193,9 @@ def main(argv=None) -> int:
     out.parent.mkdir(parents=True, exist_ok=True)
 
     def emit(obj: dict) -> None:
+        # 事件行也必须带时刻：此前 idle／finished 不带 ts，午休那 90 轮就只剩"计数"没有"何时"，
+        # 而"非交易时段零请求"这条判据要的恰恰是时间边界。
+        obj.setdefault("ts", datetime.now(TZ_BJ).isoformat(timespec="seconds"))
         line = json.dumps(obj, ensure_ascii=False)
         print(line, flush=True)
         with out.open("a", encoding="utf-8") as f:
