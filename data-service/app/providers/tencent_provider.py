@@ -119,6 +119,37 @@ def _hk_symbol(code: str) -> str | None:
     return f"hk{c.zfill(5)}"
 
 
+def _hk_realtime_symbol(code: str) -> str | None:
+    """腾讯港股**实时档**符号：`r_hk` + 5 位代码（CR10-48）。
+
+    腾讯对同一只港股提供两档：`hk{code}` 是 **15 分钟延迟**档，`r_hk{code}` 才是实时。
+    2026-11-25 盘中 120 样本实测：延迟中位 15.1 分钟 → 0.0 分钟；跨午休累加可达 75 分钟。
+
+    ⚠️ **只服务现价端点，绝不可用于分时与日 K**：`r_` 前缀在两个
+    `ifzq.gtimg.cn` 端点上**不被识别**，实测返回空 `data{}` 且 HTTP 仍是 200
+    （静默空，不报错）——分时 0 根 / 日K 0 根，而 `hk{code}` 同刻分别给 332 根 / 1200 根。
+    故 `_hk_symbol`（分时与日K共用的那条）保持原样，两条入口必须分开。
+
+    复用 `_hk_symbol` 的校验与补零，不复制规则。
+    """
+    sym = _hk_symbol(code)
+    return None if sym is None else f"r_{sym}"
+
+
+def _realtime_quote_symbol(type_: str, code: str) -> str | None:
+    """**实时区现价腿专用**符号（CR10-48）。
+
+    与 `_quote_symbol` 的唯一差别是港股走实时档。刻意**不**改 `_quote_symbol` 本身：
+    它被 `TencentProvider.get_quote`／`get_quotes` 共用，动它会连带改写
+    `/quote` 与 `/quotes`（列表富集、刷新）的港股符号，超出本次修复边界。
+
+    其余类型（A股/场内基金/美股）全部委派给 `_quote_symbol`，行为一字不变。
+    """
+    if type_ == "hk":
+        return _hk_realtime_symbol(code)
+    return _quote_symbol(type_, code)
+
+
 def _symbol_for(type_: str, code: str) -> str | None:
     """按**产品类型**显式分派符号映射（港股的 5 位数字与 A股前缀规则冲突）。
 

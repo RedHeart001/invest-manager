@@ -46,6 +46,7 @@ import requests
 from .providers.base import ProviderError, ProviderNotSupported
 from .providers.tencent_provider import (
     _quote_symbol,
+    _realtime_quote_symbol,
     _symbol as _cn_prefix_symbol,
     _symbol_for,
     _us_fields_match,
@@ -231,7 +232,11 @@ def sina_fields_to_quote(code: str, f: list[str]) -> dict:
 
 def _price_leg(source: str, type_: str, code: str) -> dict:
     if source == "tencent":
-        sym = _quote_symbol(type_, code)
+        # CR10-48：港股现价走**实时档** `r_hk{code}`。此前的 `hk{code}` 是腾讯的
+        # 15 分钟延迟档，详情页价格恒定滞后（盘中实测中位 15.1 分钟，跨午休累加 75 分钟）。
+        # 只改这一条腿：分时腿（`_intraday_leg`）与日K 仍走 `hk{code}`，因为 `r_` 前缀在
+        # 那两个 `ifzq.gtimg.cn` 端点上返回空 data 且 HTTP 仍 200（静默空，实测 0 根）。
+        sym = _realtime_quote_symbol(type_, code)
         if sym is None:
             raise ProviderNotSupported(f"tencent does not support code: {code}")
         f = fetch_quote_fields([sym], LEG_TIMEOUT_S).get(sym)
