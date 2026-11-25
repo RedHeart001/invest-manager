@@ -245,7 +245,7 @@ export default async function ProductPage({
   const yieldOption: EChartsOption | null = yieldData?.curve?.length
     ? (() => {
         const dates = yieldData.curve.map((c) => c.date);
-        const tenors = ["3月", "6月", "1年", "3年", "5年", "7年", "10年", "30年"].filter(
+        const tenors = ["3月", "6月", "1年", "2年", "3年", "5年", "7年", "10年", "30年"].filter(
           (t) => yieldData!.curve.some((c) => c.values[t] != null),
         );
         return {

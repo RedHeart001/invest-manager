@@ -15,12 +15,15 @@
   港股＝香港 09:30–12:00、13:00–16:00；美股＝美东 09:30–16:00；加密 24/7。
   非交易时段零请求是既有规则（`RealtimeStrip` 同一条），闭市标的本件跳过不发。
 - 出网自证：每轮前后取容器内 `limiter-state.json` 的 `granted` 增量（只读
-  `docker compose exec`）。某轮 200 但增量全 0 ⇒ 可能是 TTL 回声，标 `egress=null`
+  `docker compose`／独立 `docker-compose`／Compose 标签定位容器；Windows 若 venv
+  子进程被降为低完整性而读不了 named pipe，直接用系统 Python，时区复用项目 venv）。
+  某轮 200 但增量全 0 ⇒ 可能是 TTL 回声，标 `egress=null`
   而不是写 1（`window_a3.py` 那一形）。`--no-bucket-probe` 关掉。
 - 反向自证（默认随 `--once` 跑一发）：`parts` 写成不存在的腿 ⇒ 预期 400，
   证明入参成对校验真在生效；这一发是本地 400，不出网。
 
-本件不改任何代码、不写库、不碰正式卷，读数是**本机 dev 副本**，不是自然验收证据。
+本件不改任何代码、不写库、不碰正式卷。读数身份由 `--base` 决定：默认回环地址
+对应当前正式 Web；本件不是 02:00/03:30/08:30 自然调度证据。
 """
 from __future__ import annotations
 
@@ -29,20 +32,30 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError, reset_tzpath
 
 for stream in (sys.stdout, sys.stderr):  # 上游 note 里有 ⇒／中文，GBK 控制台会直接崩（同 watch-formal-e-natural.py）
     if hasattr(stream, "reconfigure"):
         stream.reconfigure(encoding="utf-8", errors="replace")
 
 ROOT = Path(__file__).resolve().parents[1]
-TZ_BJ = ZoneInfo("Asia/Shanghai")
+# Windows 的系统 Python 常无 tzdata；只读复用项目 venv 里的时区库，不要求监听进程
+# 与 Docker 权限沙箱共用同一个解释器（venv 低完整性子进程读不了 Docker named pipe）。
+try:
+    TZ_BJ = ZoneInfo("Asia/Shanghai")
+except ZoneInfoNotFoundError:
+    tzdir = ROOT / "data-service" / ".venv" / "Lib" / "site-packages" / "tzdata" / "zoneinfo"
+    if not (tzdir / "Asia" / "Shanghai").is_file():
+        raise
+    reset_tzpath([str(tzdir)])
+    TZ_BJ = ZoneInfo("Asia/Shanghai")
 INTRA_EVERY = 6  # 与 web/lib/realtime.ts 的 INTRADAY_EVERY_TICKS 同值
 DEFAULT_SUBJECTS = ["stock:600519", "stock:000001", "fund:510300", "hk:00700", "us:AAPL", "crypto:BTC"]
 
@@ -91,6 +104,27 @@ def get_json(url: str, timeout: float = 15.0):
         return None, {"error": f"{type(e).__name__}: {e}"}
 
 
+def run_capture(command: list[str], timeout: int) -> subprocess.CompletedProcess:
+    """Windows 下 stderr 管道可能让 Docker CLI 拒收；临时文件保持 stdout/stderr 分离。"""
+    err_name = None
+    try:
+        with tempfile.NamedTemporaryFile(prefix="realtime-watch-", suffix=".err", delete=False) as err:
+            err_name = err.name
+        with open(err_name, "rb") as err:
+            p = subprocess.run(
+                command, cwd=ROOT, stdout=subprocess.PIPE, stderr=err, timeout=timeout,
+            )
+        with open(err_name, "rb") as err:
+            stderr = err.read().decode("utf-8", "replace")
+        return subprocess.CompletedProcess(command, p.returncode, p.stdout.decode("utf-8", "replace"), stderr)
+    finally:
+        if err_name:
+            try:
+                os.unlink(err_name)
+            except OSError:
+                pass
+
+
 def bucket_state() -> dict | None:
     """容器内 limiter 账（只读）。取不到就交 None，不猜。
 
@@ -99,10 +133,27 @@ def bucket_state() -> dict | None:
     所以三个计数都取，别把"观测族不计 granted"读成"没出网"。
     """
     try:
-        p = subprocess.run(
+        # Docker CLI 插件与独立 docker-compose 都可能缺失；最终按 Compose 标签定位
+        # 当前正式 data-service，避免固定容器名误读旧验收实例。
+        commands = [
             ["docker", "compose", "exec", "-T", "data-service", "cat", "/data/runtime/limiter-state.json"],
-            cwd=ROOT, capture_output=True, text=True, timeout=30, encoding="utf-8", errors="replace",
-        )
+            ["docker-compose", "exec", "-T", "data-service", "cat", "/data/runtime/limiter-state.json"],
+        ]
+        p = None
+        for command in commands:
+            p = run_capture(command, timeout=30)
+            if p.returncode == 0:
+                break
+        if p is None or p.returncode != 0:
+            listed = run_capture(
+                ["docker", "ps", "--filter", "label=com.docker.compose.project=invest-manager",
+                 "--filter", "label=com.docker.compose.service=data-service", "--format", "{{.Names}}"],
+                timeout=15,
+            )
+            names = [n.strip() for n in listed.stdout.splitlines() if n.strip()]
+            if listed.returncode != 0 or not names:
+                return None
+            p = run_capture(["docker", "exec", names[0], "cat", "/data/runtime/limiter-state.json"], timeout=30)
         if p.returncode != 0:
             return None
         data = json.loads(p.stdout)
@@ -202,7 +253,7 @@ def main(argv=None) -> int:
             f.write(line + "\n")
 
     emit({"event": "start", "base": args.base, "subjects": subjects, "interval": args.interval,
-          "out": str(out), "note": "本机 dev 副本读数，不是自然验收证据"})
+          "out": str(out), "note": f"只读窗口：base={args.base}；不是 02:00/03:30/08:30 自然调度证据"})
     if args.once:
         emit(negative_probe(args.base))
 

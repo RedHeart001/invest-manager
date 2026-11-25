@@ -119,24 +119,34 @@ async function main() {
 
   console.log("[6] 容器内 data-service /health（端口不对外，走 compose exec）");
   {
-    try {
-      const out = execFileSync(
-        "docker",
-        [
-          "compose",
-          "exec",
-          "-T",
-          "data-service",
-          "python",
-          "-c",
-          "import urllib.request;print(urllib.request.urlopen('http://127.0.0.1:8000/health',timeout=5).read().decode())",
-        ],
-        { encoding: "utf8", timeout: 60000 },
-      ).trim();
-      ok("容器内 health 返回 ok", /"status"\s*:\s*"ok"/.test(out), out.slice(0, 120));
-    } catch (e) {
-      ok("容器内 health 返回 ok", false, String(e.message ?? e).slice(0, 160));
+    // Docker CLI 插件与独立 docker-compose 都可能存在；两者不可用时按项目名定位正式容器。
+    // 不用固定容器名，避免误读仍在运行的旧验收实例。
+    const healthCode = "import urllib.request;print(urllib.request.urlopen('http://127.0.0.1:8000/health',timeout=5).read().decode())";
+    const attempts = [
+      ["docker", ["compose", "exec", "-T", "data-service", "python", "-c", healthCode]],
+      ["docker-compose", ["exec", "-T", "data-service", "python", "-c", healthCode]],
+    ];
+    let out = "";
+    let lastError = "";
+    for (const [cmd, args] of attempts) {
+      try {
+        out = execFileSync(cmd, args, { encoding: "utf8", timeout: 60000, stdio: ["ignore", "pipe", "pipe"] }).trim();
+        if (/"status"\s*:\s*"ok"/.test(out)) break;
+        lastError = out.slice(0, 160);
+      } catch (e) {
+        lastError = String(e.stderr || e.message || e).trim().slice(0, 160);
+      }
     }
+    if (!/"status"\s*:\s*"ok"/.test(out)) {
+      try {
+        const labels = execFileSync("docker", ["ps", "--filter", "label=com.docker.compose.project=invest-manager", "--filter", "label=com.docker.compose.service=data-service", "--format", "{{.Names}}"], { encoding: "utf8", timeout: 10000 }).trim();
+        const name = labels.split(/\r?\n/).filter(Boolean)[0];
+        if (name) out = execFileSync("docker", ["exec", name, "python", "-c", healthCode], { encoding: "utf8", timeout: 60000 }).trim();
+      } catch (e) {
+        lastError = String(e.stderr || e.message || e).trim().slice(0, 160);
+      }
+    }
+    ok("容器内 health 返回 ok", /"status"\s*:\s*"ok"/.test(out), out ? out.slice(0, 120) : lastError);
   }
 
   console.log(`\n== 冒烟结果：${passed} 通过 / ${failed} 失败 ==`);

@@ -909,7 +909,10 @@ class AkshareProvider(BaseProvider):
     # ---------- 国债收益率曲线（P2 明细区：债券槽位） ----------
 
     YIELD_TTL = 1800  # 30 分钟
-    YIELD_TENORS = ["3月", "6月", "1年", "3年", "5年", "7年", "10年", "30年"]
+    # 2026-11-25 上游列名改为“中国国债收益率N年”并只保留 2/5/10/30 年；
+    # 旧列名（裸 “N年”）仍兼容，避免一次上游换形把整条曲线判成空。
+    YIELD_TENORS = ["3月", "6月", "1年", "2年", "3年", "5年", "7年", "10年", "30年"]
+    YIELD_COLUMN_PREFIX = "中国国债收益率"
 
     def get_yield_curve(self, days: int = 90) -> dict:
         import akshare as ak
@@ -935,7 +938,12 @@ class AkshareProvider(BaseProvider):
             d = str(r.get("日期", ""))[:10]
             values = {}
             for t in self.YIELD_TENORS:
-                v = _num(r.get(t))
+                v = None
+                for key in (t, f"{self.YIELD_COLUMN_PREFIX}{t}"):
+                    if key in r:
+                        v = _num(r.get(key))
+                        if v is not None:
+                            break
                 if v is not None:
                     values[t] = v
             if d and values:
