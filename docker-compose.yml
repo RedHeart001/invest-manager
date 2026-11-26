@@ -28,6 +28,8 @@ services:
       DATABASE_URL: file:/app/data/dev.db
       # Web 以非 root 运行；镜像内 /app 不可写，进度/完成账本随正式命名卷持久化。
       REFRESH_PROGRESS_FILE: /app/data/runtime/refresh-progress.json
+      # CR10-49：美股 snapshotId 发布账本的可观测副本（权威判据在 SQLite 同事务表）。
+      US_SNAPSHOT_PUBLICATIONS_FILE: /app/data/runtime/us-snapshot-publications.json
       DATA_SERVICE_URL: ${DATA_SERVICE_URL:-http://data-service:8000}
       # 落库回调共享密钥：两侧同值；未设置时 compose 直接拒绝启动
       INGEST_TOKEN: ${INGEST_TOKEN:?必须在 .env 中设置 INGEST_TOKEN（ingest 回调共享密钥）}
@@ -69,6 +71,9 @@ services:
       SYNC_STATE_FILE: /data/runtime/sync-state.json
       HOTSPOT_STATE_FILE: /data/runtime/hotspot-state.json
       LIMITER_STATE_FILE: /data/runtime/limiter-state.json
+      # CR10-49：美股完整名单的持久化检查点（页文件/manifest/candidate）。
+      # 与 SQLite 同卷但采集阶段不写库；03:30 备份不会被慢采集堵住。
+      US_LIST_JOB_DIR: /data/runtime/us-list-job
       # P6 起 data-service 有 4 条回调 web 的链路：
       #   热点落库 / 研报落库（research ingest）/ 研报回读 web /api/kline / MCP search_products
       WEB_BASE_URL: http://web:3000
