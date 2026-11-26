@@ -271,7 +271,7 @@ def _catch_up_decide() -> None:
 
         import os
 
-        web = os.environ.get("WEB_BASE_URL", "http://localhost:3000")
+        web = os.environ.get("WEB_BASE_URL", "http://127.0.0.1:3000")
         r = requests.get(
             f"{web}/api/hotspots/ingest",
             # CR-06：补跑日期与 pipeline 落库口径一致（均北京时间）

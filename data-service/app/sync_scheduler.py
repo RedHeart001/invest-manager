@@ -268,7 +268,10 @@ def _sync_hour_minute() -> tuple[int, int]:
 
 
 def _web_base() -> str:
-    return os.environ.get("WEB_BASE_URL", "http://localhost:3000")
+    # 默认值用 127.0.0.1 而非 localhost：Windows 的 localhost 先解析成 ::1，
+    # 而 web 只监听 IPv4，Python 的 urllib/requests 会先撞一次空端口再回落（每次约 2s）。
+    # 容器内由 compose 显式给 http://web:3000，不受此默认值影响。
+    return os.environ.get("WEB_BASE_URL", "http://127.0.0.1:3000")
 
 
 def _write_headers() -> dict[str, str]:

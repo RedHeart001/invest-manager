@@ -36,7 +36,7 @@ WEB_API_BASE = (
     # 兼容：data-service 其他回调统一用 WEB_BASE_URL（hotspot/research），
     # P7 容器化只设一个变量也能生效
     or os.environ.get("WEB_BASE_URL")
-    or "http://localhost:3000"
+    or "http://127.0.0.1:3000"
 ).rstrip("/")
 MCP_HTTP_HOST = os.environ.get("MCP_HTTP_HOST", "127.0.0.1")
 MCP_HTTP_PORT = int(os.environ.get("MCP_HTTP_PORT", "8765"))

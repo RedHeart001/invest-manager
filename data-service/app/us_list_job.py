@@ -701,7 +701,8 @@ class _PublishTransient(Exception):
 
 
 def _web_base() -> str:
-    return os.environ.get("WEB_BASE_URL", "http://localhost:3000")
+    # 与 sync_scheduler 同口径：localhost 会先试 ::1，web 只监听 IPv4 ⇒ 白白多一次连接等待。
+    return os.environ.get("WEB_BASE_URL", "http://127.0.0.1:3000")
 
 
 def _write_headers() -> dict[str, str]:

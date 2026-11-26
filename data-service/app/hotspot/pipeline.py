@@ -49,7 +49,7 @@ def _ak_guarded(fn, seconds: float = 45.0, name: str = "akshare"):
 
 log = logging.getLogger("hotspot")
 
-WEB_BASE_URL = os.environ.get("WEB_BASE_URL", "http://localhost:3000")
+WEB_BASE_URL = os.environ.get("WEB_BASE_URL", "http://127.0.0.1:3000")
 INGEST_TOKEN = os.environ.get("INGEST_TOKEN", "")
 
 NEWS_LIMIT = 25

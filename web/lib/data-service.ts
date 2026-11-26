@@ -8,7 +8,10 @@
 // 2026-11-07 的教训：把 `import { Agent } from "undici"` 写在顶层，webpack 立刻顺着
 // `undici → node:assert` 报 `UnhandledSchemeError`，整站编译失败。
 
-const DATA_SERVICE_URL = process.env.DATA_SERVICE_URL ?? "http://localhost:8000";
+// 默认用 127.0.0.1 而非 localhost：部分环境把 localhost 先解析成 ::1，
+// 而 data-service 只在 IPv4 上监听，顺序尝试的客户端会先撞一次空端口（每次约 2s）。
+// 容器内由 compose 显式给 http://data-service:8000，不受此默认值影响。
+const DATA_SERVICE_URL = process.env.DATA_SERVICE_URL ?? "http://127.0.0.1:8000";
 
 /** 传输层上限（ms）——**不是**业务预算，是"这条连接最多能被拖多久"的兜底。
  *

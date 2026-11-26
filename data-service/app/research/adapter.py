@@ -23,7 +23,7 @@ from ..providers import ProviderError, get_provider_chain
 
 log = logging.getLogger("research.adapter")
 
-WEB_BASE_URL = os.environ.get("WEB_BASE_URL", "http://localhost:3000")
+WEB_BASE_URL = os.environ.get("WEB_BASE_URL", "http://127.0.0.1:3000")
 TZ = ZoneInfo("Asia/Shanghai")
 
 

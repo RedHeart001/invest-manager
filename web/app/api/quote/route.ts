@@ -4,7 +4,7 @@ import { QUOTE_TIMEOUT_MS, unreachableMessage } from "@/lib/data-service";
 import { CODE_SET, QUOTE_TYPES } from "@/lib/validate";
 
 const DATA_SERVICE_URL =
-  process.env.DATA_SERVICE_URL ?? "http://localhost:8000";
+  process.env.DATA_SERVICE_URL ?? "http://127.0.0.1:8000";
 
 // BFF 代理行情查询：浏览器 → /api/quote → data-service /quote
 export async function GET(req: NextRequest) {

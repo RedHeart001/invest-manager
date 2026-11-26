@@ -134,7 +134,7 @@ def start_research(type_: str, code: str, name: str = "") -> dict:
             import requests
 
             t = _tasks[task_id]
-            web = os.environ.get("WEB_BASE_URL", "http://localhost:3000")
+            web = os.environ.get("WEB_BASE_URL", "http://127.0.0.1:3000")
             token = os.environ.get("INGEST_TOKEN", "")
             headers = {"x-ingest-token": token} if token else {}
             payload = {
