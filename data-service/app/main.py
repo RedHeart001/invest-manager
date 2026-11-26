@@ -276,6 +276,52 @@ def products(
     `degraded`/`note`——覆盖面缩水必须对消费侧可见（R16），否则 BFF 只能猜。
     `count`/`products` 的既有形态不变（新增键，不破坏既有调用方）。
     """
+    if type == "us":
+        # CR10-49：美股完整名单由持久化任务采集。未准备好不是失败——返回 200 +
+        # `collecting:true`，让 BFF 把 us 记成“更新中”而不是 `partial_failed`。
+        from . import us_list_job
+
+        ready = us_list_job.get_ready_candidate()
+        if ready is not None:
+            items = ready.get("products") or []
+            meta = {
+                key: value
+                for key, value in ready.items()
+                if key not in {"products", "count", "snapshotId"}
+            }
+            return {
+                "type": "us",
+                "count": len(items),
+                "products": items,
+                **meta,
+                "snapshotId": ready.get("snapshotId"),
+            }
+        st = us_list_job.status()
+        if st.get("state") == "blocked":
+            raise HTTPException(
+                status_code=502,
+                detail=f"us list job blocked: {st.get('blockedReason')}",
+            )
+        return JSONResponse(
+            status_code=200,
+            content={
+                "type": "us",
+                "collecting": True,
+                "snapshotId": st.get("snapshotId"),
+                "state": st.get("state"),
+                "progress": st.get("progress"),
+                "resolvedPages": st.get("resolvedPages"),
+                "requiredPages": st.get("requiredPages"),
+                "pendingPages": st.get("pendingPages"),
+                "lastProgressAt": st.get("lastProgressAt"),
+                "nextAttemptAt": st.get("nextAttemptAt"),
+                "note": (
+                    "美股完整名单正在持久化采集中；正式 Product 未改动，旧数据继续可用。"
+                    "完整候选通过全部完整性验证后才会发布。"
+                ),
+            },
+        )
+
     try:
         provider = get_list_provider(type)
     except KeyError:

@@ -98,7 +98,7 @@ PROGRESS_READ_TIMEOUT_S = 5.0
 # #23（主人 10-02 拍板"两道叠加"）之后 `skipped` 也进这一组，理由要说清：
 # 同步腿被当日闸门挡下＝**列表这件事今天已经收尾了**（web 用 `MAX(updatedAt)` 作证），
 # 而"列表到位、快照没到位"恰恰是最需要补的那一类 ⇒ 不能因为前一条腿跳过就连带废掉后一条。
-CHAINED_OUTCOMES = ("completed", "partial_failed", "skipped")
+CHAINED_OUTCOMES = ("completed", "partial_failed", "skipped", "collecting")
 
 
 def _callback_timeout_s(trigger: str) -> float:
@@ -284,7 +284,7 @@ def _write_headers() -> dict[str, str]:
     return {"x-write-token": token} if token else {}
 
 
-def _refresh_progress() -> dict | None:
+def _refresh_progress(run_id: str | None = None) -> dict | None:
     """#33 甲（CR9-60）：刷新腿**被打断**时，进度只能去问 web。
 
     为什么必须有这一条（10-04 02:11 实测）：本腿那份逐类结果住在 HTTP 响应体里，
@@ -306,7 +306,8 @@ def _refresh_progress() -> dict | None:
     import requests
 
     try:
-        r = requests.get(f"{_web_base()}/api/health", timeout=PROGRESS_READ_TIMEOUT_S)
+        suffix = f"?refreshRunId={run_id}" if run_id else ""
+        r = requests.get(f"{_web_base()}/api/health{suffix}", timeout=PROGRESS_READ_TIMEOUT_S)
         if r.status_code != 200:
             log.warning("refresh progress read: HTTP %s", r.status_code)
             return None
@@ -333,7 +334,13 @@ def _refresh_leg(trigger: str, force: bool = False) -> dict:
 
     started = time.time()
     timeout_s = REFRESH_CALLBACK_TIMEOUT_S
-    url = f"{_web_base()}{REFRESH_URL_PATH}" + ("&force=1" if force else "")
+    # CR10-49：普通轮不刷新尚未发布的旧 us；us 发布后由持久化任务单独刷新。
+    # runId 让这一轮与 us 独立刷新在 `refresh-progress.json` 里互不覆盖。
+    run_id = f"daily-{beijing_today()}"
+    url = (
+        f"{_web_base()}{REFRESH_URL_PATH}&exclude=us&runId={run_id}"
+        + ("&force=1" if force else "")
+    )
     try:
         r = requests.post(url, timeout=timeout_s, headers=_write_headers())
         if r.status_code >= 300:
@@ -345,7 +352,7 @@ def _refresh_leg(trigger: str, force: bool = False) -> dict:
             }
             log.warning("refresh leg rejected: status=%s body=%s", r.status_code, r.text[:200])
             # #33 甲：4xx/5xx 也不该留白——web 回 500 时"到底刷完了几类"只有它自己知道。
-            out["progress"] = _refresh_progress()
+            out["progress"] = _refresh_progress(run_id)
         else:
             body = r.json() or {}
             results = body.get("results") or []
@@ -394,13 +401,13 @@ def _refresh_leg(trigger: str, force: bool = False) -> dict:
         }
         log.warning("refresh leg read timeout (outcome inconclusive): %s", e)
         # 读超时＝web 可能还在写 ⇒ 这时问到的进度是"跑到第几类"的最好证据（丙①/丙② 分档）
-        out["progress"] = _refresh_progress()
+        out["progress"] = _refresh_progress(run_id)
     except Exception as e:  # noqa: BLE001 单次失败不影响调度
         out = {"ok": None, "error": f"{type(e).__name__}: {e}", "outcome": "failed"}
         log.warning("refresh leg failed: %s", e)
         # #33 甲的主战场：连接被重置（10054）时响应体永远拿不到，本腿只剩 `outcome=failed`。
         # 进度读不到就留 None——**有没有读过**与**读到没读到**是两件事，别用省略冒充。
-        out["progress"] = _refresh_progress()
+        out["progress"] = _refresh_progress(run_id)
 
     out["callbackTimeoutS"] = int(timeout_s)
     out["tookMsTotal"] = int((time.time() - started) * 1000)
@@ -458,7 +465,11 @@ def _execute(trigger: str, force: bool = False) -> dict:
     timeout_s = _callback_timeout_s(trigger)
     # #23(vi)：`force` 由 `POST /sync/run?force=true` 一路透传到这里——没有这个出口，
     # 主人"今天就是要重刷一遍"会撞上自己的闸门（闸门的用途是防手滑，不是防他）。
-    url = f"{_web_base()}/api/sync" + ("?force=1" if force else "")
+    # CR10-49：普通轮只同步五类；us 由持久化任务单独采集，不再让一次 HTTP 背 923 页。
+    url = (
+        f"{_web_base()}/api/sync?types=fund,stock,bond,crypto,hk"
+        + ("&force=1" if force else "")
+    )
     try:
         r = requests.post(url, timeout=timeout_s, headers=_write_headers())
         if r.status_code >= 300:
@@ -472,20 +483,74 @@ def _execute(trigger: str, force: bool = False) -> dict:
         else:
             body = r.json() or {}
             results = body.get("results") or []
+            # CR10-49：五类收尾后启动/恢复美股持久化任务。它不在本 HTTP 请求里翻页，
+            # 所以“还在采集”只记 collecting，不写 completed，也不写 failed。
+            from . import us_list_job
+
+            job = us_list_job.ensure_running(trigger, force=force)
+            job_status = job.get("status") or us_list_job.status()
+            us_state = str(job_status.get("state") or "idle")
+            us_snapshot = job_status.get("snapshotId")
+            if us_state == "completed":
+                us_result: dict = {
+                    "type": "us",
+                    "count": job_status.get("publishedCount"),
+                    "snapshotId": us_snapshot,
+                    "jobState": us_state,
+                    "published": True,
+                    "note": "persistent us list job completed and refreshed",
+                }
+            elif us_state == "blocked":
+                us_result = {
+                    "type": "us",
+                    "error": f"us list job blocked: {job_status.get('blockedReason')}",
+                    "jobState": us_state,
+                    "snapshotId": us_snapshot,
+                }
+            else:
+                us_result = {
+                    "type": "us",
+                    "collecting": True,
+                    "jobState": us_state,
+                    "snapshotId": us_snapshot,
+                    "progress": job_status.get("progress"),
+                    "resolvedPages": job_status.get("resolvedPages"),
+                    "requiredPages": job_status.get("requiredPages"),
+                    "pendingPages": job_status.get("pendingPages"),
+                    "lastProgressAt": job_status.get("lastProgressAt"),
+                    "nextAttemptAt": job_status.get("nextAttemptAt"),
+                    "note": (
+                        "美股完整名单正在持久化采集中；正式 Product 未改动，旧数据继续可用。"
+                        "完整候选通过全部完整性验证后才会发布，并单独刷新 us 行情。"
+                    ),
+                }
+            results.append(us_result)
             failed = [str(x.get("type")) for x in results if isinstance(x, dict) and x.get("error")]
             held = [str(x.get("type")) for x in results if isinstance(x, dict) and x.get("skipped")]
-            all_held = bool(results) and len(held) == len(results)
+            us_collecting = bool(us_result.get("collecting"))
+            all_held = len(held) == 5 and us_state == "completed"
             # CR9-28：web 侧返回的是真 ok（`results.every(r => !r.error)`），
             # 此前这里硬写 `ok: True` → 5 类里 4 类失败也被记成"同步成功"
             # （09-26 实测：lastResult.ok=true，而 stock/bond/crypto/hk 全带 error）。
             # 状态失真会让"看 /sync/status 判断今天是否要补跑"这条唯一路径失效。
             # 刀 1（#20②）：与 `ok` 并列一个 `outcome`——`ok` 只有真/假两值，表达不了
             # "web 根本没回答"这种第三态（见下面的 ReadTimeout 分支）。
+            # CR10-49：collecting 不是成功也不是失败 ⇒ ok=None + outcome="collecting"。
+            if failed:
+                ok_value: bool | None = False
+            elif us_collecting:
+                ok_value = None
+            else:
+                ok_value = bool(body.get("ok"))
             result = {
-                "ok": bool(body.get("ok")),
+                "ok": ok_value,
                 "tookMs": body.get("tookMs"),
                 "results": results,
-                "outcome": "skipped" if all_held else ("partial_failed" if failed else "completed"),
+                "outcome": (
+                    "partial_failed"
+                    if failed
+                    else ("collecting" if us_collecting else ("skipped" if all_held else "completed"))
+                ),
             }
             if all_held:
                 result["skippedReason"] = (
@@ -496,6 +561,8 @@ def _execute(trigger: str, force: bool = False) -> dict:
             if held and not all_held:
                 # 逐类粒度：只有失败过的那一类当天还能重跑，成功过的不陪着再烧一遍额度
                 result["skippedTypes"] = held
+            if us_collecting:
+                result["collectingTypes"] = ["us"]
             if failed:
                 result["failedTypes"] = failed
                 # 失败类型不自动重试是有意取舍：整轮同步实测 9.6~13min，
@@ -506,6 +573,12 @@ def _execute(trigger: str, force: bool = False) -> dict:
                     f"本轮不自动重试；需要时可 POST /sync/run 或等下次调度"
                 )
                 log.warning("daily sync partially failed: ok=false failedTypes=%s", failed)
+            elif us_collecting:
+                result["note"] = (
+                    "美股完整名单仍在持久化采集中（collecting）——不是失败；"
+                    "旧数据继续可用，完整候选发布后会单独刷新 us。"
+                )
+                log.info("daily sync collecting: us job state=%s", us_state)
             else:
                 log.info("daily sync done: %s", result)
     except requests.exceptions.ReadTimeout as e:
@@ -730,6 +803,36 @@ def _catch_up_if_needed() -> None:
     run_now(trigger=CATCHUP_TRIGGER)
 
 
+def _resume_us_job_if_due() -> None:
+    """CR10-49：重启后若已过调度时刻且美股任务未完成，恢复/启动持久化采集。
+
+    五类的“今天已试过” marker 不能替美股任务作证：两者是独立任务。这里只负责
+    把未收尾的 generation 接上，或在调度时刻之后补起当天的新 generation。
+    """
+    from . import us_list_job
+
+    hour, minute = _sync_hour_minute()
+    now = datetime.now(TZ)
+    if (now.hour, now.minute) < (hour, minute):
+        return
+    st = us_list_job.status()
+    if st.get("state") == "completed" and st.get("completedDate") == beijing_today():
+        return
+    us_list_job.ensure_running(CATCHUP_TRIGGER)
+
+
+def _resume_us_job_after_start() -> None:
+    """让 web 先就绪，再恢复/补起美股任务；异常只记录，不拖垮 DS 启动。"""
+    time.sleep(8)
+    try:
+        from . import us_list_job
+
+        us_list_job.resume_on_startup()
+        _resume_us_job_if_due()
+    except Exception as e:  # noqa: BLE001 任务恢复失败不能拖垮 DS
+        log.warning("us list job resume failed: %s", e)
+
+
 def start_scheduler() -> None:
     global _scheduler
     if _scheduler is not None:
@@ -746,6 +849,7 @@ def start_scheduler() -> None:
     )
     _scheduler.start()
     threading.Thread(target=_catch_up_if_needed, daemon=True, name="sync-catchup").start()
+    threading.Thread(target=_resume_us_job_after_start, daemon=True, name="us-list-resume").start()
     log.info("product sync scheduler started: daily %02d:%02d (Asia/Shanghai)", hour, minute)
 
 
@@ -754,6 +858,12 @@ def shutdown_scheduler() -> None:
     if _scheduler is not None:
         _scheduler.shutdown(wait=False)
         _scheduler = None
+    try:
+        from . import us_list_job
+
+        us_list_job.shutdown()
+    except Exception as e:  # noqa: BLE001 关闭失败不改变其他调度器的收尾
+        log.warning("us list job shutdown failed: %s", e)
 
 
 def status() -> dict:
@@ -767,6 +877,8 @@ def status() -> dict:
     disk_result = (disk_marker or {}).get("lastResult")
     in_proc_result = _state["lastResult"]
     sync_hour, sync_minute = _sync_hour_minute()
+    from . import us_list_job
+
     return {
         "running": _state["running"],
         "runs": _state["runs"],
@@ -779,6 +891,9 @@ def status() -> dict:
         "skippedReason": _state.get("skippedReason"),
         # 刀 3/甲-1：刷新腿那份结果（含它自己的 outcome／预算／skippedReason）
         "lastRefresh": _state.get("lastRefresh"),
+        # CR10-49：美股完整名单的持久化任务状态。`collecting/waiting` 不是失败，
+        # `completed` 只表示完整候选已发布且 us 行情刷新收尾。
+        "usListJob": us_list_job.status(),
         # CR9-94（#68 乙-1）：跨进程那份"今天起过一轮"（含 `lastAttemptOutcome`，它把
         # "今天试过"分成 rejected／inconclusive 与 completed 两种——后者配上 `Product.updatedAt`
         # 没动，就是 #69 那枚唯一零出网可读的仪器）。`lastAttemptFromDisk` 照 hotspot

@@ -9,6 +9,18 @@ class ProviderNotSupported(ProviderError):
     """该 provider 尚未实现此能力（如某类型的行情）。"""
 
 
+class ProviderCollecting(ProviderError):
+    """数据仍在持久化采集中，尚无可发布候选（CR10-49）。
+
+    `/products?type=us` 会把它转成 200 + `collecting:true`；MCP 等直连 provider
+    的调用方仍按 ProviderError 降级处理，但能看到 `status` 里的进度。
+    """
+
+    def __init__(self, message: str, status: dict | None = None) -> None:
+        super().__init__(message)
+        self.status = status or {}
+
+
 class BaseProvider(ABC):
     """数据源适配器基类。子类实现统一 schema 的 quote/kline，可选实现 list_products。"""
 

@@ -25,12 +25,17 @@ import sys
 import tempfile
 import time
 import types
+from urllib.parse import parse_qs, urlsplit
 
 # CR9-94（#68 乙-1）：先于 app 的任何 import 把 marker 指到临时目录——本套件大量直调
 # `_execute`／`run_now`，而它们现在会落 `runtime/sync-state.json`；不指走就会把**假轮**的
 # 日期写进真文件 ⇒ 当天之后任何一次合法补跑都被静默挡掉（同 `test_cr9_92_realtime.py:14`）。
 os.environ["SYNC_STATE_FILE"] = os.path.join(
     tempfile.mkdtemp(prefix="cr9sync-syncstate-"), "sync-state.json"
+)
+# CR10-49：`_execute` 会启动/恢复美股持久化任务；检查点同样不许落进仓库 runtime/。
+os.environ["US_LIST_JOB_DIR"] = os.path.join(
+    tempfile.mkdtemp(prefix="cr9sync-usjob-"), "job"
 )
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -44,6 +49,22 @@ for _s in (sys.stdout, sys.stderr):
 import requests  # noqa: E402
 
 import app.sync_scheduler as ss  # noqa: E402
+from app import us_list_job  # noqa: E402
+
+# CR10-49：本套件钉的是同步状态位；美股持久化任务在 `_execute` 收尾时被启动/恢复。
+# 默认钉成“当日已完成”，既零出网，也不让 collecting 改写既有的 ok/outcome 判据；
+# collecting 自己的语义由 `test_us_collecting_is_not_completed` 单独翻桩验证。
+_US_JOB_STATUS = {
+    "state": "completed",
+    "snapshotId": "unit-test-us",
+    "publishedCount": 0,
+}
+us_list_job.ensure_running = lambda *a, **k: {  # type: ignore[assignment]
+    "started": False,
+    "reason": "test-stub",
+    "status": dict(_US_JOB_STATUS),
+}
+us_list_job.status = lambda: dict(_US_JOB_STATUS)  # type: ignore[assignment]
 
 results: list[tuple[str, bool, str]] = []
 
@@ -152,7 +173,10 @@ def test_partial_failure_is_not_ok() -> None:
     check("CR9-28：note 显式说明不自动重试与补跑入口（R16）",
           "部分类型失败" in str(r.get("note") or "") and "/sync/run" in str(r.get("note") or ""),
           str(r.get("note")))
-    check("CR9-28：results 原文保留（逐类型 error 不被吞）", len(r.get("results") or []) == 5,
+    check("CR9-28：results 原文保留（逐类型 error 不被吞，外加 us 完成回执）",
+          len(r.get("results") or []) == 6
+          and [x.get("type") for x in (r.get("results") or [])[:5]]
+          == ["stock", "fund", "bond", "crypto", "hk"],
           str(len(r.get("results") or [])))
     # 刀 1（#20②）：outcome 四态之一——web 回答了且有类型失败
     check("刀1：outcome=partial_failed（与 ok=False 同源，不是另算的）",
@@ -179,6 +203,73 @@ def test_full_success_is_ok() -> None:
     # 🔁 与下面的 inconclusive 成对，证明 outcome 不是"凡超时都写同一句"的桩
     check("刀1：outcome=completed（成功档不被第三态污染）",
           r.get("outcome") == "completed", str(r.get("outcome")))
+
+
+def test_us_collecting_is_not_completed() -> None:
+    """CR10-49：美股持久化任务还在采集 ⇒ 不是成功也不是失败。
+
+    `_execute` 把 us 结果并进 `results` 后，整轮不能因为“没有 error”就写 completed：
+    `ok=None` ＋ `outcome="collecting"`，并显式列出 collectingTypes。反向样本＝任务
+    blocked 时必须落回 failedTypes/partial_failed，不许被 collecting 吞掉。
+    """
+    body = {
+        "ok": True,
+        "tookMs": 500_000,
+        "results": [
+            {"type": "stock", "count": 5913},
+            {"type": "fund", "count": 27954},
+            {"type": "bond", "count": 1059},
+            {"type": "crypto", "count": 250},
+            {"type": "hk", "count": 4707},
+        ],
+    }
+    original = us_list_job.ensure_running
+    try:
+        us_list_job.ensure_running = lambda *a, **k: {  # type: ignore[assignment]
+            "started": True,
+            "status": {
+                "state": "collecting",
+                "snapshotId": "snap-us-1",
+                "progress": {"resolvedPages": 441, "requiredPages": 923},
+                "resolvedPages": 441,
+                "requiredPages": 923,
+                "pendingPages": 482,
+            },
+        }
+        r = _run_with(body)
+        us = (r.get("results") or [{}])[-1]
+        check("CR10-49：us 仍在采集 ⇒ ok=None（不是 true，也不是 false）",
+              r.get("ok") is None, repr(r.get("ok")))
+        check("CR10-49：outcome=collecting，且显式列出 collectingTypes",
+              r.get("outcome") == "collecting" and r.get("collectingTypes") == ["us"],
+              str(r)[:220])
+        check("CR10-49：五类原结果不被 collecting 污染，us 结果带进度与 snapshotId",
+              len(r.get("results") or []) == 6
+              and us.get("collecting") is True
+              and us.get("snapshotId") == "snap-us-1"
+              and us.get("pendingPages") == 482,
+              str(us)[:220])
+        check("CR10-49：collecting 不写 failedTypes（不是失败）",
+              "failedTypes" not in r and "部分类型失败" not in str(r.get("note") or ""),
+              str(r.get("failedTypes")) + " / " + str(r.get("note"))[:120])
+
+        us_list_job.ensure_running = lambda *a, **k: {  # type: ignore[assignment]
+            "started": False,
+            "status": {
+                "state": "blocked",
+                "snapshotId": "snap-us-2",
+                "blockedReason": "duplicate symbols",
+            },
+        }
+        blocked = _run_with(body)
+        check("CR10-49🔁：us blocked ⇒ 落回 failedTypes/partial_failed，不被 collecting 吞掉",
+              blocked.get("ok") is False
+              and blocked.get("outcome") == "partial_failed"
+              and blocked.get("failedTypes") == ["us"]
+              and "duplicate symbols" in str((blocked.get("results") or [{}])[-1].get("error")),
+              str(blocked)[:240])
+    finally:
+        us_list_job.ensure_running = original  # type: ignore[assignment]
 
 
 def test_read_timeout_is_inconclusive_not_ok() -> None:
@@ -446,9 +537,13 @@ def test_progress_read_back_on_failure_paths() -> None:
     check("#33甲：连接被重置的轮次把 web 的逐类进度读回来挂进 progress",
           refresh.get("outcome") == "failed" and (refresh.get("progress") or {}).get("outcome") == "running"
           and len((refresh.get("progress") or {}).get("done") or []) == 2, str(refresh)[:200])
+    _health_url = str(GET_CALLS[0].get("url", "")) if GET_CALLS else ""
+    _health_parts = urlsplit(_health_url)
+    _health_query = parse_qs(_health_parts.query)
     check("#33甲：问的是一次 GET /api/health（不是再 POST 一次刷新＝观测不许变成第二次写入）",
-          len(GET_CALLS) == 1 and str(GET_CALLS[0].get("url", "")).endswith("/api/health")
-          and "force" not in str(GET_CALLS[0].get("url", "")), str(GET_CALLS)[:160])
+          len(GET_CALLS) == 1 and _health_parts.path.endswith("/api/health")
+          and _health_query.get("refreshRunId") == [f"daily-{ss.beijing_today()}"]
+          and "force" not in _health_query, str(GET_CALLS)[:160])
     check("#33甲：读的预算是 PROGRESS_READ_TIMEOUT_S（5s），不是刷新腿那 2400s",
           (GET_CALLS[0].get("timeout") if GET_CALLS else None) == ss.PROGRESS_READ_TIMEOUT_S,
           str(GET_CALLS[:1])[:120])
@@ -621,9 +716,13 @@ def test_gate_force_reaches_both_legs() -> None:
         ss._state["lastRefresh"] = None
         ss._execute("unit-test", True)
         urls = [u for u, _t in legs2.calls]
-        check("#23🔁：force=True ⇒ 同步腿带 ?force=1", "?force=1" in urls[0], str(urls))
-        check("#23：force=True ⇒ 链式刷新腿也带 &force=1（一次决定，两条腿都越过闸门）",
-              "&force=1" in urls[1], str(urls))
+        # CR10-49：同步腿 URL 现在是 `/api/sync?types=...&force=1`，按查询参数判，
+        # 不再依赖 `?force=1` 紧跟路径的旧形状。
+        sync_q = parse_qs(urlsplit(urls[0]).query)
+        refresh_q = parse_qs(urlsplit(urls[1]).query)
+        check("#23🔁：force=True ⇒ 同步腿带 force=1", sync_q.get("force") == ["1"], str(urls))
+        check("#23：force=True ⇒ 链式刷新腿也带 force=1（一次决定，两条腿都越过闸门）",
+              refresh_q.get("force") == ["1"], str(urls))
     finally:
         requests.post = orig
         ss._state.clear()
@@ -639,7 +738,7 @@ def test_gate_lastdate_untouched_by_skip() -> None:
     钉着；这里补的是**跳过轮**同样置位——若哪天有人想"跳过就别置位，好让它重试"，
     本断言会红并要求同步改文档（同上一条的口径）。
     """
-    _r, st = _run_inline(_skipped_body(["stock"]))
+    _r, st = _run_inline(_skipped_body(["stock", "fund", "bond", "crypto", "hk"]))
     check("#23：被闸门跳过 ⇒ 内存 lastDate 仍照常置位（叠加而非替换，CR9-28 不改判）",
           st.get("lastDate") == ss.beijing_today(), str(st.get("lastDate")))
     check("#23：同一轮里顶层 skippedReason 也说得出被挡（两个判据各管各的、不互相覆盖）",
@@ -703,6 +802,7 @@ def test_sync_last_result_persists_across_restart() -> None:
 def main() -> int:
     test_partial_failure_is_not_ok()
     test_full_success_is_ok()
+    test_us_collecting_is_not_completed()
     test_read_timeout_is_inconclusive_not_ok()
     test_lastdate_set_even_on_partial()
     test_http_rejection_still_error()

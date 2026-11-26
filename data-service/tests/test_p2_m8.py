@@ -6,7 +6,13 @@
 
 import os
 import sys
+import tempfile
 import time
+
+# CR10-49：`/products?type=us` 现在读持久化任务的候选；测试检查点不许落进仓库 runtime/。
+os.environ["US_LIST_JOB_DIR"] = os.path.join(
+    tempfile.mkdtemp(prefix="p2m8-usjob-"), "job"
+)
 
 # 脚本从 tests/ 启动时，把项目根加入 import 路径
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -375,15 +381,33 @@ def test_products_endpoint_passthrough_meta() -> None:
     零出网：`list_products_with_meta` 整个换成假对象，只断端点自己那一跳。
     """
     import app.main as m
+    import app.us_list_job as usj
     from app.providers.base import ProviderError
 
     items = [{"code": "AAPL"}, {"code": "NVDA"}]
     orig = m.list_products_with_meta
+    sid = "unit-test-us-candidate"
     try:
-        # ① 四键齐的一轮（＝us 那种"有意子集"的真实形状）
-        m.list_products_with_meta = lambda provider, type_: (  # type: ignore[assignment]
-            items,
-            {"source": "sina-us-list", "degraded": True, "note": "只取前排 1 页", "intentionalSubset": True},
+        # ① 四键齐的一轮（＝us 那种"有意子集"的真实形状）。
+        # CR10-49：us 不再走 `list_products_with_meta`，改由持久化任务的候选直接供数；
+        # 这里种一份 candidate_ready，端点必须把候选里的声明**整包**透传出去。
+        usj._write_json(
+            usj._candidate_path(sid),
+            {
+                "snapshotId": sid,
+                "products": items,
+                "count": len(items),
+                "source": "sina-us-list",
+                "degraded": True,
+                "note": "只取前排 1 页",
+                "intentionalSubset": True,
+                "acquisitionComplete": True,
+                "declaredCount": len(items),
+                "acquiredCount": len(items),
+            },
+        )
+        usj._save_state(
+            {**usj._default_state(), "state": "candidate_ready", "snapshotId": sid}
         )
         body = m.products(type="us")
         check("CR9-68：四个 meta 键逐项在响应体里，且值与 provider 给的一字不差",
@@ -393,6 +417,9 @@ def test_products_endpoint_passthrough_meta() -> None:
         check("CR9-68：既有三键形态不变（加键不是换契约，`count` 仍是 `len(items)`）",
               body.get("type") == "us" and body.get("count") == 2 and body.get("products") == items,
               str(body)[:160])
+        check("CR10-49：us 候选的 snapshotId 透传到 HTTP 边界（发布幂等键）",
+              body.get("snapshotId") == sid and body.get("acquisitionComplete") is True,
+              str(body)[:200])
 
         # ② 🔁 主源态：provider **不给** degraded/note ⇒ 端点也不许凭空造出来
         m.list_products_with_meta = lambda provider, type_: (  # type: ignore[assignment]
@@ -435,6 +462,7 @@ def test_products_endpoint_passthrough_meta() -> None:
                   e.status_code == 502, str(e.status_code))
     finally:
         m.list_products_with_meta = orig  # type: ignore[assignment]
+        usj._save_state({**usj._default_state(), "state": "idle"})
 
 
 # ---------- #41 甲（CR9-69）：计数落盘 ----------

@@ -29,6 +29,10 @@ import tempfile
 os.environ["SYNC_STATE_FILE"] = os.path.join(
     tempfile.mkdtemp(prefix="cr107-syncstate-"), "sync-state.json"
 )
+# CR10-49：`_execute` 会启动/恢复美股持久化任务；本套件只测写腿请求头，检查点不落仓库。
+os.environ["US_LIST_JOB_DIR"] = os.path.join(
+    tempfile.mkdtemp(prefix="cr107-usjob-"), "job"
+)
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 for _s in (sys.stdout, sys.stderr):
@@ -38,6 +42,20 @@ for _s in (sys.stdout, sys.stderr):
 import requests  # noqa: E402
 
 import app.sync_scheduler as ss  # noqa: E402
+from app import us_list_job  # noqa: E402
+
+# CR10-49：本套件只关心两条写腿的请求头；把美股任务钉成“当日已完成”，零出网。
+_US_JOB_STATUS = {
+    "state": "completed",
+    "snapshotId": "unit-test-us",
+    "publishedCount": 0,
+}
+us_list_job.ensure_running = lambda *a, **k: {  # type: ignore[assignment]
+    "started": False,
+    "reason": "test-stub",
+    "status": dict(_US_JOB_STATUS),
+}
+us_list_job.status = lambda: dict(_US_JOB_STATUS)  # type: ignore[assignment]
 
 results: list[tuple[str, bool, str]] = []
 

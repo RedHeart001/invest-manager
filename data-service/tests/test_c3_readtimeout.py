@@ -12,12 +12,17 @@ CR9-33（2026-09-27）追加：补跑态实测 ≥29 分钟会打穿定时态预
 import os
 import sys
 import tempfile
+from urllib.parse import urlsplit
 
 # CR9-94（#68 乙-1）：先于 app 的任何 import 把 marker 指到临时目录——`_execute` 收尾会
 # 覆写 `runtime/sync-state.json`，不指走就会把**假轮**的日期写进真文件 ⇒ 当天之后任何一次
 # 合法补跑都被静默挡掉（与 `test_cr9_92_realtime.py:14`、`test_p2_m8.py:354` 同一条纪律）。
 os.environ["SYNC_STATE_FILE"] = os.path.join(
     tempfile.mkdtemp(prefix="c3-syncstate-"), "sync-state.json"
+)
+# CR10-49：`_execute` 会启动/恢复美股持久化任务；本套件只测回调预算，检查点也不许落进仓库。
+os.environ["US_LIST_JOB_DIR"] = os.path.join(
+    tempfile.mkdtemp(prefix="c3-usjob-"), "job"
 )
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -30,6 +35,21 @@ for _s in (sys.stdout, sys.stderr):
 
 import app.sync_scheduler as ss  # noqa: E402
 import requests as real_requests  # noqa: E402
+from app import us_list_job  # noqa: E402
+
+# CR10-49：本套件只测同步回调预算，不测美股任务。把它钉成“当日已完成”，
+# 既不出网，也不让 collecting 改写 ok/outcome 的既有判据。
+_US_JOB_STATUS = {
+    "state": "completed",
+    "snapshotId": "unit-test-us",
+    "publishedCount": 0,
+}
+us_list_job.ensure_running = lambda *a, **k: {  # type: ignore[assignment]
+    "started": False,
+    "reason": "test-stub",
+    "status": dict(_US_JOB_STATUS),
+}
+us_list_job.status = lambda: dict(_US_JOB_STATUS)  # type: ignore[assignment]
 
 results: list[tuple[str, bool, str]] = []
 
@@ -108,7 +128,9 @@ def test_callback_timeout_by_form() -> None:
     def _capture(url, timeout=None, **kw):
         # 刀 3/甲-1（2026-10-02）之后一轮有**两条腿** ⇒ 必须按 URL 分别记：只存"最后一次
         # 调用"会读到刷新腿的 2400s，本套件的判据（同步腿按形态取预算）就变成在测刷新腿了。
-        seen["sync" if url.endswith("/api/sync") else "refresh"] = timeout
+        # CR10-49：同步腿 URL 现在带 `?types=...`，按 path 判，不能再 `endswith("/api/sync")`。
+        path = urlsplit(url).path
+        seen["sync" if path.endswith("/api/sync") else "refresh"] = timeout
         return _Resp()
 
     orig_post = real_requests.post

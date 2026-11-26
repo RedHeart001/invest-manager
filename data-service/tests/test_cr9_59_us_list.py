@@ -31,6 +31,9 @@ for _s in (sys.stdout, sys.stderr):
 #（与 `test_p2_m8.py` 同一条纪律）。
 os.environ["LIMITER_STATE_FILE"] = os.path.join(
     tempfile.mkdtemp(prefix="cr9100-limiter-"), "limiter-state.json")
+# CR10-49：持久化任务的检查点也不许落到仓库 runtime/ 里。
+os.environ["US_LIST_JOB_DIR"] = os.path.join(
+    tempfile.mkdtemp(prefix="cr1049-usjob-"), "job")
 
 # CR9-119（10-18 18:1x）：**操作者那份 `data-service/.env` 也不许进离线单测**。
 # 今天 16:3x 之前该文件不存在，本套的"默认页数＝15"是绿的；文件一建（`US_LIST_PAGES=50`）
@@ -45,8 +48,13 @@ from pathlib import Path  # noqa: E402
 _REAL_ENV_FILES = list(_cfg._ENV_FILES)
 _cfg._ENV_FILES[:] = [Path(tempfile.mkdtemp(prefix="cr9119-env-")) / "absent.env"]
 
+from app import us_list_job  # noqa: E402
 from app.providers import akshare_provider as akp  # noqa: E402
-from app.providers.base import get_list_provider, list_products_with_meta  # noqa: E402
+from app.providers.base import (  # noqa: E402
+    ProviderCollecting,
+    get_list_provider,
+    list_products_with_meta,
+)
 from app.utils.limiter import get_limiter  # noqa: E402
 
 results: list[tuple[str, bool, str]] = []
@@ -170,10 +178,14 @@ def with_pages(value):
 
 
 def listed(pages: dict[int, object], n: int):
-    """跑一次 `_list_us_stocks`（页数钉成 n）。"""
+    """跑一次单轮兼容入口 `collect_us_snapshot`（页数钉成 n）。
+
+    CR10-49 起日常翻页归持久化任务；本套仍要钉住同一套页义务/完整性语义，
+    所以走保留的显式整腿入口，而不是已经改为只消费候选的 `_list_us_stocks()`。
+    """
     install_fake(pages)
     with with_pages(n):
-        return akp.AkshareProvider()._list_us_stocks()
+        return akp.collect_us_snapshot()
 
 
 # ---------- 1. jsonp 解析 ----------
@@ -477,7 +489,7 @@ def test_list_us_stocks_premature_short_page() -> None:
         raised, msg = "", ""
         try:
             with with_pages(6):
-                akp.AkshareProvider()._list_us_stocks()
+                akp.collect_us_snapshot()
         except Exception as e:  # noqa: BLE001
             raised, msg = type(e).__name__, str(e)
     finally:
@@ -655,16 +667,59 @@ def test_us_yi_full_coverage() -> None:
 
 def test_registration_and_dispatch() -> None:
     check("us 真的进了列表注册表", get_list_provider("us") is akp._akshare, "not registered")
-    install_fake({
-        1: jsonp20([NVDA], "r", count="20"),
-        2: jsonp([], count="20"),
-    })
-    with with_pages(1):
+
+    # CR10-49：日常 `_list_us_stocks()` 只消费持久化任务的完整候选，不再自己翻页。
+    raised = None
+    try:
+        akp._akshare.list_products("us")
+    except Exception as e:  # noqa: BLE001
+        raised = e
+    check(
+        "没有候选时列表入口抛 ProviderCollecting（不是空名单/不是失败）",
+        isinstance(raised, ProviderCollecting)
+        and raised.status.get("state") in {"idle", "collecting", "waiting"},
+        f"{type(raised).__name__}: {raised}",
+    )
+
+    # 用持久化任务跑出一份完整候选（1 页 + 穷尽空页），再走注册表派发。
+    rows = [dict(NVDA, symbol=f"R{i:02d}") for i in range(20)]
+
+    def fake_page(page, session, deadline):
+        if page == 1:
+            return "20", rows
+        if page == 2:
+            return "20", []
+        raise AssertionError(f"unexpected page {page}")
+
+    us_list_job.reset_for_tests()
+    us_list_job.page_fetcher = fake_page
+    try:
+        with with_pages(1):
+            state = us_list_job.run_once()
+        check(
+            "持久化任务产出 candidate_ready（完整页义务 + 穷尽空页）",
+            state.get("state") == "candidate_ready",
+            str(state)[:160],
+        )
         items, meta = list_products_with_meta(akp._akshare, "us")
-    check("env 在调用时生效；一页义务之外仍需一枚穷尽页", len(CALLS) == 2, str(len(CALLS)))
-    check("list_products 派发到 us 分支", len(items) == 20 and items[0]["type"] == "us", str(items)[:90])
-    check("(items, meta) 归一化后 source 仍是声明值（CR9-31 形态不被包装吃掉）",
-          meta["source"] == "sina-us-category-list", str(meta)[:90])
+    finally:
+        us_list_job.reset_for_tests()
+
+    check(
+        "list_products 派发到 us 分支并消费候选",
+        len(items) == 20 and items[0]["type"] == "us",
+        str(items)[:90],
+    )
+    check(
+        "(items, meta) 归一化后 source 仍是声明值（CR9-31 形态不被包装吃掉）",
+        meta["source"] == "sina-us-category-list",
+        str(meta)[:90],
+    )
+    check(
+        "候选的 snapshotId 透传到列表消费侧（发布幂等键）",
+        bool(meta.get("snapshotId")) and meta.get("acquisitionComplete") is True,
+        str(meta)[:120],
+    )
     raised = ""
     try:
         akp._akshare.list_products("not-a-type")
