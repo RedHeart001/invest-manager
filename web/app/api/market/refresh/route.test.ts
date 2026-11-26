@@ -27,9 +27,9 @@ vi.mock("@/lib/market-snapshot", () => ({
   refreshAll: (types: string[], opts: { onResult?: (r: unknown) => void }) => refreshAll(types, opts),
 }));
 vi.mock("@/lib/refresh-progress", () => ({
-  startRefreshProgress: (types: string[]) => startRefreshProgress(types),
-  recordRefreshResult: (r: unknown) => recordRefreshResult(r),
-  finishRefreshProgress: (outcome: string) => finishRefreshProgress(outcome),
+  startRefreshProgress: (...args: unknown[]) => startRefreshProgress(...args),
+  recordRefreshResult: (...args: unknown[]) => recordRefreshResult(...args),
+  finishRefreshProgress: (...args: unknown[]) => finishRefreshProgress(...args),
 }));
 
 import { POST } from "./route";
@@ -149,5 +149,81 @@ describe("/api/market/refresh 的进度接线（CR9-68／#40 甲）", () => {
     expect(res.status).toBe(403);
     expect(startRefreshProgress).not.toHaveBeenCalled();
     expect(refreshAll).not.toHaveBeenCalled();
+  });
+});
+
+describe("CR10-49：exclude 与 runId（普通轮五类 / us 独立轮）", () => {
+  it("`?type=all&exclude=us` ⇒ 普通轮只刷五类，不拿未更新的旧 us 陪跑", async () => {
+    const res = await POST(req("?type=all&exclude=us"));
+    expect(res.status).toBe(200);
+    const expected = TYPES.filter((t) => t !== "us");
+    expect(refreshAll.mock.calls[0][0]).toEqual(expected);
+    expect(startRefreshProgress.mock.calls[0][0]).toEqual(expected);
+    expect(recordRefreshResult.mock.calls.map((c) => (c[0] as { type: string }).type)).toEqual(expected);
+    expect(log[0]).toBe(`start:${expected.join(",")}`);
+  });
+
+  it("`?type=us&runId=us-<snapshotId>` ⇒ us 发布后单独一轮", async () => {
+    const res = await POST(req("?type=us&runId=us-20261126-020000-abcdef"));
+    expect(res.status).toBe(200);
+    expect(refreshAll.mock.calls[0][0]).toEqual(["us"]);
+    expect(startRefreshProgress.mock.calls[0]).toEqual([
+      ["us"],
+      "us-20261126-020000-abcdef",
+    ]);
+    expect(recordRefreshResult.mock.calls[0][1]).toBe("us-20261126-020000-abcdef");
+    expect(finishRefreshProgress.mock.calls[0]).toEqual([
+      "completed",
+      "us-20261126-020000-abcdef",
+    ]);
+  });
+
+  it("普通轮带 `runId=daily-<北京日>`：start/record/finish 三处都拿到同一个键", async () => {
+    await POST(req("?type=all&exclude=us&runId=daily-2026-11-26"));
+    const runId = "daily-2026-11-26";
+    expect(startRefreshProgress.mock.calls[0][1]).toBe(runId);
+    expect(recordRefreshResult.mock.calls.every((c) => c[1] === runId)).toBe(true);
+    expect(recordRefreshResult).toHaveBeenCalledTimes(TYPES.length - 1);
+    expect(finishRefreshProgress.mock.calls[0]).toEqual(["completed", runId]);
+  });
+
+  it("不带 runId ⇒ 三个进度函数都收到 undefined（旧调用方形态不变）", async () => {
+    await POST(req("?type=fund"));
+    expect(startRefreshProgress.mock.calls[0][1]).toBeUndefined();
+    expect(recordRefreshResult.mock.calls[0][1]).toBeUndefined();
+    expect(finishRefreshProgress.mock.calls[0][1]).toBeUndefined();
+  });
+
+  it.each([
+    ["未知 exclude", "?type=all&exclude=bogus", "unsupported exclude: bogus"],
+    ["混入未知 exclude", "?type=all&exclude=us,bogus", "unsupported exclude: bogus"],
+    ["单类型把自己排除光", "?type=fund&exclude=fund", "exclude removed every refresh type"],
+    ["all 把六类全排除", `?type=all&exclude=${TYPES.join(",")}`, "exclude removed every refresh type"],
+  ])("%s ⇒ 400，零刷新、零进度", async (_name, query, error) => {
+    const res = await POST(req(query));
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error });
+    expect(refreshAll).not.toHaveBeenCalled();
+    expect(startRefreshProgress).not.toHaveBeenCalled();
+    expect(finishRefreshProgress).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["含路径分隔符", "bad/id"],
+    ["含空格", "bad id"],
+    ["超长", `a${"b".repeat(80)}`],
+    ["以符号开头", "-bad"],
+  ])("非法 runId（%s）⇒ 400，零刷新、零进度", async (_name, runId) => {
+    const res = await POST(req(`?type=all&runId=${encodeURIComponent(runId)}`));
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: "invalid runId" });
+    expect(refreshAll).not.toHaveBeenCalled();
+    expect(startRefreshProgress).not.toHaveBeenCalled();
+  });
+
+  it("exclude 只影响本轮名单，不影响 refreshAll 的 force 透传", async () => {
+    await POST(req("?type=all&exclude=us&force=1"));
+    expect((refreshAll.mock.calls[0][1] as { force?: boolean }).force).toBe(true);
+    expect(refreshAll.mock.calls[0][0]).not.toContain("us");
   });
 });

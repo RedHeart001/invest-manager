@@ -1,6 +1,8 @@
 // 产品主数据同步：data-service 拉全量 → SQLite 落库 → 重建 FTS 索引
 // 约定（PLAN.md）：data-service 无状态、不写库；一切持久化由 BFF 负责。
 
+import fs from "node:fs";
+import path from "node:path";
 import { randomUUID } from "node:crypto";
 
 import { dsGet, productsBudgetMs } from "./data-service";
@@ -29,7 +31,7 @@ const syncInflight: Map<string, Promise<SyncResult>> = ((
   globalThis as unknown as Record<symbol, Map<string, Promise<SyncResult>> | undefined>
 )[SYNC_INFLIGHT_KEY] ??= new Map());
 
-type ProductPayload = {
+export type ProductPayload = {
   type: string;
   code: string;
   name: string;
@@ -37,6 +39,24 @@ type ProductPayload = {
   pinyinInitials?: string | null;
   exchange?: string | null;
   tags?: string[] | null;
+};
+
+/** `/products` 的列表载荷（CR10-49 起也供 `/api/sync/us-snapshot` 复用）。
+ *  完整性声明与产品口径声明是两件事：`acquisitionComplete=false` 直接零写入，
+ *  `intentionalSubset=true` 只允许在 `productPolicySubset=true` 时越过 70% 缩水闸。 */
+export type ProductListPayload = {
+  count?: number;
+  products?: ProductPayload[];
+  source?: string;
+  degraded?: boolean;
+  note?: string;
+  intentionalSubset?: boolean;
+  acquisitionComplete?: boolean;
+  productPolicySubset?: boolean;
+  declaredCount?: number;
+  acquiredCount?: number;
+  /** 美股持久化任务的发布代次；只有它存在时才启用 SQLite 幂等账本。 */
+  snapshotId?: string | null;
 };
 
 export type SyncResult = {
@@ -56,6 +76,14 @@ export type SyncResult = {
    *  重复码不再让整轮回滚；本键仍点名被丢的键（最多 20 枚，去重作用于全部重复）。
    *  刻意不进 `note`＝`note` 会被 `HotspotFeed.tsx:259` 上屏，而"哪几枚 code 重复"是开发者向的数。 */
   dupCodes?: string[];
+  /** CR10-49：美股持久化任务还在采集。**不是失败**——`error` 不置位，但整轮 `ok`
+   *  不能因此写成 true（collecting 既不是成功也不是失败）。 */
+  collecting?: boolean;
+  jobState?: string;
+  snapshotId?: string | null;
+  progress?: { resolvedPages?: number; requiredPages?: number } | null;
+  /** CR10-49：同一 `snapshotId` 已经发布过，本次只回执、不重复写库。 */
+  alreadyPublished?: boolean;
 };
 
 const CHUNK = 500;
@@ -196,51 +224,203 @@ export function keepFirstByTypeCode<T extends { type: string; code: string }>(ro
   return out;
 }
 
-async function _syncTypeInner(type: string): Promise<SyncResult> {
+// ---------- CR10-49：发布事务 + snapshotId 幂等账本 ----------
+
+/** 可预期的拒绝（完整性/缩水/空载荷）：重试同一份没有意义，调用方应 4xx 而不是 5xx。 */
+export class PublishRejected extends Error {
+  constructor(message: string, readonly dupCodes?: string[]) {
+    super(message);
+    this.name = "PublishRejected";
+  }
+}
+
+export type PublishOutcome =
+  | {
+      ok: true;
+      type: string;
+      count: number;
+      note?: string;
+      dupCodes?: string[];
+      snapshotId?: string | null;
+      alreadyPublished?: boolean;
+      tookMs: number;
+    }
+  | {
+      ok: false;
+      /** true＝可预期拒绝（4xx）；false＝意外故障（5xx，可重试） */
+      rejected: boolean;
+      type: string;
+      error: string;
+      dupCodes?: string[];
+      tookMs: number;
+    };
+
+/** 发布账本表：与 Product 替换同事务写入，保证“Web 已提交但响应丢失”的重试不重复写库。
+ *  刻意用 app 管理的裸表（同 `Product_stage_*`/`Product_fts`），不引入 Prisma model 与
+ *  迁移漂移；`CREATE TABLE IF NOT EXISTS` 在首次发布时幂等建表。 */
+const PUBLICATION_TABLE = "Product_snapshot_publication";
+
+async function ensurePublicationTable(): Promise<void> {
+  await prisma.$executeRawUnsafe(
+    `CREATE TABLE IF NOT EXISTS "${PUBLICATION_TABLE}" (
+      "snapshotId" TEXT NOT NULL PRIMARY KEY,
+      "type" TEXT NOT NULL,
+      "count" INTEGER NOT NULL,
+      "publishedAt" DATETIME NOT NULL
+    )`,
+  );
+}
+
+type PublicationRow = { snapshotId: string; type: string; count: number; publishedAt: unknown };
+
+async function readPublication(snapshotId: string): Promise<PublicationRow | null> {
+  try {
+    const rows = await prisma.$queryRawUnsafe<PublicationRow[]>(
+      `SELECT "snapshotId", "type", "count", "publishedAt"
+         FROM "${PUBLICATION_TABLE}" WHERE "snapshotId" = ? LIMIT 1`,
+      snapshotId,
+    );
+    return rows[0] ?? null;
+  } catch (e) {
+    // 开发库可能还没跑过首次发布建表；把“表不存在”当“未发布”，其余错误照实上抛。
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/no such table/i.test(msg)) return null;
+    throw e;
+  }
+}
+
+/** 可观测副本：只写 `US_SNAPSHOT_PUBLICATIONS_FILE`，失败只 warn。
+ *  真正的幂等判据在 SQLite 同事务账本里，这份 JSON 不参与任何放行/拦截。 */
+function publicationMirrorFile(): string {
+  return (
+    process.env.US_SNAPSHOT_PUBLICATIONS_FILE ||
+    path.join(process.cwd(), "runtime", "us-snapshot-publications.json")
+  );
+}
+
+function recordPublicationMirror(entry: {
+  snapshotId: string;
+  type: string;
+  count: number;
+  publishedAt: string;
+  alreadyPublished?: boolean;
+}): void {
+  try {
+    const file = publicationMirrorFile();
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    let snapshots: Record<string, unknown> = {};
+    try {
+      const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as { snapshots?: unknown };
+      if (parsed && typeof parsed.snapshots === "object" && parsed.snapshots !== null) {
+        snapshots = parsed.snapshots as Record<string, unknown>;
+      }
+    } catch {
+      // 没有副本/半截 JSON 都从空对象重建，不影响主流程
+    }
+    snapshots[entry.snapshotId] = {
+      type: entry.type,
+      count: entry.count,
+      publishedAt: entry.publishedAt,
+      ...(entry.alreadyPublished ? { alreadyPublished: true } : {}),
+    };
+    const tmp = `${file}.tmp`;
+    fs.writeFileSync(
+      tmp,
+      JSON.stringify({ updatedAt: new Date().toISOString(), snapshots }, null, 2),
+      "utf8",
+    );
+    fs.renameSync(tmp, file);
+  } catch (e) {
+    console.warn(
+      "[sync] us publication mirror write failed:",
+      e instanceof Error ? e.message : String(e),
+    );
+  }
+}
+
+const PUBLISH_INFLIGHT_KEY = Symbol.for("invest-manager.sync.publish-inflight");
+const publishInflight: Map<string, Promise<PublishOutcome>> = ((
+  globalThis as unknown as Record<symbol, Map<string, Promise<PublishOutcome>> | undefined>
+)[PUBLISH_INFLIGHT_KEY] ??= new Map());
+
+/** 发布入口：同一 type 串行（`Product_stage_<type>` 是固定表名，不能并发互删）。
+ *  现有 `syncType` 与 `/api/sync/us-snapshot` 共用这一条路径、同一套保护与事务。 */
+export async function publishProducts(
+  type: string,
+  data: ProductListPayload,
+  opts: { snapshotId?: string | null } = {},
+): Promise<PublishOutcome> {
+  const prior = publishInflight.get(type);
+  if (prior) {
+    // 同一 type 的并发请求排队执行；不同 snapshotId 各自拿自己的结果，不共享第一份 Promise。
+    const run = prior.catch(() => undefined).then(() => _publishProducts(type, data, opts));
+    publishInflight.set(type, run);
+    try {
+      return await run;
+    } finally {
+      if (publishInflight.get(type) === run) publishInflight.delete(type);
+    }
+  }
+  const run = _publishProducts(type, data, opts);
+  publishInflight.set(type, run);
+  try {
+    return await run;
+  } finally {
+    if (publishInflight.get(type) === run) publishInflight.delete(type);
+  }
+}
+
+async function _publishProducts(
+  type: string,
+  data: ProductListPayload,
+  opts: { snapshotId?: string | null } = {},
+): Promise<PublishOutcome> {
   const started = Date.now();
   let stageTableName: string | null = null;
   // 挂在 try 外面＝失败路径也要把点名结果交出去（`#95` 那一发恰恰是**失败**那一格读到的）
   let dupCodes: string[] | undefined;
+  const snapshotId =
+    opts.snapshotId ?? (typeof data.snapshotId === "string" ? data.snapshotId : null);
   try {
-    // 超时说明（2026-09-20）：港股列表必须分页（东财 `clist/get` 对港股忽略大分页参数，
-    // 固定 100 条/页；约 4700 只 → 48 页），且每页经源族限速器（最小间隔 5s）
-    // → 最坏约 4 分钟。原 180s 会在港股同步时必然超时，故放宽到 600s。
-    // 11-12 美股乙：预算改按类型取（productsBudgetMs）——us 全量（上限 950 页）名义 ≈950s，
-    // 600s 共用预算装不下；us 1800s／其余仍 600s，常量住 lib/data-service.ts。
-    const data = await dsGet<{
-      count: number;
-      products: ProductPayload[];
-      // CR9-31：data-service 对列表载荷显式声明出网源（走内部备源时另带 degraded/note）。
-      // 覆盖面因降级而缩水这件事，此前消费侧只能靠条数猜——见下面缩水保护那段。
-      source?: string;
-      degraded?: boolean;
-      note?: string;
-      // #35／CR9-63：只有完整采集后的产品口径子集才允许通过下面的缩水闸。
-      intentionalSubset?: boolean;
-      // CR10-40：采集完整性与产品口径是两个事实；前者显式为假时没有任何提交资格。
-      acquisitionComplete?: boolean;
-      productPolicySubset?: boolean;
-      declaredCount?: number;
-      acquiredCount?: number;
-    }>("/products", { type }, productsBudgetMs(type));
     // 不完整候选不是“有意子集”。这一闸在随机 id、去重、读库计数和暂存表之前，
     // 保证即使上游误把 products 与 intentionalSubset 一起带回，也绝不写正式 Product。
     if (data.acquisitionComplete === false) {
-      return {
-        type,
-        error:
-          "incomplete acquisition candidate rejected, existing data kept" +
+      throw new PublishRejected(
+        "incomplete acquisition candidate rejected, existing data kept" +
           `${data.note ? `：${data.note}` : ""}`,
-        tookMs: Date.now() - started,
-      };
+      );
     }
     if (data.intentionalSubset && data.productPolicySubset === false) {
-      return {
-        type,
-        error: "non-product subset cannot bypass shrink guard, existing data kept",
-        tookMs: Date.now() - started,
-      };
+      throw new PublishRejected(
+        "non-product subset cannot bypass shrink guard, existing data kept",
+      );
     }
+
+    // CR10-49：同一 snapshotId 已发布 ⇒ 只回执。真正的判据是 SQLite 同事务账本；
+    // 这一步是快路径，避免为一次重试再写暂存表、再读一次全量计数。
+    if (snapshotId) {
+      await ensurePublicationTable();
+      const published = await readPublication(snapshotId);
+      if (published) {
+        const count = Number(published.count) || 0;
+        recordPublicationMirror({
+          snapshotId,
+          type,
+          count,
+          publishedAt: String(published.publishedAt ?? new Date().toISOString()),
+          alreadyPublished: true,
+        });
+        return {
+          ok: true,
+          type,
+          count,
+          snapshotId,
+          alreadyPublished: true,
+          tookMs: Date.now() - started,
+        };
+      }
+    }
+
     let rows = (data.products ?? []).map((p) => ({
       id: randomUUID(),
       type: p.type,
@@ -270,11 +450,7 @@ async function _syncTypeInner(type: string): Promise<SyncResult> {
 
     // 空载荷保护（C1）：全量替换前必须判空——上游返回空列表时保留旧数据
     if (rows.length === 0) {
-      return {
-        type,
-        error: "empty payload from data-service, existing data kept",
-        tookMs: Date.now() - started,
-      };
+      throw new PublishRejected("empty payload from data-service, existing data kept");
     }
 
     // 降级缩水保护（G2 引入，2026-09-20 集成验收发现）：
@@ -299,6 +475,8 @@ async function _syncTypeInner(type: string): Promise<SyncResult> {
           ? `data-service 已声明降级：source=${data.source ?? "?"}——${data.note ?? "（无说明）"}`
           : "疑似降级备源覆盖度不足";
         return {
+          ok: false,
+          rejected: true,
           type,
           error:
             `payload shrunk (${rows.length} < ${existingCount} 的 70%)，` +
@@ -344,16 +522,65 @@ async function _syncTypeInner(type: string): Promise<SyncResult> {
       );
     }
 
-    await prisma.$transaction(
+    // CR10-49：发布账本与 Product 替换在**同一个事务**里。响应丢失后的重试会在这里
+    // 再次看到同一个 snapshotId ⇒ 直接回执，不再删/插 Product。
+    const txOutcome = ((await prisma.$transaction(
       async (tx) => {
+        if (snapshotId) {
+          const seen = await tx.$queryRawUnsafe<PublicationRow[]>(
+            `SELECT "snapshotId", "type", "count", "publishedAt"
+               FROM "${PUBLICATION_TABLE}" WHERE "snapshotId" = ? LIMIT 1`,
+            snapshotId,
+          );
+          if (seen.length > 0) {
+            return {
+              alreadyPublished: true,
+              count: Number(seen[0].count) || rows.length,
+              publishedAt: String(seen[0].publishedAt ?? new Date().toISOString()),
+            };
+          }
+          await tx.$executeRawUnsafe(
+            `INSERT INTO "${PUBLICATION_TABLE}" ("snapshotId","type","count","publishedAt")
+             VALUES (?,?,?,?)`,
+            snapshotId,
+            type,
+            rows.length,
+            new Date(),
+          );
+        }
         await tx.$executeRawUnsafe(`DELETE FROM "Product" WHERE type = ?`, type);
         await tx.$executeRawUnsafe(
           `INSERT INTO "Product" ("${cols}")
            SELECT "${cols}" FROM "${table}"`,
         );
+        return { alreadyPublished: false };
       },
       { timeout: 120_000, maxWait: 30_000 },
-    );
+    )) as { alreadyPublished?: boolean; count?: number; publishedAt?: string } | undefined) ?? {
+      alreadyPublished: false,
+    };
+
+    if (txOutcome.alreadyPublished) {
+      const count = txOutcome.count ?? rows.length;
+      if (snapshotId) {
+        recordPublicationMirror({
+          snapshotId,
+          type,
+          count,
+          publishedAt: txOutcome.publishedAt ?? new Date().toISOString(),
+          alreadyPublished: true,
+        });
+      }
+      return {
+        ok: true,
+        type,
+        count,
+        snapshotId,
+        alreadyPublished: true,
+        tookMs: Date.now() - started,
+      };
+    }
+
     // 暂存表清理统一放到 finally（成功/失败都要 DROP，避免失败时残留全量数据）
     await rebuildFts(type);
     // 刀 3/甲-1（2026-10-02）：**这里不再刷行情快照**。R14 的刷新曾是同步事务的收尾一步
@@ -375,9 +602,27 @@ async function _syncTypeInner(type: string): Promise<SyncResult> {
     if (shrinkByDeclaration) {
       note = note ? `${note}；${shrinkByDeclaration}` : shrinkByDeclaration;
     }
-    return { type, count: rows.length, note, dupCodes, tookMs: Date.now() - started };
+    if (snapshotId) {
+      recordPublicationMirror({
+        snapshotId,
+        type,
+        count: rows.length,
+        publishedAt: new Date().toISOString(),
+      });
+    }
+    return {
+      ok: true,
+      type,
+      count: rows.length,
+      note,
+      dupCodes,
+      ...(snapshotId ? { snapshotId } : {}),
+      tookMs: Date.now() - started,
+    };
   } catch (e) {
     return {
+      ok: false,
+      rejected: e instanceof PublishRejected,
       type,
       error: e instanceof Error ? e.message : String(e),
       dupCodes,
@@ -393,6 +638,58 @@ async function _syncTypeInner(type: string): Promise<SyncResult> {
         // 清理失败不影响同步结果
       }
     }
+  }
+}
+
+async function _syncTypeInner(type: string): Promise<SyncResult> {
+  const started = Date.now();
+  try {
+    // 超时说明（2026-09-20）：港股列表必须分页（东财 `clist/get` 对港股忽略大分页参数，
+    // 固定 100 条/页；约 4700 只 → 48 页），且每页经源族限速器（最小间隔 5s）
+    // → 最坏约 4 分钟。原 180s 会在港股同步时必然超时，故放宽到 600s。
+    // 11-12 美股乙：预算改按类型取（productsBudgetMs）——us 全量（上限 950 页）名义 ≈950s，
+    // 600s 共用预算装不下；us 1800s／其余仍 600s，常量住 lib/data-service.ts。
+    const data = await dsGet<ProductListPayload & {
+      // CR10-49：未准备好不是失败；`/products?type=us` 会回 200 + collecting。
+      collecting?: boolean;
+      state?: string;
+      progress?: { resolvedPages?: number; requiredPages?: number } | null;
+    }>("/products", { type }, productsBudgetMs(type));
+    if (data.collecting) {
+      return {
+        type,
+        collecting: true,
+        jobState: data.state,
+        snapshotId: data.snapshotId ?? null,
+        progress: data.progress ?? null,
+        note: data.note,
+        tookMs: Date.now() - started,
+      };
+    }
+    const published = await publishProducts(type, data);
+    if (!published.ok) {
+      return {
+        type,
+        error: published.error,
+        dupCodes: published.dupCodes,
+        tookMs: published.tookMs,
+      };
+    }
+    return {
+      type,
+      count: published.count,
+      note: published.note,
+      dupCodes: published.dupCodes,
+      snapshotId: published.snapshotId,
+      alreadyPublished: published.alreadyPublished,
+      tookMs: published.tookMs,
+    };
+  } catch (e) {
+    return {
+      type,
+      error: e instanceof Error ? e.message : String(e),
+      tookMs: Date.now() - started,
+    };
   }
 }
 

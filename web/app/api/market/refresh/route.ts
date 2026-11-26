@@ -50,11 +50,39 @@ export async function POST(req: NextRequest) {
   // 没有批量接口，`openbb.get_quotes` 对超限直接声明"这一家不做"），它不打东财、不进
   // `EM_SNAPSHOT_TYPES` ⇒ 这批不限速也不占东财桶。
   const SNAPSHOT_TYPES = ["stock", "fund", "bond", "crypto", "hk", "us"];
-  const types =
+  // CR10-49：普通轮排除 us——us 的完整候选由持久化任务发布后**单独**刷新，
+  // 不能拿还没换过的旧 us 行陪跑五类。`exclude` 只收已知类型，未知值直接 400。
+  const excludeRaw = req.nextUrl.searchParams.get("exclude") ?? "";
+  const exclude = excludeRaw
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const invalidExclude = exclude.filter((t) => !SNAPSHOT_TYPES.includes(t));
+  if (invalidExclude.length > 0) {
+    return NextResponse.json(
+      { error: `unsupported exclude: ${invalidExclude.join(",")}` },
+      { status: 400 },
+    );
+  }
+  const baseTypes =
     type === "all" ? SNAPSHOT_TYPES : SNAPSHOT_TYPES.includes(type) ? [type] : null;
-  if (!types) {
+  if (!baseTypes) {
     return NextResponse.json({ error: `unsupported type: ${type}` }, { status: 400 });
   }
+  const types = baseTypes.filter((t) => !exclude.includes(t));
+  if (types.length === 0) {
+    return NextResponse.json(
+      { error: "exclude removed every refresh type" },
+      { status: 400 },
+    );
+  }
+  // CR10-49：同一份进度文件要能同时装下“普通轮五类”和“us 发布后单独一轮”。
+  // runId 非法直接 400，避免两轮用同一个键互相覆盖。
+  const runIdRaw = req.nextUrl.searchParams.get("runId");
+  if (runIdRaw && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/.test(runIdRaw)) {
+    return NextResponse.json({ error: "invalid runId" }, { status: 400 });
+  }
+  const runId = runIdRaw || undefined;
   const started = Date.now();
   // #23 当日幂等闸门：这一条腿才是甲-1 之后**真正贵的那条**（10-01 实测 fund 的 280 个
   // 净值批次单独 ≈1,700s），判据＝该类今日有没有 `snapshotAt`；逐类各自判 ⇒
@@ -62,18 +90,21 @@ export async function POST(req: NextRequest) {
   const force = req.nextUrl.searchParams.get("force") === "1";
   // #33 甲／CR9-60：起跑先落一次进度（"这一轮开始了、要刷哪几类"），随后**每完成一类**
   // 覆写一次，收尾时置 completed/failed。连接被中途重置时响应体没了，这份文件还在。
-  startRefreshProgress(types);
+  startRefreshProgress(types, runId);
   try {
     // 单类型也走 `refreshAll`（它就是一个顺序循环）：不是为了少写一行，是因为逐类回调
     // 只有在这条路上才有——分两条路就会有一类刷新没有进度记录。
-    const results = await refreshAll(types, { force, onResult: recordRefreshResult });
-    finishRefreshProgress("completed");
+    const results = await refreshAll(types, {
+      force,
+      onResult: (result) => recordRefreshResult(result, runId),
+    });
+    finishRefreshProgress("completed", runId);
     return NextResponse.json({
       tookMs: Date.now() - started,
       results,
     });
   } catch (e) {
-    finishRefreshProgress("failed");
+    finishRefreshProgress("failed", runId);
     return NextResponse.json(
       { error: e instanceof Error ? e.message : "snapshot refresh failed" },
       { status: 500 },

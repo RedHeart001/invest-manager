@@ -30,6 +30,9 @@ export type RefreshProgress = {
   startedAt: string;
   /** 写入本轮状态的 Web 进程；旧文件缺省时不据此猜中断。 */
   ownerPid?: number;
+  /** CR10-49：本轮标识。普通轮 `daily-<北京日>`、美股发布后 `us-<snapshotId>`。
+   *  旧文件没有这个键 ⇒ 读侧回落到顶层，不影响既有行为。 */
+  runId?: string;
   /** 本轮被要求刷的类型（顺序即执行顺序） */
   types: string[];
   /** 正在刷的那一类；全部跑完为 null */
@@ -46,8 +49,15 @@ export type RefreshProgress = {
    * 只按 `snapshotAt` 判就会整天都被挡下，而库里 28,013 只里只有 3,500 只有价。
    * 跨轮合并、`startRefreshProgress` 不许抹掉它：否则后来一次单类型刷新会把
    * 前一晚"stock 已完成"的证据清掉，那次刷新就白烧。
+   * CR10-49 起它是**全局账本**（顶层），`runs` 里的每一轮共享同一份。
    */
   lastCompleted: Record<string, string>;
+};
+
+/** 磁盘文件的顶层形状：`RefreshProgress` 是“最近写入的那一轮”（旧读侧兼容），
+ *  `runs` 按 runId 保存每一轮的独立进度。CR10-49 之前没有 `runs`。 */
+export type RefreshProgressFile = RefreshProgress & {
+  runs?: Record<string, RefreshProgress>;
 };
 
 export type RefreshProgressView = Omit<RefreshProgress, "outcome"> & {
@@ -69,30 +79,81 @@ function progressFile(): string {
   return process.env.REFRESH_PROGRESS_FILE || path.join(process.cwd(), "runtime", "refresh-progress.json");
 }
 
-function writeProgress(p: RefreshProgress): void {
+/** 最多保留多少轮独立进度；超出按 `startedAt` 淘汰最旧的（观测文件，不当事务日志）。 */
+const MAX_RUNS = 50;
+
+function readProgressFile(): RefreshProgressFile | null {
   try {
+    const obj = JSON.parse(fs.readFileSync(progressFile(), "utf8")) as unknown;
+    if (!obj || typeof obj !== "object" || Array.isArray(obj)) return null;
+    const p = obj as Partial<RefreshProgressFile>;
+    if (!Array.isArray(p.done) || !Array.isArray(p.types)) return null;
+    // `lastCompleted` 是 CR9-61 才加的字段：老文件里没有它属于正常，补空对象而不是判"读不到"
+    return { ...p, lastCompleted: p.lastCompleted ?? {} } as RefreshProgressFile;
+  } catch {
+    return null;
+  }
+}
+
+function resolveRunKey(file: RefreshProgressFile | null, runId?: string): string {
+  // 没显式给 runId 时沿用盘上最近一轮的标识；旧文件没有 runId ⇒ 用 "default"。
+  return runId || file?.runId || "default";
+}
+
+function pickRun(file: RefreshProgressFile | null, runKey: string): RefreshProgress | null {
+  const run = file?.runs?.[runKey];
+  if (run) return run;
+  if (file?.runId === runKey) return file;
+  return null;
+}
+
+function writeProgress(
+  runKey: string,
+  run: RefreshProgress,
+  previous: RefreshProgressFile | null,
+  lastCompleted: Record<string, string>,
+): void {
+  try {
+    const runs = { ...(previous?.runs ?? {}) };
+    runs[runKey] = { ...run, runId: runKey, lastCompleted };
+    const keys = Object.keys(runs);
+    if (keys.length > MAX_RUNS) {
+      const oldest = keys
+        .filter((key) => key !== runKey)
+        .sort((a, b) =>
+          String(runs[a]?.startedAt ?? "").localeCompare(String(runs[b]?.startedAt ?? "")),
+        );
+      for (const key of oldest.slice(0, keys.length - MAX_RUNS)) delete runs[key];
+    }
+    // 顶层继续是“最近写入的那一轮”，旧读侧（health 无 runId、既有测试）行为不变；
+    // `runs` 才是 CR10-49 并发两轮（daily 五类 + us 独立）互不覆盖的隔离层。
+    const top: RefreshProgressFile = {
+      ...run,
+      runId: runKey,
+      runs,
+      lastCompleted,
+    };
     const file = progressFile();
     fs.mkdirSync(path.dirname(file), { recursive: true });
     const tmp = `${file}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify(p), "utf8");
+    fs.writeFileSync(tmp, JSON.stringify(top), "utf8");
     fs.renameSync(tmp, file);
   } catch (e) {
     console.warn("[refresh-progress] write failed:", e instanceof Error ? e.message : String(e));
   }
 }
 
-/** 读不到就 null（没有文件／半截／被手改坏都算"没有进度可读"，不抛——健康检查不许因此 503）。 */
-export function readRefreshProgress(): RefreshProgress | null {
-  try {
-    const obj = JSON.parse(fs.readFileSync(progressFile(), "utf8")) as unknown;
-    if (!obj || typeof obj !== "object") return null;
-    const p = obj as Partial<RefreshProgress>;
-    if (!Array.isArray(p.done) || !Array.isArray(p.types)) return null;
-    // `lastCompleted` 是 CR9-61 才加的字段：老文件里没有它属于正常，补空对象而不是判"读不到"
-    return { ...p, lastCompleted: p.lastCompleted ?? {} } as RefreshProgress;
-  } catch {
-    return null;
-  }
+/** 读不到就 null（没有文件／半截／被手改坏都算"没有进度可读"，不抛——健康检查不许因此 503）。
+ *  `runId` 缺省＝顶层最近一轮（旧行为）；给了则只回那一轮，找不到也回 null，
+ *  不拿别的轮的进度冒充。 */
+export function readRefreshProgress(runId?: string): RefreshProgress | null {
+  const file = readProgressFile();
+  if (!file) return null;
+  if (!runId) return file;
+  const run = file.runs?.[runId];
+  if (run) return { ...run, lastCompleted: file.lastCompleted };
+  if (file.runId === runId) return file;
+  return null;
 }
 
 function ownerAlive(pid: number | undefined): boolean | null {
@@ -109,8 +170,8 @@ function ownerAlive(pid: number | undefined): boolean | null {
 }
 
 /** 仅健康检查的展示视图：owner 进程已消失时，未收尾 running 是中断残留。 */
-export function refreshProgressView(): RefreshProgressView | null {
-  const progress = readRefreshProgress();
+export function refreshProgressView(runId?: string): RefreshProgressView | null {
+  const progress = readRefreshProgress(runId);
   if (!progress || progress.outcome !== "running" || ownerAlive(progress.ownerPid) !== false) return progress;
   return {
     ...progress,
@@ -121,26 +182,37 @@ export function refreshProgressView(): RefreshProgressView | null {
 }
 
 /** 刷新腿起跑时写一次 ⇒ "这一轮开始了、打算刷哪几类"从第一毫秒就可读。 */
-export function startRefreshProgress(types: string[]): void {
-  const prev = readRefreshProgress();
-  writeProgress({
-    startedAt: nowIso(),
-    ownerPid: process.pid,
-    types,
-    current: types[0] ?? null,
-    done: [],
-    outcome: "running",
-    finishedAt: null,
-    // **跨轮合并**：新轮开始不许把"昨天/上一轮已完成哪几类"抹掉。否则会出这样一个洞：
-    // 早上手动补一次 `?type=fund`，那份文件就只剩 fund，而当晚 stock 的完成证据没了 ⇒
-    // 闸门按第二半判据会把 stock 再刷一遍（＝白烧一整份东财行情批次）。
-    lastCompleted: prev?.lastCompleted ?? {},
-  });
+export function startRefreshProgress(types: string[], runId?: string): void {
+  const file = readProgressFile();
+  const runKey = resolveRunKey(file, runId);
+  // **跨轮合并**：新轮开始不许把"昨天/上一轮已完成哪几类"抹掉。否则会出这样一个洞：
+  // 早上手动补一次 `?type=fund`，那份文件就只剩 fund，而当晚 stock 的完成证据没了 ⇒
+  // 闸门按第二半判据会把 stock 再刷一遍（＝白烧一整份东财行情批次）。
+  // CR10-49 起这份账本是**全局**的，`runs` 只隔离“跑到第几类”，不隔离完成账本。
+  const lastCompleted = file?.lastCompleted ?? {};
+  writeProgress(
+    runKey,
+    {
+      startedAt: nowIso(),
+      ownerPid: process.pid,
+      runId: runKey,
+      types,
+      current: types[0] ?? null,
+      done: [],
+      outcome: "running",
+      finishedAt: null,
+      lastCompleted,
+    },
+    file,
+    lastCompleted,
+  );
 }
 
 /** 每完成一类覆写一次。`done` 从**盘上**接着写，不是从模块内存：HMR/重启后仍能续上。 */
-export function recordRefreshResult(result: SnapshotResult): void {
-  const prev = readRefreshProgress();
+export function recordRefreshResult(result: SnapshotResult, runId?: string): void {
+  const file = readProgressFile();
+  const runKey = resolveRunKey(file, runId);
+  const prev = pickRun(file, runKey);
   const done = [...(prev?.done ?? []), result];
   const types = prev?.types?.length ? prev.types : [result.type];
   // #36／CR9-64（主人 10-05 取「甲」）：**账本只记真写入了行的那一轮**。
@@ -150,37 +222,55 @@ export function recordRefreshResult(result: SnapshotResult): void {
   // `skippedReason` 里的「整轮跑完于…」此时会说出一件没发生过的事。
   // 所以这里不是把盖章删掉，是把它绑到"这一轮确实写了行"上：**没有写入 ⇒ 不动账本**
   // （既新增不了，也覆盖不了已有的首次时刻）。
-  const lastCompleted = prev?.lastCompleted ?? {};
+  const lastCompleted = { ...(file?.lastCompleted ?? prev?.lastCompleted ?? {}) };
   // CR10-23：写入过行只证明有进度，不证明整类完成。部分失败仍保留在 done 供归因，
   // 但不得推进当日完成账本，否则下一次普通触发会被幂等闸门挡住，无法续跑。
   if (result.updated > 0 && result.failedBatches === 0 && !result.skipped) {
     lastCompleted[result.type] = nowIso();
   }
-  writeProgress({
-    startedAt: prev?.startedAt ?? nowIso(),
-    ownerPid: prev?.ownerPid ?? process.pid,
-    types,
-    done,
-    current: done.length < types.length ? types[done.length] : null,
-    outcome: "running",
-    finishedAt: null,
+  writeProgress(
+    runKey,
+    {
+      startedAt: prev?.startedAt ?? nowIso(),
+      ownerPid: prev?.ownerPid ?? process.pid,
+      runId: runKey,
+      types,
+      done,
+      current: done.length < types.length ? types[done.length] : null,
+      outcome: "running",
+      finishedAt: null,
+      lastCompleted,
+    },
+    file,
     lastCompleted,
-  });
+  );
 }
 
 /** 收尾（含异常收尾）。没有起跑记录也不抛——至少留下"有一个请求在这里结束"。 */
-export function finishRefreshProgress(outcome: "completed" | "failed"): void {
-  const prev = readRefreshProgress();
-  writeProgress({
-    startedAt: prev?.startedAt ?? nowIso(),
-    ownerPid: prev?.ownerPid ?? process.pid,
-    types: prev?.types ?? [],
-    done: prev?.done ?? [],
-    current: null,
-    outcome,
-    finishedAt: nowIso(),
-    lastCompleted: prev?.lastCompleted ?? {},
-  });
+export function finishRefreshProgress(
+  outcome: "completed" | "failed",
+  runId?: string,
+): void {
+  const file = readProgressFile();
+  const runKey = resolveRunKey(file, runId);
+  const prev = pickRun(file, runKey);
+  const lastCompleted = file?.lastCompleted ?? prev?.lastCompleted ?? {};
+  writeProgress(
+    runKey,
+    {
+      startedAt: prev?.startedAt ?? nowIso(),
+      ownerPid: prev?.ownerPid ?? process.pid,
+      runId: runKey,
+      types: prev?.types ?? [],
+      done: prev?.done ?? [],
+      current: null,
+      outcome,
+      finishedAt: nowIso(),
+      lastCompleted,
+    },
+    file,
+    lastCompleted,
+  );
 }
 
 /**

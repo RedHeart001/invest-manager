@@ -11,9 +11,27 @@ import { requireWriteToken } from "@/lib/guard";
 // 本端点只剩"取列表＋落库＋重建 FTS"。
 // 11-12 美股乙：us 列表全量（上限 950 页、早停按实盘）名义 ≈950s，加其余五类（10-17 基线
 // ≈540s＋stock 修复后 324s）⇒ 整轮名义 ≈1506s、最坏（各类都撞重试）≈2086s ⇒ 上调至 2400s（40min）。
+// CR10-49（2026-11-26）：普通轮不再背 us 的 923 页——us 由 DS 持久化任务按页落检查点，
+// 本端点通常只收五类（`?types=fund,stock,bond,crypto,hk`）；手动 `?type=us` 仍可走，
+// 但未准备好时回 `collecting:true` 而不是失败。
 // 自托管下 maxDuration 为声明性（无 serverless 强制），仍小于 ds 侧 SCHEDULED 回调预算
 // 2500s，维持"web 先结束、ds 不把已成功的同步误记为失败"的口径。
 export const maxDuration = 2400;
+
+function parseTypes(req: NextRequest): { present: boolean; types: string[] | null; invalid: string[] } {
+  if (!req.nextUrl.searchParams.has("types")) {
+    return { present: false, types: null, invalid: [] };
+  }
+  const raw = req.nextUrl.searchParams.get("types") ?? "";
+  const parts = raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const invalid = parts.filter((t) => !SYNC_TYPES.includes(t as (typeof SYNC_TYPES)[number]));
+  if (invalid.length > 0) return { present: true, types: null, invalid };
+  // 去重但保持请求顺序；空串按“显式空名单”拒绝（避免静默变成 all）
+  return { present: true, types: parts.length ? [...new Set(parts)] : null, invalid: [] };
+}
 
 // 触发产品主数据同步（P3 起由 data-service 定时调度调用本接口）
 export async function POST(req: NextRequest) {
@@ -34,15 +52,38 @@ export async function POST(req: NextRequest) {
       { status: 400 },
     );
   }
+  // CR10-49：普通轮用 `?types=...` 明确排除 us；`?type=` 保留单类手动入口。
+  const requested = parseTypes(req);
+  if (requested.present && requested.types === null) {
+    return NextResponse.json(
+      {
+        error: `unsupported types: ${requested.invalid.join(",") || "(empty)"}`,
+      },
+      { status: 400 },
+    );
+  }
   const started = Date.now();
   // #23 当日幂等闸门（主人 10-02 拍板"两道叠加"）：某类今日已成功落过列表 ⇒ 该类本轮
   // 零出网、零写库，结果里带 `skipped:true`（**不是** error，所以 `ok` 仍为真）。
   // 出口 `?force=1` 给"我今天就是要重跑一遍"（手测前刷数据、以及 ds 侧的透传）。
   const force = req.nextUrl.searchParams.get("force") === "1";
-  const results = type ? [await syncType(type, { force })] : await syncAll(SYNC_TYPES, { force });
+  const types = type ? [type] : (requested.types ?? [...SYNC_TYPES]);
+  const results = types.length === 1
+    ? [await syncType(types[0], { force })]
+    : await syncAll(types, { force });
+  const collecting = results.filter((r) => r.collecting);
   return NextResponse.json({
     tookMs: Date.now() - started,
     results,
-    ok: results.every((r) => !r.error),
+    // CR10-49：collecting 既不是成功也不是失败。整轮 `ok` 不能因为“没有 error”
+    // 就写成 true——DS 侧靠这个值区分 completed / collecting / partial_failed。
+    ok: results.every((r) => !r.error && !r.collecting),
+    ...(collecting.length > 0
+      ? {
+          collecting: true,
+          collectingTypes: collecting.map((r) => r.type),
+          note: "美股完整名单仍在持久化采集中；不是失败，旧数据继续可用。",
+        }
+      : {}),
   });
 }

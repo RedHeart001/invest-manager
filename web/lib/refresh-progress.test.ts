@@ -317,3 +317,150 @@ describe("刷新腿进度状态位（CR9-60／#33 甲）", () => {
     expect(hasCompletionLedger()).toBe(false);
   });
 });
+
+describe("CR10-49：runId/runs 并发轮次隔离", () => {
+  let dir = "";
+  let prevEnv: string | undefined;
+
+  beforeEach(() => {
+    prevEnv = process.env.REFRESH_PROGRESS_FILE;
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "rp-runs-"));
+    process.env.REFRESH_PROGRESS_FILE = path.join(dir, "refresh-progress.json");
+  });
+
+  afterEach(() => {
+    if (prevEnv === undefined) delete process.env.REFRESH_PROGRESS_FILE;
+    else process.env.REFRESH_PROGRESS_FILE = prevEnv;
+    fs.rmSync(dir, { recursive: true, force: true });
+    vi.restoreAllMocks();
+  });
+
+  const daily = "daily-2026-11-26";
+  const usRun = "us-20261126-020000-abcdef";
+
+  it("普通轮与 us 独立轮各写各的：后起跑的一轮不覆盖前一轮的 current/done", () => {
+    startRefreshProgress(TYPES, daily);
+    recordRefreshResult(res("stock"), daily);
+
+    startRefreshProgress(["us"], usRun);
+    recordRefreshResult(res("us"), usRun);
+
+    const d = readRefreshProgress(daily);
+    expect(d?.types).toEqual(TYPES);
+    expect(d?.done.map((x) => x.type)).toEqual(["stock"]);
+    expect(d?.current).toBe("fund");
+    expect(d?.outcome).toBe("running");
+
+    const u = readRefreshProgress(usRun);
+    expect(u?.types).toEqual(["us"]);
+    expect(u?.done.map((x) => x.type)).toEqual(["us"]);
+    expect(u?.current).toBe(null);
+
+    // 顶层仍是“最近写入的一轮”，旧读侧（health 不带 runId）形态不变
+    expect(readRefreshProgress()?.runId).toBe(usRun);
+    const raw = JSON.parse(fs.readFileSync(file(), "utf8"));
+    expect(Object.keys(raw.runs).sort()).toEqual([daily, usRun].sort());
+    expect(raw.runs[daily].runId).toBe(daily);
+    expect(raw.runs[usRun].runId).toBe(usRun);
+  });
+
+  it("收尾只收自己那一轮：us completed 不把还在跑的 daily 写成 completed", () => {
+    startRefreshProgress(TYPES, daily);
+    recordRefreshResult(res("stock"), daily);
+    startRefreshProgress(["us"], usRun);
+    recordRefreshResult(res("us"), usRun);
+
+    finishRefreshProgress("completed", usRun);
+    expect(readRefreshProgress(usRun)?.outcome).toBe("completed");
+    expect(readRefreshProgress(usRun)?.finishedAt).toEqual(expect.any(String));
+    expect(readRefreshProgress(daily)?.outcome).toBe("running");
+    expect(readRefreshProgress(daily)?.finishedAt).toBe(null);
+
+    // 反向：daily 后收尾也不改写已完成的 us
+    const usFinishedAt = readRefreshProgress(usRun)?.finishedAt;
+    finishRefreshProgress("completed", daily);
+    expect(readRefreshProgress(daily)?.outcome).toBe("completed");
+    expect(readRefreshProgress(usRun)?.outcome).toBe("completed");
+    expect(readRefreshProgress(usRun)?.finishedAt).toBe(usFinishedAt);
+  });
+
+  it("lastCompleted 是全局账本：两轮各自盖章，互相都读得到", () => {
+    startRefreshProgress(TYPES, daily);
+    recordRefreshResult(res("stock"), daily);
+    const stockAt = readRefreshProgress(daily)?.lastCompleted.stock;
+    expect(typeof stockAt).toBe("string");
+
+    startRefreshProgress(["us"], usRun);
+    recordRefreshResult(res("us"), usRun);
+    const usAt = readRefreshProgress(usRun)?.lastCompleted.us;
+    expect(typeof usAt).toBe("string");
+
+    expect(readRefreshProgress(daily)?.lastCompleted.us).toBe(usAt);
+    expect(readRefreshProgress(usRun)?.lastCompleted.stock).toBe(stockAt);
+    expect(readRefreshProgress()?.lastCompleted).toMatchObject({ stock: stockAt, us: usAt });
+    expect(completedToday("stock")).toBe(true);
+    expect(completedToday("us")).toBe(true);
+  });
+
+  it("🔁 未知 runId 回 null，不拿顶层/别的轮冒充", () => {
+    startRefreshProgress(TYPES, daily);
+    recordRefreshResult(res("stock"), daily);
+    expect(readRefreshProgress("us-never-started")).toBe(null);
+    expect(refreshProgressView("us-never-started")).toBe(null);
+    expect(readRefreshProgress(daily)?.runId).toBe(daily);
+  });
+
+  it("旧文件没有 runs：不带 runId 照旧读顶层（兼容），显式 runId 不猜", () => {
+    const legacy = {
+      startedAt: "2026-11-25T18:00:00.000Z",
+      ownerPid: process.pid,
+      types: ["stock"],
+      current: null,
+      done: [res("stock")],
+      outcome: "completed",
+      finishedAt: "2026-11-25T18:10:00.000Z",
+      lastCompleted: { stock: "2026-11-25T18:10:00.000Z" },
+    };
+    fs.writeFileSync(file(), JSON.stringify(legacy), "utf8");
+    expect(readRefreshProgress()?.outcome).toBe("completed");
+    expect(readRefreshProgress()?.lastCompleted.stock).toBe(legacy.lastCompleted.stock);
+    expect(readRefreshProgress("default")).toBe(null);
+
+    // 旧文件上开新一轮：写进 runs.default，顶层照旧是最近一轮
+    startRefreshProgress(["fund"]);
+    const raw = JSON.parse(fs.readFileSync(file(), "utf8"));
+    expect(raw.runId).toBe("default");
+    expect(raw.runs.default.types).toEqual(["fund"]);
+    expect(readRefreshProgress("default")?.lastCompleted.stock).toBe(legacy.lastCompleted.stock);
+  });
+
+  it("runs 上限 50：超出淘汰最旧，当前轮与最近轮保留", () => {
+    for (let i = 0; i < 52; i += 1) {
+      startRefreshProgress(["stock"], `run-${String(i).padStart(2, "0")}`);
+    }
+    const raw = JSON.parse(fs.readFileSync(file(), "utf8"));
+    const keys = Object.keys(raw.runs);
+    expect(keys).toHaveLength(50);
+    expect(keys).toContain("run-51");
+    expect(keys).toContain("run-50");
+    expect(keys).not.toContain("run-00");
+    expect(keys).not.toContain("run-01");
+  });
+
+  it("并发交错写入不丢另一轮的 done（daily 跑完 stock 后 us 插队再收尾）", () => {
+    startRefreshProgress(TYPES, daily);
+    recordRefreshResult(res("stock"), daily);
+
+    startRefreshProgress(["us"], usRun);
+    recordRefreshResult(res("us"), usRun);
+    finishRefreshProgress("completed", usRun);
+
+    // daily 继续跑：fund/bond 落在 daily，us 那一轮不动
+    recordRefreshResult(res("fund"), daily);
+    recordRefreshResult(res("bond"), daily);
+    const d = readRefreshProgress(daily);
+    expect(d?.done.map((x) => x.type)).toEqual(["stock", "fund", "bond"]);
+    expect(d?.current).toBe("crypto");
+    expect(readRefreshProgress(usRun)?.done.map((x) => x.type)).toEqual(["us"]);
+  });
+});

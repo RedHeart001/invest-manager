@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 
 import { prisma } from "@/lib/prisma";
 import { refreshProgressView } from "@/lib/refresh-progress";
@@ -14,8 +14,11 @@ import { refreshProgressView } from "@/lib/refresh-progress";
 // 计数与时刻，**不含绝对路径**（与 #29 的 `state.json` 载荷口径一致）。
 export const dynamic = "force-dynamic";
 
-export async function GET() {
-  const refresh = refreshProgressView();
+export async function GET(req: NextRequest) {
+  // CR10-49：普通轮（五类）与 us 独立刷新并发时，按 runId 读各自那一份进度，
+  // 不再让后写的一轮把前一轮的“跑到第几类”覆盖掉。缺省仍是最近一轮（旧行为）。
+  const refreshRunId = req.nextUrl.searchParams.get("refreshRunId") || undefined;
+  const refresh = refreshProgressView(refreshRunId);
   try {
     await prisma.$queryRaw`SELECT 1`;
     return NextResponse.json({ status: "ok", db: "ok", refresh });
