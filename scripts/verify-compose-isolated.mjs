@@ -149,7 +149,14 @@ if (RUN) {
     join(ROOT, "web", "prisma", "dev.db"), join(ROOT, "web", "prisma", "dev.db-wal"), join(ROOT, "web", "prisma", "dev.db-shm"),
     join(ROOT, "web", "runtime"), join(ROOT, "data-service", "runtime"), join(ROOT, "backups"),
   ];
-  const before = treeStamp(protectedPaths);
+  // `data-service/runtime` 是**宿主侧监测进程**每 30 秒自写的目录（watcher 状态 + 容器日志副本），
+  // 而 compose 对它没有任何 bind mount ⇒ 容器在本机上根本写不进去。对它做逐字节前后比对，
+  // 只要当晚监测在跑就必定为红（11-27 装载验收实测），红的原因是检查器与监测抢同一目录，
+  // 不是隔离泄漏。⇒ 该目录只查"有没有新增/丢失文件"（隔离若真写到这里，形态是**新建**状态文件）。
+  const strictPaths = protectedPaths.filter((p) => p !== join(ROOT, "data-service", "runtime"));
+  const volatilePath = join(ROOT, "data-service", "runtime");
+  const before = treeStamp(strictPaths);
+  const volatileBefore = readdirSync(volatilePath).sort();
   must(compose(["up", "-d", "--no-build", "web", "data-service"]), "隔离 Compose 启动");
   await waitHealth();
   check("Web/DS 两容器健康", true);
@@ -187,13 +194,18 @@ with urllib.request.urlopen(req,timeout=15) as r: print(r.status, r.read().decod
 
   const webUid = must(compose(["exec", "-T", "web", "node", "-e", "console.log(process.getuid())"]), "Web UID").trim();
   check("Web 进程非 root", webUid === "1000", `uid=${webUid}`);
+  // 判据按**参数位**取，不做子串匹配：本脚本自己是 `python -c <文本>`，而文本里必然含
+  // `uvicorn app.main:app` 这串字面量 ⇒ 子串匹配会把这条 root 的内联进程算成"服务进程"，
+  // 11-27 装载验收当场撞上（`uid=0,1000`），且旧镜像同样复现 ⇒ 检查器自身的缺陷。
   const dsUidScript = `import os
 found=[]
 for pid in os.listdir('/proc'):
  if not pid.isdigit(): continue
  try:
-  cmd=open(f'/proc/{pid}/cmdline','rb').read().replace(b'\\0',b' ').decode()
-  if 'uvicorn app.main:app' in cmd:
+  argv=open(f'/proc/{pid}/cmdline','rb').read().split(b'\\0')
+  argv=[a.decode() for a in argv if a]
+  is_uvicorn=any(a=='uvicorn' or a.endswith('/uvicorn') for a in argv) and 'app.main:app' in argv
+  if is_uvicorn:
    status=dict(line.split(':',1) for line in open(f'/proc/{pid}/status') if ':' in line)
    found.append(int(status['Uid'].split()[0]))
  except (FileNotFoundError,ProcessLookupError,PermissionError): pass
@@ -214,12 +226,16 @@ print(','.join(map(str,sorted(set(found)))))`;
   must(execute("docker", ["volume", "create", restoreVolume]), "创建临时恢复卷");
   const restored = execute("docker", ["run", "--rm", "--network", "none", "-v", `${restoreVolume}:/data`, "-v", `${BACKUPS.replaceAll("\\", "/")}:/backup:ro`, DS_IMAGE, "python", "-m", "scripts.backup_db", "--restore", `/backup/${backupName}`, "--source", "/data/dev.db"]);
   must(restored, "恢复到独立临时卷");
-  const verifyRestore = execute("docker", ["run", "--rm", "--network", "none", "-v", `${restoreVolume}:/data`, DS_IMAGE, "python", "-c", "import sqlite3; c=sqlite3.connect('/data/dev.db'); print(c.execute(\\\"select summary from ResearchReport where code='A3SYNTH'\\\").fetchone()[0]); print(c.execute('pragma integrity_check').fetchone()[0])"]);
+  const verifyRestore = execute("docker", ["run", "--rm", "--network", "none", "-v", `${restoreVolume}:/data`, DS_IMAGE, "python", "-c", "import sqlite3; c=sqlite3.connect('/data/dev.db'); print(c.execute('select summary from ResearchReport where code=?', ('A3SYNTH',)).fetchone()[0]); print(c.execute('pragma integrity_check').fetchone()[0])"]);
   const restoreText = must(verifyRestore, "临时恢复卷只读核验");
   check("临时卷恢复含合成回调且完整性正常", restoreText.includes("不是真实研报") && restoreText.includes("ok"));
 
-  const after = treeStamp(protectedPaths);
+  const after = treeStamp(strictPaths);
   check("开发 DB/runtime/backups 前后指纹不变", JSON.stringify(before) === JSON.stringify(after));
+  const volatileAfter = readdirSync(volatilePath).sort();
+  const added = volatileAfter.filter((n) => !volatileBefore.includes(n));
+  const removed = volatileBefore.filter((n) => !volatileAfter.includes(n));
+  check("data-service/runtime 未新增或丢失文件（内容由宿主监测进程自写，不比对字节）", added.length === 0 && removed.length === 0, `added=${added.join(",")||"-"} removed=${removed.join(",")||"-"}`);
   console.log(`[run] ${checks}/${checks} 通过；项目=${PROJECT}，Web=http://127.0.0.1:${port}`);
   console.log(`[run] 现场、隔离容器/卷及临时恢复卷保留；未自动清理：${WORK}`);
 }
