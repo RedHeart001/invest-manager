@@ -41,6 +41,7 @@ from .providers.akshare_provider import (
     validate_us_snapshot,
     UsSnapshotChanged,
 )
+from .utils.http import direct_proxies, direct_session
 from .utils.timeutil import beijing_today
 
 log = logging.getLogger("us.list.job")
@@ -494,7 +495,7 @@ def _collect_once(trigger: str | None = None) -> dict:
     required = int(manifest.get("requiredPages") or 0) if declared else 0
     deadline = time.monotonic() + _burst_timeout_s()
     progressed = False
-    session = requests.Session() if hasattr(requests, "Session") else requests
+    session = direct_session(requests) if hasattr(requests, "Session") else requests
 
     try:
         if not declared:
@@ -580,7 +581,7 @@ def _collect_once(trigger: str | None = None) -> dict:
                     progressed=progressed,
                 )
             log.info("us list repair round %s: %s pages", repair_round + 1, len(failures))
-            repair_session = requests.Session() if hasattr(requests, "Session") else requests
+            repair_session = direct_session(requests) if hasattr(requests, "Session") else requests
             try:
                 for page in sorted(failures):
                     if time.monotonic() > deadline:
@@ -717,6 +718,7 @@ def _post_publish(candidate: dict) -> dict:
             json=candidate,
             timeout=_PUBLISH_TIMEOUT_S,
             headers=_write_headers(),
+            proxies=direct_proxies(),
         )
     except Exception as exc:  # noqa: BLE001 连接失败/超时都按“结果未知”重试
         raise _PublishTransient(f"{type(exc).__name__}: {exc}") from exc
@@ -816,6 +818,7 @@ def _post_refresh(snapshot_id: str) -> dict:
         f"{_web_base()}/api/market/refresh?type=us&runId=us-{snapshot_id}",
         timeout=_REFRESH_TIMEOUT_S,
         headers=_write_headers(),
+        proxies=direct_proxies(),
     )
     if response.status_code >= 300:
         raise RuntimeError(f"HTTP {response.status_code}: {response.text[:300]}")

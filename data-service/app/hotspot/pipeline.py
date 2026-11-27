@@ -24,6 +24,7 @@ from datetime import datetime
 import requests
 
 from ..config import load_env, search_api_key
+from ..utils.http import direct_proxies, overseas_proxies, overseas_session
 from ..utils.limiter import get_limiter
 from ..utils.timeout import run_with_timeout
 from ..utils.timeutil import beijing_today
@@ -69,13 +70,9 @@ def _tavily(limit: int) -> list[dict]:
     key = search_api_key()
     if not key:
         raise RuntimeError("no search key")
-    # 海外源：显式代理可用（R12），失败即降级
-    proxies = None
-    px = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
-    if px:
-        proxies = {"http": px, "https": px}
-    s = requests.Session()
-    s.trust_env = False
+    # 海外源：W1 起统一由 `utils/http.py` 声明代理（未配置返回 None ⇒ 与改造前一致）
+    proxies = overseas_proxies()
+    s = overseas_session()
     try:
 
         def _query(query: str, days: int) -> list[dict]:
@@ -1058,7 +1055,11 @@ def emit_ingest(payload: dict) -> dict:
     if INGEST_TOKEN:
         headers["x-ingest-token"] = INGEST_TOKEN
     r = requests.post(
-        f"{WEB_BASE_URL}/api/hotspots/ingest", json=payload, headers=headers, timeout=30
+        f"{WEB_BASE_URL}/api/hotspots/ingest",
+        json=payload,
+        headers=headers,
+        timeout=30,
+        proxies=direct_proxies(),
     )
     r.raise_for_status()
     return r.json()

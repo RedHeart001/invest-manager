@@ -26,15 +26,36 @@ type Result = SearchResult;
 // R18（2026-11-01）：类名表抽到 `lib/type-label.ts` 单一来源。
 // 此前本文件与产品详情页各硬写一份逐字相同的表，两处无任何交叉约束。
 
-// 三种成因各说各的话（CR9-57）。`pending` 刻意不写"未更新"——它不是陈旧；也刻意不写
-// "正在刷新"——刷新腿可能整晚没跑，那会变成第二种谎。它只说用户自己核对得到的两件事：
-// 名单什么时候换的、这一列现在是空的。
-const STALE_PHRASE: Record<StaleNote["kind"], (label: string, day: string) => string> = {
+// 各种成因各说各的话（CR9-57；W4 起扩到六档，与 `lib/freshness.ts` 的 `StaleNote["kind"]` 一一对应）。
+// `pending` 刻意不写"未更新"——它不是陈旧；也刻意不写"正在刷新"——刷新腿可能整晚没跑，
+// 那会变成第二种谎。它只说用户自己核对得到的两件事：名单什么时候换的、这一列现在是空的。
+//
+// 三档新成因（W4，方案 §9 的四态模型）每一句都必须答出方案点名的那几件事：
+//  · `failed`⇒ 这是**历史状态**、**数据时间**、**失败原因**，以及有没有安排补试；
+//  · `degraded` ⇒ 当日数据是**新的**，只是来源降级（与 `failed` 用不同颜色/不同措辞，
+//    否则"新的但降级"和"旧的仍可用"会混成一句）；
+//  · `unavailable` ⇒ 从未取得过有效数据，不许编一个日子出来。
+const STALE_PHRASE: Record<StaleNote["kind"], (label: string, n: StaleNote) => string> = {
   // CR9-57 修订（主人 10-04＝"再柔和点"）：去掉"主数据/快照/未更新"这类系统腔，
   // 但三条约束原样保留——pending 不说"陈旧"、不承诺"正在刷新"、只锚用户能核对的事实。
-  list: (label, day) => `${label}名单有些日子没换了（上次 ${day}）`,
-  snapshot: (label, day) => `${label}价格有些日子没刷新了（上次 ${day}）`,
-  pending: (label, day) => `${label}的价格暂时还没有（名单 ${day} 换过，要等下一轮刷新）`,
+  list: (label, n) => `${label}名单有些日子没换了（上次 ${n.since.slice(5)}）`,
+  snapshot: (label, n) => `${label}价格有些日子没刷新了（上次 ${n.since.slice(5)}）`,
+  pending: (label, n) => `${label}的价格暂时还没有（名单 ${n.since.slice(5)} 换过，要等下一轮刷新）`,
+  // W4：今日失败但库里还有数据 ⇒ 说清"现在看到的是什么年份的数据"。
+  failed: (label, n) => {
+    const since = n.since ? `截至 ${n.since.slice(5)} 的最近可用名单` : "此前取得的最近可用名单";
+    const price = n.dataAt ? `、价格快照 ${n.dataAt.slice(5)}` : "";
+    const why = n.reason ? `：${n.reason}` : "";
+    const retry = n.retry ? `；${n.retry}` : "";
+    return `${label}今日更新失败，当前展示${since}${price}（非今日数据）${why}${retry}`;
+  },
+  degraded: (label, n) =>
+    `${label}今日已更新，但来源降级${n.reason ? `：${n.reason}` : ""}（数据是当日的，不是历史数据）`,
+  unavailable: (label, n) => {
+    const why = n.reason ? `：${n.reason}` : "";
+    const retry = n.retry ? `；${n.retry}` : "";
+    return `${label}暂无数据（今日获取失败${why}）${retry}`;
+  },
 };
 
 // 排序选项：值 = sort:order；relevance 仅查询模式可选
@@ -281,14 +302,25 @@ export default function SearchClient() {
         </label>
       </div>
 
-      {/* #22(b)／#25 陈旧可见性 ＋ CR9-57 价格缺口（文案见 `STALE_PHRASE`，主人 10-03 定"上屏＋人性化"、
-          10-04 再定"柔和一档"）：后端只在有问题时给说明 ⇒
-          **正常态这一段整体不渲染**，因为那时这句话零信息量。设计语言沿用 CR8-1「产出说明」：小字、一批最多两条、按成因分类。 */}
+      {/* #22(b)／#25 陈旧可见性 ＋ CR9-57 价格缺口 ＋ W4 四态（文案见 `STALE_PHRASE`，
+          主人 10-03 定"上屏＋人性化"、10-04 再定"柔和一档"）：后端只在有问题时给说明 ⇒
+          **正常态这一段整体不渲染**，因为那时这句话零信息量。设计语言沿用 CR8-1「产出说明」：
+          小字、一批最多两条、按成因分类。
+          W4：`failed`／`unavailable` 用更醒目的色——它们是"现在看到的是历史数据"，
+          与"有些日子没换"不是同一档；`degraded` 仍用柔和的 amber（数据是当日的）。 */}
       {browseMode && stale.length > 0 && (
         <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1" data-testid="stale-notes">
           {stale.map((n) => (
-            <span key={`${n.type}:${n.kind}`} className="text-[11px] text-amber-700">
-              {STALE_PHRASE[n.kind](TYPE_LABEL[n.type] ?? n.type, n.since.slice(5))}
+            <span
+              key={`${n.type}:${n.kind}`}
+              className={`text-[11px] ${
+                n.kind === "failed" || n.kind === "unavailable"
+                  ? "font-medium text-red-700"
+                  : "text-amber-700"
+              }`}
+              data-stale-kind={n.kind}
+            >
+              {STALE_PHRASE[n.kind](TYPE_LABEL[n.type] ?? n.type, n)}
             </span>
           ))}
           {/* 超过展示上限的：说"还有几条"，不静默丢掉（R16「看不见的降级」同族）。

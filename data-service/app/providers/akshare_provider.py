@@ -24,6 +24,7 @@ from .base import (
     register_list,
 )
 from ..config import load_env
+from ..utils.http import direct_proxies, direct_session
 from ..utils.limiter import get_limiter
 from ..utils.timeutil import beijing_now, beijing_today
 
@@ -490,6 +491,9 @@ def _em_get(path: str, params: dict) -> dict:
                         params=params,
                         timeout=REQUEST_TIMEOUT,
                         headers={"User-Agent": "Mozilla/5.0"},
+                        # W1：东财是国内源，必须直连。环境里有海外代理时，不传这一句
+                        # 就会变成 ProxyError（11-27 探针实测：直连 200／套代理即失败）。
+                        proxies=direct_proxies(),
                     )
                     r.raise_for_status()  # 校验放在限速器成功回报之前（C6）
                     return r.json()
@@ -759,6 +763,8 @@ class AkshareProvider(BaseProvider):
                             params=params,
                             timeout=REQUEST_TIMEOUT,
                             headers={"User-Agent": "Mozilla/5.0"},
+                            # W1：东财历史 K 线同样是国内源，强制直连
+                            proxies=direct_proxies(),
                         )
                         # 状态校验与解析必须在限速器闭包内（否则失败被记为成功，C6）
                         r.raise_for_status()
@@ -1174,23 +1180,19 @@ class AkshareProvider(BaseProvider):
         raise ProviderError(f"unsupported list type: {type_}")
 
     def _list_stocks(self) -> tuple[list[dict], dict]:
-        """A 股主数据列表：东财 `clist/get` 为主源，失败时降级到新浪 `hs_a` 快照（#25 乙，10-03 立项）。
+        """A 股主数据列表：东财 `clist/get` 为**唯一可发布源**；东财失败即拒绝交付（W2，11-27）。
 
-        为什么现在必须有备源（10-03 实测）：东财 `clist/get` 对三个 host、`pz=200` 与
-        `pz=10000` 一律 `RemoteDisconnected`＝列表链路**硬不可用**（行情/K 线仍正常，与
-        CR9-40 记的形态同款），`Product.stock` 因此停在 09-12 已经 21 天；此前这条链路只有
-        单家上游，失败即整轮 `partial_failed`，陈旧只能靠 `staleNotes` 说一句（#25 甲）。
+        为什么新浪快照不再当候选（11-27 拍板，行为变更）：
+        新浪 `stock_zh_a_spot` 与东财的覆盖面、名称列、口径都不等价——东财多出的 343 只
+        全是已摘牌/退市类代码；新浪名称是短名（实测最长 6 字，带 XD/DR 时只剩 3 字）且
+        整批不带 `-U/-W` 后缀。11-27 那轮曾以 5,580 行"成功"入库，行数与昨日一致却换了
+        源、换了口径、换了覆盖——消费侧完全看不出来。宁可整类保留旧数据并如实记
+        `partial_failed`，也不做这种静默替换。
 
-        覆盖面差异已按两份全量实测归因（10-03）：东财 5913 vs 新浪 5571，重叠 5570——
-        **库里多出、新浪没有的 343 只全是已摘牌/退市类代码**（其中名字含「退市」61 只、
-        `ST`/`*ST` 开头 112 只），新浪独有的只有 1 只（`920202` 北交所）；新浪侧含北交所
-        348 只，与 `_exchange()` 对 920 段的判定逐项一致 ⇒ 降级不是"少一块市场"（口径①）。
-        代价在名字列（写进 note，别让消费侧自己发现）：换源那夜 101/5570（1.81%）行的名字会被
-        改写，按互斥分类实测＝**44 行整批丢掉 `-U`/`-W`/`-UW` 后缀**、10 行只是全角名里的空格数
-        不同、5 行的 `ST` 标记一边有一边无（4 无 1 有，那 1 行是 21 天的日期差不是源差），其余是
-        状态前缀归属不同（新浪今日 28 行带 XD/N、库内 17 行带）。⚠️ **两边都会在打前缀时把名字
-        截到 5 字符**（`XD万华化` ⇔ `万华化学`）⇒ `strip_status_prefix` 去掉的是前缀，**补不回
-        被截掉的字**，那是上游短名字段的形态，不是我们能洗回来的。
+        所以：东财失败 → 仍调用新浪**只取诊断计数**（到货与否、多少行），随后返回
+        `products=[]` + `acquisitionComplete=false`；Web 侧 `sync.ts` 在写暂存表之前就
+        拒绝这种载荷，正式 `Product` 零写入。两源皆失败时抛 `ProviderError` 并保留两个
+        错误原因（不交空候选冒充"到货 0 只"）。
         """
         em_err = ""
         try:
@@ -1208,41 +1210,37 @@ class AkshareProvider(BaseProvider):
         try:
             df = _ak_request(ak.stock_zh_a_spot, 120.0, "ak.stock_zh_a_spot")
         except Exception as e:  # noqa: BLE001
-            raise ProviderError(f"stock list unavailable: {e}") from e
+            raise ProviderError(
+                "stock list unavailable: "
+                f"eastmoney: {em_err or 'unknown'}; sina diagnostic: {type(e).__name__}: {e}"
+            ) from e
 
-        out: list[dict] = []
+        # 只数行数，不映射成候选：映射出来也用不上（下面恒为空），反而给"顺手发布"留口子。
+        sina_rows = 0
         for _, row in df.iterrows():
-            # 本机 akshare 的 stock_zh_a_spot 列名是中文（代码=带交易所前缀的 symbol），
-            # 与同版本 bond_zh_hs_cov_spot 的英文列名不一致 ⇒ 两种键名都读一次，不猜版本。
             symbol = str(row.get("代码") or row.get("symbol") or "").strip().lower()
             name = strip_status_prefix(str(row.get("名称") or row.get("name") or ""))
             code = symbol[2:] if symbol[:2].isalpha() else symbol
-            if not code or not name:
-                continue
-            full, initials = _pinyin_pair(name)
-            out.append(
-                {
-                    "type": "stock",
-                    "code": code,
-                    "name": name,
-                    "pinyin": full,
-                    "pinyinInitials": initials,
-                    # CR-17 同口径：新浪 symbol 显式带 sh/sz/bj 前缀，不再靠数字前缀推断
-                    "exchange": _sina_symbol_exchange(symbol) or _exchange(code),
-                    "tags": [],
-                }
+            if code and name:
+                sina_rows += 1
+
+        if sina_rows == 0:
+            raise ProviderError(
+                "stock list empty from all sources: "
+                f"eastmoney: {em_err or 'unknown'}; sina diagnostic: 0 rows"
             )
-        if not out:
-            raise ProviderError("stock list empty from all sources")
-        return out, {
+
+        return [], {
             "source": "sina-a-share-spot",
             "degraded": True,
+            # W2 的闸：`web/lib/sync.ts` 见到这一条就零写入并保留旧数据。
+            "acquisitionComplete": False,
             "note": (
-                f"东财 A 股列表不可用（{em_err or '未知原因'}），已降级至新浪 hs_a 快照："
-                f"本次 {len(out)} 只、天然仅含在交易标的（库里留存的已摘牌代码这次不会带来），"
-                "且新浪的名称列是短名（实测最长 6 字、带 XD/DR 状态前缀时只剩 3 个字），"
-                "并整批不带 -U/-W 后缀"
-            ),
+                f"东财 A 股列表不可用（{em_err or '未知原因'}），新浪 hs_a 快照仅作诊断"
+                f"（本次 {sina_rows} 只）：它是在交易标的的短名快照，覆盖面无已摘牌代码、"
+                "名称整批不带 -U/-W 后缀，不是东财完整名单的等价候选 ⇒ 已拒绝交付，"
+                "旧数据保留 "
+            ).strip(),
         }
 
     def _list_stocks_em(self) -> list[dict]:
@@ -1459,7 +1457,9 @@ def collect_us_snapshot(
 
     def _fetch() -> tuple[list[dict], dict]:
         deadline = time.monotonic() + whole_timeout_s
-        session = requests.Session() if hasattr(requests, "Session") else requests
+        # W1：新浪是国内源，必须直连。测试会把这个模块的 `requests` 换成替身，
+        # 所以保持 `hasattr` 的既有防御写法（替身不一定有 Session）。
+        session = direct_session(requests) if hasattr(requests, "Session") else requests
         declared = ""
         total = 0
         required_pages = 0
@@ -1524,7 +1524,7 @@ def collect_us_snapshot(
                     break
                 pending = sorted(failures)
                 logger.info("us list repair round %s: %s pages", repair_round + 1, len(pending))
-                repair_session = requests.Session() if hasattr(requests, "Session") else requests
+                repair_session = direct_session(requests) if hasattr(requests, "Session") else requests
                 try:
                     for page in pending:
                         request_obligation(page, repair_session)

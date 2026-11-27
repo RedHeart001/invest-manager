@@ -8,12 +8,12 @@ R12 策略：CoinGecko 属海外源。若设置了 HTTPS_PROXY/HTTP_PROXY 环境
 "该类型数据缺失"并标注缺口，不阻塞其余功能。
 """
 
-import os
 import time
 from datetime import datetime, timezone
 
 import requests
 
+from ..utils.http import overseas_proxies, overseas_session
 from ..utils.num import to_float
 from .base import BaseProvider, ProviderError, register, register_list
 
@@ -30,29 +30,15 @@ CG_FAIL_COOLDOWN = 300
 def _proxies() -> dict | None:
     """R12：显式环境代理优先（系统注册表代理在 data-service 已被 NO_PROXY=* 屏蔽）。
 
-    注意：main.py 默认 NO_PROXY=*（保护国内源直连），requests 的 select_proxy
-    会因此绕过任何显式代理——所以海外请求必须走 trust_env=False 的独立 Session
-    （见 _request），由 _proxies() 显式传代理，两套逻辑互不干扰。
+    W1（2026-11-27）：实现收敛到 `utils/http.py`，本名保留为薄别名——调用点与
+    `test_cr10_15` 之类按名引用的地方都不必改，但"读哪些 env"只有一个来源。
     """
-    px = (
-        os.environ.get("HTTPS_PROXY")
-        or os.environ.get("https_proxy")
-        or os.environ.get("HTTP_PROXY")
-        or os.environ.get("http_proxy")
-    )
-    return {"http": px, "https": px} if px else None
-
-
-_session: requests.Session | None = None
+    return overseas_proxies()
 
 
 def _overseas_session() -> requests.Session:
     """trust_env=False 的独立会话：绕开全局 NO_PROXY=*，显式代理可用。"""
-    global _session
-    if _session is None:
-        _session = requests.Session()
-        _session.trust_env = False
-    return _session
+    return overseas_session()
 
 
 def _unique_by_symbol(items: list[dict]) -> tuple[list[dict], list[str]]:

@@ -9,6 +9,7 @@ import { dsGet, productsBudgetMs } from "./data-service";
 import { listSyncedToday } from "./freshness";
 import { prisma } from "./prisma";
 import { buildSearchText } from "./search-text";
+import { DEGRADED_NOTE_MARKER } from "./sync-state";
 import { beijingStamp } from "./time";
 
 // G6（批次 D）：新增 hk（港股）
@@ -595,7 +596,9 @@ async function _publishProducts(
     // 否则"327 只转债入库"与全量同步长得一模一样，分类浏览的覆盖面缺口没人说得清。
     let note: string | undefined;
     if (data.degraded) {
-      note = `list degraded source=${data.source ?? "?"}${data.note ? `：${data.note}` : ""}`;
+      // W4：前缀走 `DEGRADED_NOTE_MARKER`（`lib/sync-state.ts` 的唯一来源）——
+      // 展示层正是靠这一串字判"今日取到了但来源降级"，两侧各写一份就会静默分叉。
+      note = `${DEGRADED_NOTE_MARKER}${data.source ?? "?"}${data.note ? `：${data.note}` : ""}`;
     }
     // #35／CR9-63：按"有意子集"声明放行过一次缩水，就要在结果里留下这笔账
     // （否则"300 行换成 179 行"与一次正常替换在回执里长得一模一样）。

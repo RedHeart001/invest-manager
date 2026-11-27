@@ -133,6 +133,8 @@ def start_research(type_: str, code: str, name: str = "") -> dict:
 
             import requests
 
+            from ..utils.http import direct_proxies
+
             t = _tasks[task_id]
             web = os.environ.get("WEB_BASE_URL", "http://127.0.0.1:3000")
             token = os.environ.get("INGEST_TOKEN", "")
@@ -149,7 +151,12 @@ def start_research(type_: str, code: str, name: str = "") -> dict:
                 payload["error"] = t.get("error") or "研究失败"
             try:
                 res = requests.post(
-                    f"{web}/api/research/ingest", json=payload, headers=headers, timeout=30
+                    f"{web}/api/research/ingest",
+                    json=payload,
+                    headers=headers,
+                    timeout=30,
+                    # W1：容器间调用永远直连
+                    proxies=direct_proxies(),
                 )
                 if res.status_code >= 300:
                     log.warning(

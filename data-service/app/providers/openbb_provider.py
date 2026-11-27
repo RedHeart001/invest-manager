@@ -16,10 +16,10 @@ ProviderError 由上层降级并标注来源。
 from __future__ import annotations
 
 import logging
-import os
 
 import requests
 
+from ..utils.http import overseas_proxies, overseas_session
 from ..utils.num import to_float
 from .base import (
     BaseProvider,
@@ -36,21 +36,10 @@ REQ_TIMEOUT = 25
 def _proxies() -> dict | None:
     """R12：显式环境代理优先（与 crypto_provider 同策略）。
 
-    注意：main.py 默认 NO_PROXY=*（保护国内源直连），requests 的 select_proxy
-    会因此绕过一切 env 代理——所以海外请求必须走 trust_env=False 的独立 Session
-    并显式设置 proxies（CR4 / 2026-09-15 review 修复：此前 docstring 宣称代理优先
-    但代码从未传递，dev 下美股恒降级）。
+    W1（2026-11-27）：实现收敛到 `utils/http.py`，本名保留为薄别名。
     """
-    px = (
-        os.environ.get("HTTPS_PROXY")
-        or os.environ.get("https_proxy")
-        or os.environ.get("HTTP_PROXY")
-        or os.environ.get("http_proxy")
-    )
-    return {"http": px, "https": px} if px else None
+    return overseas_proxies()
 
-
-_session: requests.Session | None = None
 
 # #46（CR9-74）＋#48 乙（CR9-76）：yfinance **根本没有批量行情口**，所以它的批量能力就是 1。
 # 为什么不是 20（CR9-74 初值）：`get_quotes` 的调用方有两个，而我当初只按其中一个设计——
@@ -64,14 +53,7 @@ _QUOTE_BATCH_CAP = 1
 
 def _overseas_session() -> requests.Session:
     """trust_env=False 的独立会话：绕开全局 NO_PROXY=*，显式代理可用。"""
-    global _session
-    if _session is None:
-        _session = requests.Session()
-        _session.trust_env = False
-        px = _proxies()
-        if px:
-            _session.proxies = px
-    return _session
+    return overseas_session()
 
 
 class OpenBBProvider(BaseProvider):

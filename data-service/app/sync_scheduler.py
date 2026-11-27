@@ -41,12 +41,13 @@ import logging
 import os
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
+from .utils.http import direct_proxies
 from .utils.timeutil import beijing_today, leg_staleness
 
 log = logging.getLogger("sync.scheduler")
@@ -100,6 +101,32 @@ PROGRESS_READ_TIMEOUT_S = 5.0
 # 而"列表到位、快照没到位"恰恰是最需要补的那一类 ⇒ 不能因为前一条腿跳过就连带废掉后一条。
 CHAINED_OUTCOMES = ("completed", "partial_failed", "skipped", "collecting")
 
+# ---------- W3（2026-11-27）：失败类型的有界自动补试 ----------
+# 从"失败不自动重试"改成"失败类型最多补试一次"是**经确认的策略变更**，但边界收得很紧：
+#   · 只补自然轮（`trigger="daily"`）失败的那几类，不重买整轮；
+#   · 每日最多 1 次、延迟 30 分钟（够 web 侧异步收尾，也还在凌晨的低峰里）；
+#   · **不带 `force`** ⇒ 仍受 web 当日幂等闸门约束，成功过的那类不会再出网；
+#   · `inconclusive` 不补（结果未知时重跑只会把额度花在可能已经成功的一轮上）；
+#   · `us` 不补（它由 `us_list_job` 的持久化任务按页续跑，与五类是两条账）；
+#   · 启动补跑、手动轮不繁衍补试（否则一次重启就能把"每天一次"放大成任意次）。
+RETRY_TRIGGER = "daily-retry"
+RETRY_DELAY_S = 30 * 60
+RETRY_MAX_ATTEMPTS = 1
+#: 到点时主任务还在跑 ⇒ 先让位再试，但不许无限等（等不到就记 `cancelled`，当日不再自动执行）。
+RETRY_WAIT_INTERVAL_S = 60.0
+RETRY_WAIT_MAX = 10
+#: 不参与补试的类型：us 的采集与发布在 `us_list_job` 里自己续跑。
+RETRY_EXCLUDED_TYPES = ("us",)
+RETRY_STATES = ("pending", "running", "completed", "exhausted", "cancelled")
+
+#: web 刷新端点认识的类型全集（`app/api/market/refresh/route.ts` 的 `SNAPSHOT_TYPES`）。
+#: 补试轮用它把 `exclude` 算出去（只刷失败类型，见 `_refresh_leg` 的 `types`）。
+SNAPSHOT_ALL_TYPES = ("stock", "fund", "bond", "crypto", "hk", "us")
+
+#: 自然轮的触发字面量（`cron` 那条入口）。**只认它**才登记补试：启动补跑与手动轮
+#: 都是"人/重启额外要的一轮"，从它们繁衍补试会让"每天最多一次"退化成任意次。
+DAILY_TRIGGER = "daily"
+
 
 def _callback_timeout_s(trigger: str) -> float:
     """按触发形态取回调读超时（CR9-33）。未知/手动形态按定时态预算。"""
@@ -123,6 +150,10 @@ _state: dict = {
     # `:242` 那条纪律：有没有读过与读到没读到是两件事，别用省略冒充。
     "markerReadError": None,
     "markerWriteFailed": False,
+    # W3：补试计划的内存镜像（盘上那份是真相，见 `_retry_state()`）。
+    # `None`＝今天没有待执行的补试；有值时形如 `{"date","state","attempt",...}`。
+    "retry": None,
+    "retryLastResult": None,
 }
 
 
@@ -196,14 +227,17 @@ def _mark_attempt(trigger: str) -> tuple[dict | None, bool]:
     写在收尾而不是起跑，就会留下今天 18:57 那一形的漏洞——被 kill 的轮钱已花、盘上无痕迹。
     """
     prev, _ = _read_marker()
-    ok = _write_marker(
-        {
-            "lastAttemptDate": beijing_today(),
-            "lastAttemptTrigger": trigger,
-            "lastAttemptOutcome": "running",
-            "at": datetime.now(TZ).isoformat(timespec="seconds"),
-        }
-    )
+    payload = {
+        "lastAttemptDate": beijing_today(),
+        "lastAttemptTrigger": trigger,
+        "lastAttemptOutcome": "running",
+        "at": datetime.now(TZ).isoformat(timespec="seconds"),
+    }
+    # W3：`retry` 是**正交**的一位（今天要不要补试），不许被"又起了一轮"顺手抹掉——
+    # 否则 02:10 一次手动/启动补跑就会静默吃掉 02:30 那次排好的补试。
+    if isinstance((prev or {}).get("retry"), dict):
+        payload["retry"] = prev["retry"]
+    ok = _write_marker(payload)
     with _lock:
         _state["markerWriteFailed"] = not ok
     return prev, ok
@@ -241,15 +275,19 @@ def _mark_outcome(trigger: str, outcome: object, result: dict | None = None) -> 
     `_state["lastResult"]`／`status()` 同名同形；旧格式那份文件没有这个键 ⇒ 读侧回落 None。
     """
     prev, _ = _read_marker()
-    ok = _write_marker(
-        {
-            "lastAttemptDate": (prev or {}).get("lastAttemptDate") or beijing_today(),
-            "lastAttemptTrigger": (prev or {}).get("lastAttemptTrigger") or trigger,
-            "lastAttemptOutcome": outcome,
-            "at": datetime.now(TZ).isoformat(timespec="seconds"),
-            "lastResult": result,
-        }
-    )
+    payload = {
+        "lastAttemptDate": (prev or {}).get("lastAttemptDate") or beijing_today(),
+        "lastAttemptTrigger": (prev or {}).get("lastAttemptTrigger") or trigger,
+        "lastAttemptOutcome": outcome,
+        "at": datetime.now(TZ).isoformat(timespec="seconds"),
+        "lastResult": result,
+    }
+    # W3：`retry` 与 `lastAttempt*` 是两个不相干的问题（"今天补不补" / "今天自然轮结局"），
+    # 收尾覆写必须把它原样带过去。丢了它＝重启后不知道还有一次补试没跑（也读不出
+    # `exhausted`／`cancelled` 的现场），而这一刻正是"刚失败、最需要那张计划还活着"的时候。
+    if isinstance((prev or {}).get("retry"), dict):
+        payload["retry"] = prev["retry"]
+    ok = _write_marker(payload)
     with _lock:
         _state["markerWriteFailed"] = not ok
 
@@ -265,6 +303,227 @@ def _sync_hour_minute() -> tuple[int, int]:
     except ValueError:
         minute = DEFAULT_SYNC_MINUTE
     return max(0, min(hour, 23)), max(0, min(minute, 59))
+
+
+# ---------- W3：补试状态机（`sync-state.json` 的 `retry` 键） ----------
+
+
+def retry_state() -> dict | None:
+    """读盘上那份补试计划；缺失／损坏／形状不对一律当"没有"（观测位不许让 status 500）。
+
+    只认 `state` 在 `RETRY_STATES` 里的对象——手改出来的 `{"state":"whatever"}` 当没有，
+    而不是当成某个未知状态继续跑（那会让"当日最多一次"失去判据）。
+    """
+    data = _read_marker()[0] or {}
+    plan = data.get("retry")
+    if not isinstance(plan, dict):
+        return None
+    if plan.get("state") not in RETRY_STATES:
+        return None
+    return plan
+
+
+def _write_retry(plan: dict | None) -> bool:
+    """原子写 `retry` 键：保留 marker 其余键（`lastAttempt*`／`lastResult`）一字不动。
+
+    `plan=None` ⇒ 删键（今天没有待执行计划）。写盘失败**返回 False 并挂状态位**，
+    不许假装已安排——这正是 `_write_marker` 那条 fail-open 纪律的同一族。
+    """
+    data = _read_marker()[0] or {}
+    if plan is None:
+        data.pop("retry", None)
+    else:
+        data["retry"] = plan
+    ok = _write_marker(data)
+    with _lock:
+        _state["markerWriteFailed"] = not ok
+        _state["retry"] = plan
+    if not ok:
+        log.warning("retry plan could not be written to sync state (state=%s)", (plan or {}).get("state"))
+    return ok
+
+
+def _retry_due_at(delay_s: float = RETRY_DELAY_S) -> str:
+    """现在 + 延迟（ISO，带 +08:00）。用北京时区是为了盘上那份人能直接读。"""
+    return (datetime.now(TZ) + timedelta(seconds=delay_s)).isoformat(timespec="seconds")
+
+
+def _plan_retry(failed_types: list[str], reason: str) -> dict | None:
+    """自然轮失败后登记一次补试计划（每日最多一次，同一天不重复登记）。
+
+    判据顺序都是"宁可少补，不可多补"：
+      ① 没有失败类型 ⇒ 不登记（返回 None）；
+      ② 失败类型里全是 us（或 `RETRY_EXCLUDED_TYPES` 的子集）⇒ 不登记，us 自己续跑；
+      ③ 今天已经有 plan ⇒ 不覆盖（`exhausted`／`cancelled` 也照旧，当日不再自动执行）；
+      ④ 写盘失败 ⇒ 不登记（内存里也不留，否则重启后又"想补"）。
+    """
+    types = [t for t in failed_types if t and t not in RETRY_EXCLUDED_TYPES]
+    if not types:
+        return None
+    existing = retry_state()
+    if existing and existing.get("date") == beijing_today():
+        log.info("retry already planned today: state=%s", existing.get("state"))
+        return None
+    plan = {
+        "date": beijing_today(),
+        "state": "pending",
+        "attempt": 0,
+        "maxAttempts": RETRY_MAX_ATTEMPTS,
+        "types": types,
+        "notBefore": _retry_due_at(),
+        "reason": reason,
+        "plannedAt": datetime.now(TZ).isoformat(timespec="seconds"),
+    }
+    if not _write_retry(plan):
+        return None
+    log.info("retry planned: types=%s notBefore=%s", types, plan["notBefore"])
+    return plan
+
+
+def _transition_retry(expect: tuple[str, ...], **changes) -> dict | None:
+    """条件迁移：只有盘上 `state` 在 `expect` 里才改，否则返回 None（不覆盖别人的决定）。
+
+    这是"补试不许自我繁衍"的实际闸门：`pending → running` 只有一次能成功；已经
+    `completed`／`exhausted`／`cancelled` 的当天计划不会被任何迟到线程改回来。
+    """
+    plan = retry_state()
+    if not plan or plan.get("state") not in expect:
+        return None
+    plan = {**plan, **changes, "updatedAt": datetime.now(TZ).isoformat(timespec="seconds")}
+    if not _write_retry(plan):
+        return None
+    return plan
+
+
+def _cancel_retry(reason: str) -> dict | None:
+    """把今日计划标成 `cancelled`（不删键＝留下的现场还能读出来）。"""
+    return _transition_retry(("pending", "running"), state="cancelled", cancelReason=reason)
+
+
+def _retry_types_from(result: dict) -> list[str]:
+    """从一轮结果里取"该补的失败类型"。
+
+    只有 `outcome="partial_failed"` 才有失败类型可补：
+      · `completed`／`skipped` ⇒ 没有失败；
+      · `collecting` ⇒ 列表都到位了，us 在持久化任务里续跑；
+      · `inconclusive` ⇒ **结果未知**，重跑可能把额度花在已经成功的一轮上，不补；
+      · `rejected`／`failed` ⇒ web 根本没接活，重跑同一条路只会再撞一次。
+    """
+    if result.get("outcome") != "partial_failed":
+        return []
+    failed = [str(t) for t in (result.get("failedTypes") or []) if t]
+    return [t for t in failed if t not in RETRY_EXCLUDED_TYPES]
+
+
+def _claim_for_retry(max_wait: int = RETRY_WAIT_MAX) -> bool:
+    """等到主轮收尾并**原子地**认领 `running`（补试与主轮共用同一把单飞锁）。
+
+    判据只有一个 `_state["running"]`：同步腿与链式刷新腿都由它覆盖（见 `run_now` 的
+    注释），所以补试绝不会叠在一条正在写快照的腿上。等不到就返回 False，调用方记
+    `cancelled`——不许把补试排成第二支并发（那是"不增加并发"这条边界的实际落点）。
+    """
+    for i in range(max_wait):
+        with _lock:
+            if not _state["running"]:
+                _state["running"] = True
+                return True
+        log.info("retry waiting for running sync (%ss)", int((i + 1) * RETRY_WAIT_INTERVAL_S))
+        time.sleep(RETRY_WAIT_INTERVAL_S)
+    with _lock:
+        if _state["running"]:
+            return False
+        _state["running"] = True
+        return True
+
+
+def _retry_worker(due_at: str) -> None:
+    """补试的执行体（后台线程）：等 `notBefore` → 认领 → 只跑失败类型 → 收尾。
+
+    「带上失败类型」靠 `_execute_types(types=...)`，不走 `run_now`——后者固定五类、会把
+    `running`／marker 按"整轮"重写，而补试**不是**今天"又起了一轮"（marker 的
+    `lastAttemptTrigger` 必须还是 `daily`，否则自然轮的结局被篡改、`legStaleness` 也会算错）。
+    """
+    try:
+        due = datetime.fromisoformat(due_at)
+    except ValueError:
+        _cancel_retry(f"invalid notBefore: {due_at!r}")
+        return
+    while True:
+        wait_s = (due - datetime.now(TZ)).total_seconds()
+        if wait_s <= 0:
+            break
+        time.sleep(min(wait_s, 60.0))
+
+    plan = retry_state()
+    if not plan or plan.get("state") != "pending" or plan.get("date") != beijing_today():
+        # 到点时计划已被换掉／已过期（跨日）⇒ 什么都不做（条件迁移自己会失败）。
+        _cancel_retry("due but plan is no longer pending for today")
+        return
+
+    claimed = _transition_retry(
+        ("pending",), state="running", startedAt=datetime.now(TZ).isoformat(timespec="seconds")
+    )
+    if not claimed:
+        return  # 别人先认领了（或已被取消）
+    types = [str(t) for t in (claimed.get("types") or [])]
+    if not types:
+        _transition_retry(("running",), state="cancelled", cancelReason="no types to retry")
+        return
+
+    if not _claim_for_retry():
+        _transition_retry(("running",), state="cancelled", cancelReason="sync still running when retry became due")
+        return
+
+    log.info("retry start: types=%s", types)
+    try:
+        result = _execute_types(RETRY_TRIGGER, types, force=False)
+    except Exception as e:  # noqa: BLE001 补试线程自己的失败要落成状态，不能静默死掉
+        result = {"ok": None, "outcome": "failed", "error": f"{type(e).__name__}: {e}"}
+        log.warning("retry crashed: %s", e)
+    finally:
+        with _lock:
+            _state["running"] = False
+
+    with _lock:
+        _state["retryLastResult"] = result
+    attempt = int(claimed.get("attempt") or 0) + 1
+    if result.get("outcome") in ("completed", "skipped"):
+        _transition_retry(
+            ("running",),
+            state="completed",
+            attempt=attempt,
+            finishedAt=datetime.now(TZ).isoformat(timespec="seconds"),
+            outcome=result.get("outcome"),
+        )
+    else:
+        # 仍失败／结果未知／被拒 ⇒ 当日不再自动补试（`exhausted`，不回到 pending）。
+        _transition_retry(
+            ("running",),
+            state="exhausted",
+            attempt=attempt,
+            finishedAt=datetime.now(TZ).isoformat(timespec="seconds"),
+            outcome=result.get("outcome"),
+            error=result.get("error"),
+            note=result.get("note"),
+        )
+    log.info("retry done: outcome=%s", result.get("outcome"))
+
+
+def _schedule_retry(plan: dict | None) -> None:
+    """把盘上的 `pending` 计划挂到一个后台线程（重启后恢复未执行计划＝同一个入口）。
+
+    幂等性靠 `_transition_retry` 的条件迁移：两个线程同时到点，只有先把
+    `pending → running` 写成功的那一个会真跑（另一个在 `claimed` 处直接返回）。
+    """
+    if not plan or plan.get("state") != "pending":
+        return
+    if plan.get("date") != beijing_today():
+        _cancel_retry(f"plan date {plan.get('date')} is not today")
+        return
+    due_at = str(plan.get("notBefore") or "")
+    threading.Thread(
+        target=_retry_worker, args=(due_at,), name="sync-retry", daemon=True
+    ).start()
 
 
 def _web_base() -> str:
@@ -310,7 +569,7 @@ def _refresh_progress(run_id: str | None = None) -> dict | None:
 
     try:
         suffix = f"?refreshRunId={run_id}" if run_id else ""
-        r = requests.get(f"{_web_base()}/api/health{suffix}", timeout=PROGRESS_READ_TIMEOUT_S)
+        r = requests.get(f"{_web_base()}/api/health{suffix}", timeout=PROGRESS_READ_TIMEOUT_S, proxies=direct_proxies())
         if r.status_code != 200:
             log.warning("refresh progress read: HTTP %s", r.status_code)
             return None
@@ -321,7 +580,7 @@ def _refresh_progress(run_id: str | None = None) -> dict | None:
         return None
 
 
-def _refresh_leg(trigger: str, force: bool = False) -> dict:
+def _refresh_leg(trigger: str, force: bool = False, types: list[str] | None = None) -> dict:
     """刷新腿（刀 3/甲-1）：`POST /api/market/refresh?type=all`，自带 2400s 预算。
 
     语义与同步腿同族、不另立一套：`ok` **只在 web 真的回答了时才带真/假**（CR9-28），
@@ -332,20 +591,30 @@ def _refresh_leg(trigger: str, force: bool = False) -> dict:
     #23：web 侧对**逐类**各自判当日幂等（`snapshotAt` 那一列），整轮都被挡下时
     `results` 里每行都带 `skipped` ⇒ 本腿给 `outcome="skipped"`，既不是 completed
     （没跑却记完成＝撒谎，CR9-28 的同类病）也不是 rejected（那是 4xx）。
+
+    W3：`types` 非空时**只刷这几类**（补试专用）——用 `exclude` 把其余类型剔掉，
+    而不是加一个新的 `types=` 参数：web 那侧只有 `type=all|单个` 两档，用 `exclude`
+    不需要动契约。补试若把全市场重刷一遍，既超出"只补失败类型"，也会把成功类的
+    `snapshotAt` 抬到今日，混掉"今天哪几条腿真的重新取过数"这条读数。
     """
     import requests
 
     started = time.time()
     timeout_s = REFRESH_CALLBACK_TIMEOUT_S
     # CR10-49：普通轮不刷新尚未发布的旧 us；us 发布后由持久化任务单独刷新。
-    # runId 让这一轮与 us 独立刷新在 `refresh-progress.json` 里互不覆盖。
-    run_id = f"daily-{beijing_today()}"
+    # W3：补试轮的 runId 另起一支——两轮写的是同一份 `refresh-progress.json`，
+    # 同名会互相覆盖，事后就看不出"那一轮到底跑了谁"。
+    run_id = f"daily-{beijing_today()}" if types is None else f"retry-{beijing_today()}"
+    if types is None:
+        exclude = ["us"]
+    else:
+        exclude = [t for t in SNAPSHOT_ALL_TYPES if t not in types]
     url = (
-        f"{_web_base()}{REFRESH_URL_PATH}&exclude=us&runId={run_id}"
+        f"{_web_base()}{REFRESH_URL_PATH}&exclude={','.join(exclude)}&runId={run_id}"
         + ("&force=1" if force else "")
     )
     try:
-        r = requests.post(url, timeout=timeout_s, headers=_write_headers())
+        r = requests.post(url, timeout=timeout_s, headers=_write_headers(), proxies=direct_proxies())
         if r.status_code >= 300:
             out: dict = {
                 "ok": None,
@@ -448,6 +717,16 @@ def _chain_refresh(trigger: str, sync_result: dict, force: bool = False) -> dict
 
 
 def _execute(trigger: str, force: bool = False) -> dict:
+    """每日整轮（五类 + us）。W3 起是 `_execute_types(None)` 的薄包装。
+
+    保留这个名字与签名的原因：`run_now`／测试／日志都按它引用，而"整轮"与"只补几类"
+    的差别只在传不传 `types`——拆成两个同名不同义的函数反而会让"顺势多跑两类"变成
+    一行改动就能做到的事。
+    """
+    return _execute_types(trigger, None, force)
+
+
+def _execute_types(trigger: str, types: list[str] | None = None, force: bool = False) -> dict:
     """回调 web /api/sync 并收尾（调用方须已认领 running）。
 
     状态位不变量（刀 1/#20②）：`ok` **只有在 web 真的回答了时才带真/假值**（CR9-28：
@@ -457,11 +736,18 @@ def _execute(trigger: str, force: bool = False) -> dict:
 
     #23 加第六态 `skipped`：web 的当日幂等闸门把**整轮**都挡下时，"没跑"既不能记
     completed（没做事却记完成＝撒谎，正是 CR9-28 那个病），也不是 rejected（那才是 4xx）。
+
+    W3：`types` 非空＝**补试轮**（`trigger="daily-retry"`）。三处刻意不同：
+      ① URL 只带这几类（`?types=stock,crypto`），成功过的类型零出网；
+      ② `us` 一律不碰——它由 `us_list_job` 的持久化任务按页续跑，与五类两条账；
+      ③ 不写 marker、不动 `lastDate`／`running`：补试不是"今天又起了一轮"，
+         marker 的 `lastAttemptTrigger` 必须还是 `daily`，否则自然轮的结局被篡改掉。
     """
     import requests
 
     started = time.time()
     result: dict
+    retry_mode = types is not None
     # C3（CR7-9，2026-09-25）：定时态实测全 5 类型 9.6~13 分钟 → 1800s 保留约 2.3 倍余量。
     # CR9-33（2026-09-27）：预算按**触发形态**取数（补跑态实测 ≥29min，会打穿 1800s），
     # 依据见上面 `SCHEDULED_CALLBACK_TIMEOUT_S` 一组常量；形态由 `trigger` 带进来。
@@ -469,12 +755,15 @@ def _execute(trigger: str, force: bool = False) -> dict:
     # #23(vi)：`force` 由 `POST /sync/run?force=true` 一路透传到这里——没有这个出口，
     # 主人"今天就是要重刷一遍"会撞上自己的闸门（闸门的用途是防手滑，不是防他）。
     # CR10-49：普通轮只同步五类；us 由持久化任务单独采集，不再让一次 HTTP 背 923 页。
-    url = (
-        f"{_web_base()}/api/sync?types=fund,stock,bond,crypto,hk"
-        + ("&force=1" if force else "")
-    )
+    if retry_mode:
+        wanted = [t for t in types if t not in RETRY_EXCLUDED_TYPES]
+        url = f"{_web_base()}/api/sync?types={','.join(wanted)}"
+    else:
+        url = f"{_web_base()}/api/sync?types=fund,stock,bond,crypto,hk"
+    if force:
+        url += "&force=1"
     try:
-        r = requests.post(url, timeout=timeout_s, headers=_write_headers())
+        r = requests.post(url, timeout=timeout_s, headers=_write_headers(), proxies=direct_proxies())
         if r.status_code >= 300:
             result = {
                 "ok": None,
@@ -486,52 +775,62 @@ def _execute(trigger: str, force: bool = False) -> dict:
         else:
             body = r.json() or {}
             results = body.get("results") or []
-            # CR10-49：五类收尾后启动/恢复美股持久化任务。它不在本 HTTP 请求里翻页，
-            # 所以“还在采集”只记 collecting，不写 completed，也不写 failed。
-            from . import us_list_job
-
-            job = us_list_job.ensure_running(trigger, force=force)
-            job_status = job.get("status") or us_list_job.status()
-            us_state = str(job_status.get("state") or "idle")
-            us_snapshot = job_status.get("snapshotId")
-            if us_state == "completed":
-                us_result: dict = {
-                    "type": "us",
-                    "count": job_status.get("publishedCount"),
-                    "snapshotId": us_snapshot,
-                    "jobState": us_state,
-                    "published": True,
-                    "note": "persistent us list job completed and refreshed",
-                }
-            elif us_state == "blocked":
-                us_result = {
-                    "type": "us",
-                    "error": f"us list job blocked: {job_status.get('blockedReason')}",
-                    "jobState": us_state,
-                    "snapshotId": us_snapshot,
-                }
+            if retry_mode:
+                # 补试轮只合并本次涉及的类；us 不在本轮范围内（它自己续跑），
+                # 也不追加 us 回执——否则"补试结果"会看起来像又跑了一整轮。
+                us_state, us_result, us_collecting = "skipped", None, False
             else:
-                us_result = {
-                    "type": "us",
-                    "collecting": True,
-                    "jobState": us_state,
-                    "snapshotId": us_snapshot,
-                    "progress": job_status.get("progress"),
-                    "resolvedPages": job_status.get("resolvedPages"),
-                    "requiredPages": job_status.get("requiredPages"),
-                    "pendingPages": job_status.get("pendingPages"),
-                    "lastProgressAt": job_status.get("lastProgressAt"),
-                    "nextAttemptAt": job_status.get("nextAttemptAt"),
-                    "note": (
-                        "美股完整名单正在持久化采集中；正式 Product 未改动，旧数据继续可用。"
-                        "完整候选通过全部完整性验证后才会发布，并单独刷新 us 行情。"
-                    ),
-                }
-            results.append(us_result)
+                # CR10-49：五类收尾后启动/恢复美股持久化任务。它不在本 HTTP 请求里翻页，
+                # 所以“还在采集”只记 collecting，不写 completed，也不写 failed。
+                from . import us_list_job
+
+                job = us_list_job.ensure_running(trigger, force=force)
+                job_status = job.get("status") or us_list_job.status()
+                us_state = str(job_status.get("state") or "idle")
+                us_snapshot = job_status.get("snapshotId")
+                if us_state == "completed":
+                    us_result: dict = {
+                        "type": "us",
+                        "count": job_status.get("publishedCount"),
+                        "snapshotId": us_snapshot,
+                        "jobState": us_state,
+                        "published": True,
+                        "note": "persistent us list job completed and refreshed",
+                    }
+                elif us_state == "blocked":
+                    us_result = {
+                        "type": "us",
+                        "error": f"us list job blocked: {job_status.get('blockedReason')}",
+                        "jobState": us_state,
+                        "snapshotId": us_snapshot,
+                    }
+                else:
+                    us_result = {
+                        "type": "us",
+                        "collecting": True,
+                        "jobState": us_state,
+                        "snapshotId": us_snapshot,
+                        "progress": job_status.get("progress"),
+                        "resolvedPages": job_status.get("resolvedPages"),
+                        "requiredPages": job_status.get("requiredPages"),
+                        "pendingPages": job_status.get("pendingPages"),
+                        "lastProgressAt": job_status.get("lastProgressAt"),
+                        "nextAttemptAt": job_status.get("nextAttemptAt"),
+                        "note": (
+                            "美股完整名单正在持久化采集中；正式 Product 未改动，旧数据继续可用。"
+                            "完整候选通过全部完整性验证后才会发布，并单独刷新 us 行情。"
+                        ),
+                    }
+                results.append(us_result)
             failed = [str(x.get("type")) for x in results if isinstance(x, dict) and x.get("error")]
             held = [str(x.get("type")) for x in results if isinstance(x, dict) and x.get("skipped")]
-            us_collecting = bool(us_result.get("collecting"))
-            all_held = len(held) == 5 and us_state == "completed"
+            us_collecting = bool(us_result.get("collecting")) if us_result else False
+            # 分母跟着本轮**请求了谁**走：整轮是五类，补试轮是「本轮那几类」。
+            # 写死 5 会让补试轮永远判不出"整轮被挡"（补试只请求 2 类时 held=2），
+            # 于是"web 说这几类今天已经做完了"被记成 completed——又是一种没做事记完成。
+            # `expected > 0` 那一道是防"空名单"：`all_held` 对空集合恒真＝把没请求记成跳过。
+            expected = len(wanted) if retry_mode else 5
+            all_held = expected > 0 and len(held) == expected and (retry_mode or us_state == "completed")
             # CR9-28：web 侧返回的是真 ok（`results.every(r => !r.error)`），
             # 此前这里硬写 `ok: True` → 5 类里 4 类失败也被记成"同步成功"
             # （09-26 实测：lastResult.ok=true，而 stock/bond/crypto/hk 全带 error）。
@@ -568,9 +867,10 @@ def _execute(trigger: str, force: bool = False) -> dict:
                 result["collectingTypes"] = ["us"]
             if failed:
                 result["failedTypes"] = failed
-                # 失败类型不自动重试是有意取舍：整轮同步实测 9.6~13min，
+                # 失败类型不无限重试是有意取舍：整轮同步实测 9.6~13min，
                 # 反复重试会持续占东财源族（CR7-7/C1 的让位逻辑同样怕这个）。
-                # 因此只把缺口显式暴露出来，交给人/下次调度决定。
+                # W3 起自然轮会安排**一次**有界补试（下面 `_plan_retry` 那段覆写这句 note），
+                # 其余触发形态（手动／启动补跑）仍只暴露缺口，不自动加码。
                 result["note"] = (
                     f"部分类型失败：{', '.join(failed)}——lastDate 已置位，"
                     f"本轮不自动重试；需要时可 POST /sync/run 或等下次调度"
@@ -612,6 +912,43 @@ def _execute(trigger: str, force: bool = False) -> dict:
         result = {"ok": None, "error": f"{type(e).__name__}: {e}", "outcome": "failed"}
         log.warning("daily sync failed: %s", e)
 
+    if retry_mode:
+        # W3：补试轮**不动**整轮状态位——`lastRun`／`lastDate`／`runs`／marker 都是
+        # "今天自然轮"的账，补试写进去就会把自然轮的结局盖掉（`runs` 尤其：它的义是
+        # "本进程跑了几轮整轮"）。补试的结果另有 `retry` 计划与 `retryLastResult` 两处。
+        result["retryTypes"] = [t for t in (types or []) if t not in RETRY_EXCLUDED_TYPES]
+        result["tookMsTotal"] = int((time.time() - started) * 1000)
+        result["callbackTimeoutS"] = int(timeout_s)
+        # W3 收尾修正（11-27 现查）：上面 `failed` 分支那句 note 是**整轮**语境的
+        # （"lastDate 已置位，本轮不自动重试"）。在补试轮里它自相矛盾——这一轮本身就是
+        # 那次重试——而且它不含任何一类的原因原文，盘上只剩一句"失败"。这里按补试语境改写：
+        # 点名这一轮补了谁、为什么还失败、以及「今天到此为止」（别让人以为 30 分钟后还会再来）。
+        per_type = [
+            f"{x.get('type')}: {x.get('error')}"
+            for x in (result.get("results") or [])
+            if isinstance(x, dict) and x.get("error")
+        ]
+        if result.get("failedTypes"):
+            result["note"] = (
+                f"补试仍失败：{', '.join(result.get('failedTypes') or [])}"
+                f"（{'; '.join(per_type)[:300]}）"
+                "——今日不再自动重试；旧数据保留，确要重跑走 POST /sync/run?force=true"
+            )
+        elif result.get("outcome") == "inconclusive":
+            result["note"] = (
+                "补试结果未知（回调读超时）——web 侧可能仍在写；"
+                "今日不再自动重试，请查 Product.updatedAt／snapshotAt"
+            )
+        _mark_retry_outcome(result)
+        # 刷新腿**只覆盖本轮涉及的类**：`exclude` 把其余类型剔掉。补试若顺手刷全市场，
+        # 既超出"只补失败类型"的边界，也会把成功类的 `snapshotAt` 抬到今日、
+        # 混掉"今天哪几条腿真的重新取过数"这条读数。
+        refresh = _refresh_leg(RETRY_TRIGGER, force, types=result["retryTypes"])
+        with _lock:
+            _state["retryLastRefresh"] = refresh
+        result["refresh"] = refresh
+        return result
+
     with _lock:
         _state["lastRun"] = datetime.now(TZ).isoformat(timespec="seconds")
         _state["lastDate"] = beijing_today()
@@ -631,6 +968,36 @@ def _execute(trigger: str, force: bool = False) -> dict:
     # 否则落进盘上的那份 `lastResult` 会比内存那份少两个键（同一个名字两种形状）。
     _mark_outcome(trigger, result.get("outcome"), result)
 
+    # W3：自然轮失败 ⇒ 登记一次有界补试（每日最多一次、延迟 30 分钟、不带 force）。
+    # 放在 `_mark_outcome` 之后＝"自然轮的结局"先落定，再登记"要不要补"；
+    # 顺序反过来的话，一次写盘失败会让 marker 缺失而补试计划还在，重启后无法归因。
+    # 触发形态闸门：只有 `daily`（02:00 cron）才繁衍补试。启动补跑是"今天还没试过"那一支，
+    # 手动轮是主人当场要的，两者的失败要么已有一次补跑机会、要么人就在现场 ⇒ 不自动加码。
+    retry_types = _retry_types_from(result) if trigger == DAILY_TRIGGER else []
+    if retry_types:
+        plan = _plan_retry(retry_types, f"{trigger} partial_failed")
+        if plan:
+            result["retryPlanned"] = {
+                "state": plan["state"],
+                "types": plan["types"],
+                "notBefore": plan["notBefore"],
+                "maxAttempts": plan["maxAttempts"],
+            }
+            # note 里那句"本轮不自动重试"从 W3 起不成立了——改成如实说明已安排什么。
+            result["note"] = (
+                f"部分类型失败：{', '.join(result.get('failedTypes') or [])}"
+                f"——已保留旧数据，并安排一次自动补试（{', '.join(plan['types'])}，"
+                f"{plan['notBefore'][11:16]} 起、每日最多一次、不带 force）；"
+                "也可 POST /sync/run?force=true 立即重跑"
+            )
+            _schedule_retry(plan)
+    elif result.get("outcome") == "partial_failed":
+        result["note"] = (
+            f"部分类型失败：{', '.join(result.get('failedTypes') or [])}"
+            "——失败类型只有 us（由持久化任务自行续跑），不排补试；"
+            "旧数据保留，确要重跑走 POST /sync/run?force=true"
+        )
+
     # 刀 3/甲-1：**同步腿收尾后链式触发刷新腿**。放在状态写入之后、`running` 放开之前
     # ⇒ 单飞（`run_now` 只看 `running`）自动覆盖整轮两条腿，刷新还在跑时再点同步会被挡。
     # 为什么不排成第二个 cron：拆腿后列表阶段会把新行的 lastPrice 抹成 null（整表删旧插新），
@@ -640,6 +1007,25 @@ def _execute(trigger: str, force: bool = False) -> dict:
         _state["lastRefresh"] = refresh
         _state["running"] = False
     return result
+
+
+def _mark_retry_outcome(result: dict) -> None:
+    """补试轮的结果落盘（`retry.lastResult`），不碰 marker 的 `lastAttempt*`。
+
+    为什么要单独一处：`_mark_outcome` 会把 `lastAttemptTrigger` 写成 `daily-retry`，
+    而那一位的语义是"今天自然轮是谁起的"——被补试改写之后，重启补跑判据与
+    `legStaleness` 都会把账算错一天。
+    """
+    plan = retry_state()
+    if not plan:
+        return
+    merged = {
+        **plan,
+        "lastOutcome": result.get("outcome"),
+        "lastResultAt": datetime.now(TZ).isoformat(timespec="seconds"),
+        "lastError": result.get("error"),
+    }
+    _write_retry(merged)
 
 
 def run_now(trigger: str = "manual", force: bool = False) -> dict:
@@ -836,6 +1222,32 @@ def _resume_us_job_after_start() -> None:
         log.warning("us list job resume failed: %s", e)
 
 
+def _resume_retry_after_start() -> None:
+    """W3：重启后恢复未执行的补试计划。
+
+    `pending` 且日期是今天 ⇒ 重新挂线程（到点就跑、过点就跑）；日期不是今天 ⇒
+    记 `cancelled` 并**不**改写成今天——"昨天没补成"这件事不能靠今天多补一次来圆，
+    那会让"每日最多一次"变成"每天最多一次且可以补昨天的"。
+
+    起点同样让 web 先就绪（与 `_resume_us_job_after_start` 的 8s 同一口径），
+    因为到点即跑的那一支会立刻打 `POST /api/sync`。
+    """
+    time.sleep(8)
+    plan = retry_state()
+    if not plan:
+        return
+    if plan.get("date") != beijing_today():
+        _cancel_retry(f"plan date {plan.get('date')} is not today（重启后不跨日补跑）")
+        return
+    if plan.get("state") != "pending":
+        return
+    try:
+        _schedule_retry(plan)
+        log.info("retry plan resumed after restart: notBefore=%s", plan.get("notBefore"))
+    except Exception as e:  # noqa: BLE001 恢复失败不能拖垮 DS 启动
+        log.warning("retry plan resume failed: %s", e)
+
+
 def start_scheduler() -> None:
     global _scheduler
     if _scheduler is not None:
@@ -853,6 +1265,9 @@ def start_scheduler() -> None:
     _scheduler.start()
     threading.Thread(target=_catch_up_if_needed, daemon=True, name="sync-catchup").start()
     threading.Thread(target=_resume_us_job_after_start, daemon=True, name="us-list-resume").start()
+    # W3：补试计划的恢复必须**排在启动补跑之后**——两者都落同一个 `running` 锁，
+    # 而启动补跑是"今天还没跑过"的那一支，优先级更高（补试只在自然轮已失败后才存在）。
+    threading.Thread(target=_resume_retry_after_start, daemon=True, name="sync-retry-resume").start()
     log.info("product sync scheduler started: daily %02d:%02d (Asia/Shanghai)", hour, minute)
 
 
@@ -917,4 +1332,10 @@ def status() -> dict:
         ),
         "jobs": jobs,
         "timezone": str(TZ),
+        # W3：补试计划（`pending/running/completed/exhausted/cancelled`）。盘上那份是真相，
+        # 内存镜像只是本进程刚写过的那份；两者不一致时以盘为准——一条 curl 就能读出
+        # "今天会不会再自动补一次、补哪几类、几点起"。`None`＝今天没有待执行计划。
+        "retry": (disk_marker or {}).get("retry"),
+        "retryLastResult": _state.get("retryLastResult"),
+        "retryLastRefresh": _state.get("retryLastRefresh"),
     }

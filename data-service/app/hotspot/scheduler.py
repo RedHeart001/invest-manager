@@ -24,6 +24,7 @@ from zoneinfo import ZoneInfo
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
+from ..utils.http import direct_proxies
 from ..utils.timeutil import beijing_today, leg_staleness
 from .pipeline import run_pipeline
 
@@ -277,6 +278,8 @@ def _catch_up_decide() -> None:
             # CR-06：补跑日期与 pipeline 落库口径一致（均北京时间）
             params={"date": beijing_today()},
             timeout=10,
+            # W1：容器间调用永远直连（配了海外代理时也不能被代理拦走）
+            proxies=direct_proxies(),
         )
         count = int((r.json() or {}).get("count", 0)) if r.ok else 0
         if count == 0:

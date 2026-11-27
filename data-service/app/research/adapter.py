@@ -20,6 +20,7 @@ from zoneinfo import ZoneInfo
 import requests
 
 from ..providers import ProviderError, get_provider_chain
+from ..utils.http import direct_proxies
 
 log = logging.getLogger("research.adapter")
 
@@ -127,6 +128,8 @@ def collect_kline_with_phases(type_: str, code: str, days: int = 182) -> dict:
             f"{WEB_BASE_URL}/api/kline",
             params={"type": type_, "code": code, "start": _iso_days_ago(days), "end": _today_iso()},
             timeout=60,
+            # W1：容器间调用永远直连
+            proxies=direct_proxies(),
         ),
         75.0,
     )

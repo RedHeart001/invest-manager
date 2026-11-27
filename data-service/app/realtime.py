@@ -55,6 +55,7 @@ from .providers.tencent_provider import (
     fetch_quote_fields,
     minute_rows_to_candles,
 )
+from .utils.http import direct_proxies
 from .utils.limiter import get_limiter
 from .utils.num import to_float
 from .utils.timeutil import beijing_now, beijing_today
@@ -257,6 +258,8 @@ def _price_leg(source: str, type_: str, code: str) -> dict:
             f"https://hq.sinajs.cn/list={sym}",
             timeout=LEG_TIMEOUT_S,
             headers=SINA_HEADERS,
+            # W1：新浪是国内源，强制直连（容器里可能配了海外代理）
+            proxies=direct_proxies(),
         )
         r.raise_for_status()
         return sina_fields_to_quote(code, _sina_fields(r.content.decode("gbk", errors="ignore")))

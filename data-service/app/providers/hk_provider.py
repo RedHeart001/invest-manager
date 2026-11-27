@@ -44,6 +44,7 @@ import time
 
 import requests
 
+from ..utils.http import direct_proxies, overseas_proxies, overseas_session
 from ..utils.num import to_float as _num
 from .base import BaseProvider, ProviderError, ProviderNotSupported, register, register_list
 
@@ -226,6 +227,8 @@ class HkProvider(BaseProvider):
                             params=params,
                             timeout=REQUEST_TIMEOUT,
                             headers={"User-Agent": "Mozilla/5.0"},
+                            # W1：东财是国内源，即使容器里配了海外代理也必须直连
+                            proxies=direct_proxies(),
                         )
                         r.raise_for_status()
                         return r.json()
@@ -436,7 +439,14 @@ class HkProvider(BaseProvider):
         def _fetch() -> tuple[list[dict], dict]:
             contents = []
             for url in (HKEX_EN_LIST_URL, HKEX_CN_LIST_URL):
-                response = requests.get(url, headers=HKEX_HEADERS, timeout=40)
+                # W1：港交所是海外源 ⇒ 显式代理；未配置代理时 overseas_proxies()
+                # 返回 None，行为与改造前一致（不虚构地址）。
+                response = overseas_session().get(
+                    url,
+                    headers=HKEX_HEADERS,
+                    timeout=40,
+                    proxies=overseas_proxies(),
+                )
                 response.raise_for_status()
                 contents.append(response.content)
             return _hkex_products(contents[0], contents[1])
@@ -552,6 +562,8 @@ class HkProvider(BaseProvider):
             },
             headers=HK_SINA_HEADERS,
             timeout=REQUEST_TIMEOUT,
+            # W1：新浪是国内源，强制直连
+            proxies=direct_proxies(),
         )
         r.raise_for_status()
         rows = json.loads(r.text)  # 探针实测：顶层就是数组，不套 data/result/list

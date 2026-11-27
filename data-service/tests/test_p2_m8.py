@@ -761,12 +761,18 @@ def test_stock_name_status_prefix() -> None:
 
 
 def test_stock_list_backup_source() -> None:
-    """`_list_stocks()` 自带主备切换，且降级必须按 CR9-31 把覆盖面差异自己说清楚。
+    """`_list_stocks()` 的 A 股主备语义（W2，2026-11-27 起为 fail-closed）。
 
-    立项依据（10-03 实测）：东财 `clist/get` 对三个 host、`pz=200`/`pz=10000` 一律
+    立项依据（10-03 实测）：东财 `clist/get` 曾对三个 host、`pz=200`/`pz=10000` 一律
     `RemoteDisconnected` ⇒ 列表链路硬不可用，`Product.stock` 停在 09-12 已 21 天；
     两份全量对比给出差集归因：东财多出的 343 只**全是已摘牌/退市类代码**（含「退市」61、
     `ST`/`*ST` 112），新浪独有 1 只（`920202`），且新浪含北交所 348 只＝与主源同市场面。
+
+    ⚠️ **11-27 改判（W2）**：当时候选"新浪可发布"的理由只在条数上成立——覆盖面、名称列、
+    `-U/-W` 后缀全都不等价，11-27 那轮据此把 5,580 行换进来，行数看着没变而源与口径都变了。
+    现在东财是唯一可发布源：东财失败 ⇒ `products=[]` + `acquisitionComplete=False`，
+    Web 侧在写暂存表之前拒绝，正式 `Product` 零写入。本用例既钉"主源成功照常发布、
+    备源零调用"，也钉"主源失败**不再**交付可发布候选"。
     """
     import pandas as pd
 
@@ -806,32 +812,33 @@ def test_stock_list_backup_source() -> None:
               meta.get("source") == "akshare" and "degraded" not in meta and "note" not in meta, str(meta))
         check("乙③🔁：主源成功时备源一次都没被调用（不是「每次都先问一遍新浪」）",
               sina_calls == [], str(sina_calls))
+        check("W2🔁：主源成功时不带 acquisitionComplete=False（fail-closed 不是永久禁用）",
+              meta.get("acquisitionComplete") is not False, str(meta))
 
-        # ② 主源失败 → 降级到新浪快照，名字/交易所/拼音都按备源形态重建
+        # ② 主源失败 → 新浪只作诊断，**不再交付可发布候选**（W2 行为变更）
         def _em_down(path, params):
             raise ProviderError("eastmoney request failed on all hosts: RemoteDisconnected")
 
         akp._em_get = _em_down  # type: ignore[assignment]
         items, meta = list_products_with_meta(akp._akshare, "stock")
         note = meta.get("note") or ""
-        check("乙③🔁：备源去掉了 symbol 前缀、交易所按前缀显式解析（CR-17 同口径）",
-              [x["code"] for x in items] == ["600028", "000012", "920000", "600519"]
-              and [x["exchange"] for x in items] == ["SH", "SZ", "BJ", "SH"],
-              str(items))
-        check("乙③🔁：口径①——备源含北交所（bj 行存在，不是把 920 段丢掉）",
-              sum(1 for x in items if x["exchange"] == "BJ") == 1, str(items))
-        check("乙③🔁：备源名字同样过清洗（XD 不进库）＋拼音按干净名生成",
-              items[2]["name"] == "安徽凤" and items[2]["pinyin"] == "anhuifeng", str(items[2]))
-        check("乙③🔁：备源 source/degraded 声明到位",
+        check("W2🔁：主源失败时 products 为空（新浪快照不再是等价候选）",
+              items == [], str(items)[:160])
+        check("W2🔁：主源失败时显式声明 acquisitionComplete=False（Web 据此零写入）",
+              meta.get("acquisitionComplete") is False, str(meta))
+        check("W2🔁：仍保留 source/degraded 说明，下标不被写成「正常」",
               meta.get("source") == "sina-a-share-spot" and meta.get("degraded") is True, str(meta))
-        check("乙③🔁：上游劣化这条路径**不带**『有意子集』声明（#35／CR9-63 的放行通道没被写宽）",
+        check("W2🔁：这条路径**不带**『有意子集』声明（#35／CR9-63 的放行通道没被写宽）",
               "intentionalSubset" not in meta, str(meta)[:120])
-        check("乙③🔁：note 说得出主源错误原文＋本次条数",
-              "RemoteDisconnected" in note and f"本次 {len(items)} 只" in note, note[:200])
-        check("乙③🔁：note 说得出两处真实代价（摘牌代码不会带来／新浪短名≤5 字符与 -U 后缀）",
+        check("W2🔁：note 说得出主源错误原文＋诊断条数＋拒绝交付",
+              "RemoteDisconnected" in note and "本次 4 只" in note and "拒绝交付" in note,
+              note[:240])
+        check("W2🔁：note 说得出两处真实代价（摘牌代码不会带来／新浪短名与 -U 后缀）",
               "已摘牌" in note and "短名" in note and "-U" in note, note[:260])
+        check("W2🔁：诊断计数确实来自新浪（备源被调用过一次，不是凭空写数）",
+              len(sina_calls) == 1, str(sina_calls))
 
-        # ②b 同一份数据换成**英文列名**也必须解析得动：本机 akshare 的
+        # ②b 同一份数据换成**英文列名**也要能数得动：本机 akshare 的
         # `stock_zh_a_spot` 给中文列名（代码=带 sh/sz/bj 前缀的 symbol），而同版本的
         # `bond_zh_hs_cov_spot` 给英文列名——**不能按"akshare 都用英文列名"推**，
         # 10-03 就是按英文键取 `code` 拿到 5571 行却一个 code 都没存下来。
@@ -840,20 +847,21 @@ def test_stock_list_backup_source() -> None:
             "name": ["XD中国石", "XD安徽凤"],
         })
         items_en, meta_en = list_products_with_meta(akp._akshare, "stock")
-        check("乙③🔁：英文列名形态（symbol/name）同样解析——不押注本机那套中文列名",
-              [x["code"] for x in items_en] == ["600028", "920000"]
-              and [x["exchange"] for x in items_en] == ["SH", "BJ"]
-              and items_en[1]["name"] == "安徽凤"
-              and meta_en.get("degraded") is True,
-              str(items_en))
+        check("乙③🔁：英文列名形态（symbol/name）同样数得出来——不押注本机那套中文列名",
+              items_en == [] and meta_en.get("acquisitionComplete") is False
+              and "本次 2 只" in (meta_en.get("note") or ""),
+              str(meta_en)[:200])
 
-        # ③ 两源皆失败 → 按既有契约抛 ProviderError，不静默交空表（C1 空载荷保护在上游）
+        # ③ 两源皆失败 → 按既有契约抛 ProviderError，且两个错误原因都留得住
         ak.stock_zh_a_spot = lambda: (_ for _ in ()).throw(RuntimeError("sina hs_a timeout"))  # type: ignore[assignment]
         try:
             list_products_with_meta(akp._akshare, "stock")
             check("乙③🔁：两源皆失败抛 ProviderError", False, "没抛错")
         except ProviderError as e:
-            check("乙③🔁：两源皆失败抛 ProviderError", "stock list unavailable" in str(e), str(e)[:160])
+            msg = str(e)
+            check("乙③🔁：两源皆失败抛 ProviderError", "stock list unavailable" in msg, msg[:160])
+            check("W2🔁：抛错时两个错误原因都在（东财原文＋新浪原文）",
+                  "RemoteDisconnected" in msg and "sina hs_a timeout" in msg, msg[:240])
 
         # ④ 备源回来了但一行都没有 → 同样抛，不能让"0 只"伪装成一次成功同步
         ak.stock_zh_a_spot = lambda: pd.DataFrame({"代码": [], "名称": []})  # type: ignore[assignment]

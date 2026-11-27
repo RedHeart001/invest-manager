@@ -20,6 +20,7 @@
 //   ⇒ 两列各管一条腿，闸门与陈旧说明才分得清"哪条腿今天动过"。
 
 import { prisma } from "./prisma";
+import { type SyncAttempt, retryNote, todayDegradedNote, todayFailure } from "./sync-state";
 import { beijingDateOf, beijingToday } from "./time";
 
 /** 分类浏览有 tab 的类型（见 `app/search/search-client.tsx` 的 `TABS`，两处要一起动）。
@@ -96,7 +97,23 @@ export async function snapshotRefreshedToday(type: string): Promise<Date | null>
     : null;
 }
 
-export type StaleNote = { type: string; kind: "list" | "snapshot" | "pending"; since: string };
+export type StaleNote = {
+  type: string;
+  /** W4 起从三档扩到六档：`failed`／`degraded`／`unavailable` 是**今日同步结果**这一侧
+   *  （判据来自 `sync-state.json`），前三档仍是"库里有多旧"那一侧。两侧合起来才是方案要的
+   *  四态（fresh 不出字），见下方 `staleNotes` 的说明。 */
+  kind: "list" | "snapshot" | "pending" | "failed" | "degraded" | "unavailable";
+  /** 这一档的判据日（YYYY-MM-DD）：陈旧三档＝那一列的日子；`failed`／`unavailable`＝
+   *  **最近一次成功的名单日**（拿不到时为空串，由文案说"没有"而不是编一个日子）。 */
+  since: string;
+  /** `failed`／`unavailable` 专用：这份"最近可用数据"的**快照日**（取不到就缺省）。
+   *  方案要求 stale 档必须同时说得出"数据时间"，只给名单日是不够的——名单和价格是两条腿。 */
+  dataAt?: string;
+  /** `failed`／`unavailable` 专用：失败原因（已脱敏、已截断的一句话） */
+  reason?: string;
+  /** `failed` 专用：补试安排的一句话（来自 `sync-state.json` 的 `retry` 计划） */
+  retry?: string;
+};
 
 /** 昨日（北京日界）——**给 1 天宽限**：休市日与"服务停了一晚"都不该报陈旧，
  *  否则 10-02 这种国庆休市日会天天出字，那句话就失去判别力了。 */
@@ -106,7 +123,21 @@ function previousDay(day: string): string {
 
 /** 陈旧／缺口说明（纯函数，便于把日界与"正常态不出字"都钉成断言）
  *
- * 三条规则各管一种成因，**同一类只报一条**（优先级 `list` ＞ `pending` ＞ `snapshot`）：
+ * 两条来源合起来才是方案要的四态（`fresh` 一律不出字）：
+ *
+ * **甲、今日同步结果这一侧**（`attempt`＝Web 读到的 DS `sync-state.json`，W4 新增）：
+ *  · 今日这一轮该类型**失败** ⇒ `failed`：立刻标'历史快照'，**不等超过一天**。
+ *    这一档治的正是"昨天成功、今天 02:00 失败"——旧判据只看库里有多旧，于是那一整天
+ *    页面都在把昨天的名单当今天的用，一句提示都没有（方案 §9 的分界：保留旧数据 ≠ 当最新）。
+ *    库里连一行都没有 ⇒ `unavailable`（"暂无数据／获取失败"，不虚构）。
+ *  · 今日取到了但**来源降级** ⇒ `degraded`：当日数据仍展示，只说清它降过级。
+ *    它与 `failed` 必须分开：旧数据不一定降级，新数据也可能降级。
+ *  · `skipped`（当日幂等闸门挡下）**不是失败**，也不产生说明——那说明这一类今天已经做完了。
+ *  · 今日这一轮**还没跑**（盘上还是昨天那轮）⇒ 这一侧一个字都不出。夜里 00:30 打开页面时
+ *    把昨天那轮的结果说成"今日失败"就是造假；而"数据确实老了"由下面乙那一侧照旧说。
+ *
+ * **乙、库内新鲜度这一侧**（原有三档，一条都不改判），**同一类只报一条**
+ * （优先级 `failed` ＞ `degraded` ＞ `list` ＞ `pending` ＞ `snapshot`）：
  *  · `listAt` 早于昨日 ⇒ 「{类}名单有些日子没换了」——列表是主数据（名称/代码/币种）之源，
  *    它旧了会连带 CR8-8 那类"按库内权威名判退市"的前提一起变旧（#25 的牵动项）。
  *  · 该类**一个价都没有**（`snapshotAt` 与 `lastPrice` 双双为 null）⇒ 「{类}的价格暂时还没有」。
@@ -127,11 +158,52 @@ function previousDay(day: string): string {
  * 10-02 的活体探针正好撞上：stock／bond／crypto 三类同日陈旧，屏上只剩两条，
  * 被藏掉的那一条恰恰是这句话要防的那种"看不见的降级"（R16）。
  */
-export function staleNotes(rows: Freshness[], today: string = beijingToday()): StaleNote[] {
+export function staleNotes(
+  rows: Freshness[],
+  today: string = beijingToday(),
+  attempt: SyncAttempt | null = null,
+): StaleNote[] {
   const cutoff = previousDay(today);
   const notes: StaleNote[] = [];
   for (const type of BROWSE_TYPES) {
     const row = rows.find((r) => r.type === type);
+    const failure = attempt ? todayFailure(attempt, type, today) : null;
+    // ① 今日这一轮失败了：不等超过一天，立刻把"这是最近可用数据"说出来。
+    if (failure) {
+      const listDay = row?.listAt ? beijingDateOf(row.listAt) : "";
+      if (!row) {
+        // 库里连一行都没有 ⇒ 从未取得过有效数据（不是"旧"，是"没有"）
+        notes.push({
+          type,
+          kind: "unavailable",
+          since: "",
+          reason: failure.error,
+          ...(attempt?.retry ? { retry: retryText(attempt, type, today) } : {}),
+        });
+        continue;
+      }
+      notes.push({
+        type,
+        kind: "failed",
+        since: listDay,
+        ...(row.snapAt ? { dataAt: beijingDateOf(row.snapAt) } : {}),
+        reason: failure.error,
+        ...(attempt?.retry ? { retry: retryText(attempt, type, today) } : {}),
+      });
+      continue;
+    }
+    // ② 今日取到了但来源降级：当日数据照常展示，只说清它降过级。
+    const degraded = attempt ? todayDegradedNote(attempt, type, today) : null;
+    if (degraded) {
+      if (row) {
+        notes.push({ type, kind: "degraded", since: today, reason: degraded });
+      } else {
+        // 取到了但库里一行都没落（例如缩水闸把这次写入挡掉了）⇒ 别把"今日已更新"说出口，
+        // 那是第一种谎；按"没有数据"报，原因照实带上降级那句。
+        notes.push({ type, kind: "unavailable", since: "", reason: degraded });
+      }
+      continue;
+    }
     if (!row) continue;
     if (row.listAt && beijingDateOf(row.listAt) < cutoff) {
       notes.push({ type, kind: "list", since: beijingDateOf(row.listAt) });
@@ -143,6 +215,14 @@ export function staleNotes(rows: Freshness[], today: string = beijingToday()): S
   }
   return notes;
 }
+
+/** 补试那一句只在**这一类**属于本次补试范围时才说（否则会让人以为别的类也被重试了）。 */
+function retryText(attempt: SyncAttempt, type: string, today: string): string | undefined {
+  const plan = attempt.retry;
+  if (!plan || !(plan.types ?? []).includes(type)) return undefined;
+  return retryNote(plan, today) ?? undefined;
+}
+
 
 /** #22(b) 乙＝「快照截至 X（覆盖 N/M）」的数据层出口（机器可读位；屏上那句住在
  *  `app/search/search-client.tsx`，与 `STALE_PHRASE` 同一层——文案归主人定）。

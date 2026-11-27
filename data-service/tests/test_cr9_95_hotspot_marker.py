@@ -79,9 +79,13 @@ class _WebQuery:
         self.calls = 0
         self._count = count
         self._raises = raises
+        self.proxies_seen: list = []
 
-    def __call__(self, url, params=None, timeout=None):
+    def __call__(self, url, params=None, timeout=None, **kw):
         self.calls += 1
+        # W1（11-27）：`_catch_up_decide` 的 web 回查带 `proxies=direct_proxies()`。
+        # 这里既收下它（否则 TypeError 会让整条 catch-up 判据失真），也留一份证据。
+        self.proxies_seen.append(kw.get("proxies"))
         if self._raises is not None:
             raise self._raises
         return _Resp(self._count)

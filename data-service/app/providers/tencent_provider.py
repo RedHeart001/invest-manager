@@ -17,6 +17,7 @@ from contextlib import contextmanager
 import requests
 from requests.exceptions import RequestException
 
+from ..utils.http import direct_proxies
 from ..utils.timeutil import beijing_today
 from .base import BaseProvider, ProviderError, ProviderNotSupported, register_chain
 
@@ -203,7 +204,8 @@ def _as_provider_error(op: str):
 
 def fetch_quote_fields(symbols: list[str], timeout: float = REQ_TIMEOUT) -> dict[str, list[str]]:
     """`qt.gtimg.cn/q=<sym>` 批量现价，返回 `{symbol: 字段数组}`；一条都没有时抛 ProviderError。"""
-    # NO_PROXY=* 已在 main 侧设置，这里直连国内源
+    # W1：腾讯是国内源 ⇒ 显式直连。此前只靠 main.py 的 `NO_PROXY=*`，但容器里
+    # compose 显式传了 NO_PROXY（不含 `*`），一旦填上 HTTPS_PROXY 就会走代理。
     out: dict[str, list[str]] = {}
     with _as_provider_error("quote"):
         for i in range(0, len(symbols), 60):  # 腾讯单次建议 ≤60 个
@@ -212,6 +214,7 @@ def fetch_quote_fields(symbols: list[str], timeout: float = REQ_TIMEOUT) -> dict
                 "https://qt.gtimg.cn/q=" + ",".join(chunk),
                 timeout=timeout,
                 headers={"User-Agent": "Mozilla/5.0"},
+                proxies=direct_proxies(),
             )
             r.raise_for_status()
             text = r.content.decode("gbk", errors="ignore")
@@ -260,6 +263,7 @@ def fetch_minute_payload(sym: str, timeout: float = REQ_TIMEOUT) -> tuple[str, l
             params={"code": sym},
             timeout=timeout,
             headers={"User-Agent": "Mozilla/5.0"},
+            proxies=direct_proxies(),
         )
         r.raise_for_status()
         payload = ((r.json() or {}).get("data") or {}).get(sym) or {}
@@ -389,6 +393,7 @@ class TencentProvider(BaseProvider):
                 params={"param": f"{sym},day,{s_req},{e_req},{days},qfq"},
                 timeout=REQ_TIMEOUT,
                 headers={"User-Agent": "Mozilla/5.0"},
+                proxies=direct_proxies(),
             )
             r.raise_for_status()
             data = ((r.json() or {}).get("data") or {}).get(sym) or {}
