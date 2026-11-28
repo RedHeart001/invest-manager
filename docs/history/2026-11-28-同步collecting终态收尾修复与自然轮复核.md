@@ -1,6 +1,6 @@
 # 2026-11-28 同步 collecting 终态收尾修复与自然轮复核
 
-> **生命周期：前向执行方案＋当日事件报告。** 截至 2026-11-28 10:20，阶段 0 证据冻结、阶段 1～3 的代码、定向测试、全量离线门禁与隔离 Compose 验收已完成；**正式部署待 11-28 原 watcher 自然结束**。当前状态只认 [FIX-LEDGER](../FIX-LEDGER.md)。
+> **生命周期：前向执行方案＋当日事件报告。** 截至 2026-11-28 11:57，阶段 0～4 已完成：原 watcher 于 11:38:57 按原逻辑到 deadline 自然结束；CR10-51 代码、门禁、隔离与正式 DS 装载通过，11-28 持久化结果已在部署后派生收尾。**阶段 5 的下一次完整自然轮仍未发生。** 当前状态只认 [FIX-LEDGER](../FIX-LEDGER.md)。
 >
 > **一句话结论：11-28 自然轮未全过。** 六类名单均已到货，03:30 备份与独立恢复通过；但同步总状态停在 `collecting`，权威 watcher 未收尾，五类行情刷新为 `partial_failed`（fund 2、hk 10 个空批次）。W1～W4 的失败分支仍未取得自然证据。
 
@@ -321,13 +321,13 @@ Web 核对：
 
 ## 10. 当前待办
 
-1. 等 11-28 原 watcher 自然结束（预计 11:01 左右），保存其最终状态；不重启、不编辑状态文件。
-2. watcher 结束后只重建 DS 到 `cr1051-1128-accept`，Web 保持现有健康实例，`w1w4-1127-accept`（DS `740c16a5981a`）作第一回退点。
-3. 部署后若启动恢复自动收尾了 11-28，必须标注为“部署后依据既有持久化结果完成的派生收尾，不是新代码完整自然轮证据”。
-4. 在 11-29 02:00 或之后的下一次自然轮验证 `collecting → completed`、只收尾一次、五类结果与 `lastRefresh` 保留。
-5. 不在 11-28 当天人工补跑，不把部署后的派生收尾写成自然轮证据。
+1. 等 11-29 02:00 或之后的下一次自然轮，使用已补强的 watcher 验证 `collecting → completed`、只收尾一次、五类结果保留、`lastRefresh` 独立可见。
+2. 验证 03:30 自然备份与独立恢复继续通过；不人工触发同步、热点或 `force`。
+3. 若新自然轮出现五类名单失败或 W3 补试，按原始结果归因，不用总状态 `completed` 覆盖行情或名单缺口。
+4. W2 A 股 fail-closed、W3 补试、W4 失败展示、W1 显式代理仍未获自然证据；本次不据此宣称已验证。
+5. 保留原始 11-28 记录与部署后派生收尾的区分；隔离现场和旧卷清理另行确认。
 
-## 11. 实施进展（2026-11-28 10:20）
+## 11. 实施进展（2026-11-28 11:57）
 
 ### 11.1 阶段 0：证据冻结
 
@@ -353,24 +353,40 @@ Web 核对：
 - `us_list_job.py`：美股 `completed` 落盘后调用收尾通知；通知失败不回滚美股完成状态，导入放在函数内避免循环依赖。
 - `watch-formal-e-natural.py`：记录 `/sync/status` 顶层 `lastRefresh`；用 `runId=daily-YYYY-MM-DD` 过滤上一轮遗留值；名单终态先到时，后续观察只补缺失的刷新证据。
 - `sync_scheduler._refresh_leg()`：刷新结果增加 `runId` 与 `finishedAt`，供取证器区分本轮。
+- 追加提交 `f88ebb3`：首次正式重启暴露 `lastRefresh` 仅住内存、重启后变 `null`。新增按精确 `runId` 从 Web 既有持久化 `refresh-progress` 只读恢复，标注 `recoveredFromWebProgress` 与 `lastRefreshFromWebProgress`；不改写原始进度文件、不改 marker、不刷新行情。
 
 ### 11.3 阶段 2：测试与门禁
 
 | 项 | 读数 |
 |---|---|
-| 新增 `test_cr10_51_collecting_finalize.py` | **23/23**：正常收尾、幂等、waiting/refresh_pending/publish_unknown、原轮失败、跨日、retry 保留、零网络、美股回调、主轮竞态、启动入口 |
+| 新增 `test_cr10_51_collecting_finalize.py` | 初版 **23/23**；加入重启恢复后 **26/26**：正常收尾、幂等、waiting/refresh_pending/publish_unknown、原轮失败、跨日、retry 保留、零网络、美股回调、主轮竞态、启动入口、精确 runId 恢复与错轮拒绝 |
 | `test_cr9_sync_status.py` | 77/77 |
 | `test_cr10_49_us_list_job.py` | 76/76 |
-| `node scripts/gate.mjs --offline` | **全绿**：tsc 0、Vitest 747/747、DS **42 套 1575/1575**、docs 全过；回执 `data-service/runtime/gate1-99-1128-1018.out` |
+| `node scripts/gate.mjs --offline` | 初版全绿：42 套 1575/1575，回执 `gate1-99-1128-1018.out`；最终版全绿：tsc 0、Vitest 747/747、DS **42 套 1578/1578**、docs 全过，回执 `data-service/runtime/gate1-100-1128-1154.out` |
 
 ### 11.4 阶段 3：候选镜像与隔离验收
 
 | 项 | 读数 |
 |---|---|
-| 候选 DS 镜像 | `invest-manager-data-service:cr1051-1128-accept`＝`abb3a3a37441`（`sha256:abb3a3a37441…57809`） |
+| 候选 DS 镜像 | 初版 `abb3a3a37441`；重启恢复补丁后的正式候选 `invest-manager-data-service:cr1051-1128-accept`＝`41651e9cd259`（`sha256:41651e9cd259…efe5c`） |
 | 容器内符号 | `_finalize_collecting_from_us` 3 处、`_notify_sync_collecting_finalized` 2 处 |
-| 隔离 Compose | **30/30 通过**，项目 `invest-verify-31644`，Web 端口 `33644` |
+| 隔离 Compose | 初版与最终版均 **30/30 通过**；最终项目 `invest-verify-16784`，Web 端口 `33784`，回执 `verify-isolated-cr1051-1128-r2.log` |
 | 候选容器内行为 | 临时 marker 从 `collecting` 收尾为 `completed`、`usSnapshotId=verify-snap`、`collectingTypes` 移除 |
 | 现场 | 隔离容器、卷与临时恢复卷按既有纪律保留，未自动清理 |
 
-**边界**：以上只证明代码可运行、收尾分支在隔离环境成立；**未装载、未取得 11-28 之后的新自然轮证据**。不得写成“已修复并经自然轮验证”。
+**边界**：以上证明代码可运行、收尾分支在隔离环境成立；正式装载结果见 §11.5，仍不是下一次完整自然轮证据。
+
+### 11.5 阶段 4：原 watcher 收尾与正式装载
+
+| 项 | 实际结果 |
+|---|---|
+| 原 watcher | 11:38:57（北京时间）按原逻辑到 deadline，exit 2；`finishedAt=2026-11-28T03:38:57.439181+00:00`、`allRequirementsMet=false`、`instrumentStatus=ok`、连续错误 0。没有人工终止、重启或编辑状态文件 |
+| 最终证据 | `freeze-1128/final-formal-e-natural-watch-20261128.json`，SHA-256 `863146af44ce29d7face7e4834e7883fe07ea3f7ae6f6afbe30fc08fa64e675d`；原 `.out` 与 resumed stdout 一并冻结 |
+| 首次 DS 装载 | 11:47 后 DS healthy；启动恢复依据 11-28 持久化结果把 `collecting` 派生收尾为 `completed`，`finalizedAt=2026-11-28T11:47:21+08:00`，原始 `at=02:09:12` 与五类结果保留，`retry=null` |
+| 首次装载发现 | DS 重启后内存 `lastRefresh` 丢失，`/sync/status.lastRefresh=null`；Web 卷内 `daily-2026-11-28` 原始进度仍完整保留 fund 2／hk 10 空批次。未手改生产状态，追加 `f88ebb3` 后重新走门禁与隔离 |
+| 最终正式镜像 | DS `cr1051-1128-accept`＝`41651e9cd259` healthy；Web 保持 `w1w4-1127-accept`＝`8a8e397ef8a0` healthy，启动时刻未变 |
+| 最终 `/sync/status` | 总状态派生 `completed`；`lastRefresh.outcome=partial_failed`、`weakTypes=[fund,hk]`、`runId=daily-2026-11-28`、`recoveredFromWebProgress=true`；原始逐类缺口继续可见 |
+| 正式冒烟 | **8/8**，回执 `data-service/runtime/smoke-cr1051-1128.out`；数据库 `integrity=ok`、Product 43,797、迁移 12 |
+| 回退 | DS `w1w4-1127-accept`＝`740c16a5981a` 保留；Web 未重建 |
+
+**这是部署后依据既有持久化结果完成的派生收尾，不是新代码完整自然轮证据。** 11-28 的自然轮结论仍是“未全过”；只有下一次真实自然窗口通过阶段 5，才可写“已修复并经自然轮验证”。
