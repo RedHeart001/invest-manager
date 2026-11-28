@@ -834,6 +834,20 @@ def _post_refresh(snapshot_id: str) -> dict:
     return {"ok": not weak, "results": results, "weakTypes": weak}
 
 
+def _notify_sync_collecting_finalized() -> None:
+    """CR10-51：美股完成后通知同步调度器把当日 `collecting` marker 收尾。
+
+    只做状态回写，不触发采集/发布/刷新。导入放在函数内，避免
+    `sync_scheduler` ↔ `us_list_job` 的模块级循环依赖。
+    """
+    try:
+        from . import sync_scheduler
+
+        sync_scheduler._finalize_collecting_from_us()
+    except Exception as exc:  # noqa: BLE001 收尾失败不能回滚美股完成状态
+        log.warning("sync collecting finalize notify failed: %s", exc)
+
+
 def _refresh_once() -> dict:
     state = _load_state()
     snapshot_id = state.get("snapshotId")
@@ -890,7 +904,11 @@ def _refresh_once() -> dict:
         }
     )
     log.info("us list job completed: %s", snapshot_id)
-    return _save_state(state)
+    saved = _save_state(state)
+    # CR10-51：先落美股自己的完成态，再通知同步 marker 收尾；通知失败不回滚这里。
+    if saved.get("trigger") == "daily":
+        _notify_sync_collecting_finalized()
+    return saved
 
 
 # ---------- 调度入口 ----------

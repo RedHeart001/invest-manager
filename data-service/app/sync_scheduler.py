@@ -292,6 +292,114 @@ def _mark_outcome(trigger: str, outcome: object, result: dict | None = None) -> 
         _state["markerWriteFailed"] = not ok
 
 
+_finalize_lock = threading.Lock()
+
+
+def _finalize_collecting_from_us(us_status: dict | None = None) -> bool:
+    """把「五类已完成、美股仍在采集」的当日 marker 幂等收尾为 `completed`。
+
+    CR10-51（2026-11-28 自然轮）：02:09 五类收尾时美股还在持久化采集，marker 正确写
+    `collecting`；02:26 美股发布并刷新完成后，`us_list_job` 只写自己的状态，没有人回写
+    同步 marker ⇒ `/sync/status` 永久停在 `collecting`，watcher 也等不到终态。
+
+    这里只做**状态收尾**：不采集、不发布、不刷新、不排补试、不伪造整轮耗时。判据必须
+    同时成立才推进；任一不成立就原样返回 False（幂等空操作）。写盘前再读一次并与第一次
+    读到的 marker 全等比较，避免把期间新起的一轮（手动／跨日）覆盖掉。
+    """
+    if us_status is None:
+        from . import us_list_job
+
+        us_status = us_list_job.status()
+    if not isinstance(us_status, dict):
+        return False
+    if us_status.get("state") != "completed" or us_status.get("refreshOutcome") != "completed":
+        return False
+    today = beijing_today()
+    if us_status.get("completedDate") != today:
+        return False
+    snapshot_id = us_status.get("snapshotId")
+    if not snapshot_id:
+        return False
+
+    with _finalize_lock:
+        marker = read_sync_state()
+        if not isinstance(marker, dict):
+            return False
+        if marker.get("lastAttemptTrigger") != DAILY_TRIGGER:
+            return False
+        if marker.get("lastAttemptOutcome") != "collecting":
+            return False
+        if marker.get("lastAttemptDate") != today:
+            return False
+        result = marker.get("lastResult")
+        if not isinstance(result, dict):
+            return False
+        collecting_types = result.get("collectingTypes")
+        if not isinstance(collecting_types, list) or "us" not in collecting_types:
+            return False
+        results = result.get("results")
+        if not isinstance(results, list) or not results:
+            return False
+        # 原五类必须没有错误；有任何 failedTypes／逐类 error 都不许借美股完成洗白。
+        if result.get("failedTypes"):
+            return False
+        if any(isinstance(row, dict) and row.get("error") for row in results):
+            return False
+        us_row = next(
+            (row for row in results if isinstance(row, dict) and row.get("type") == "us"),
+            None,
+        )
+        if us_row is None:
+            return False
+
+        finalized_at = datetime.now(TZ).isoformat(timespec="seconds")
+        new_results = []
+        for row in results:
+            if isinstance(row, dict) and row.get("type") == "us":
+                new_results.append(
+                    {
+                        "type": "us",
+                        "count": us_status.get("publishedCount"),
+                        "snapshotId": snapshot_id,
+                        "jobState": "completed",
+                        "published": True,
+                        "refreshOutcome": "completed",
+                        "note": "persistent us list job completed and refreshed",
+                    }
+                )
+            else:
+                new_results.append(row)
+        new_result = {
+            **result,
+            "ok": True,
+            "outcome": "completed",
+            "results": new_results,
+            "note": "美股完整名单已发布并完成刷新：collecting 收尾为 completed（未重复发布/刷新）",
+            "finalizedFrom": "collecting",
+            "finalizedAt": finalized_at,
+            "usSnapshotId": snapshot_id,
+            "usCompletedAt": us_status.get("lastCompletedAt"),
+        }
+        new_result.pop("collectingTypes", None)
+        payload = {**marker, "lastAttemptOutcome": "completed", "lastResult": new_result}
+
+        if read_sync_state() != marker:
+            log.warning("sync collecting finalize skipped: marker changed while checking")
+            return False
+        if not _write_marker(payload):
+            return False
+        with _lock:
+            in_proc = _state.get("lastResult")
+            if isinstance(in_proc, dict) and in_proc.get("outcome") == "collecting":
+                _state["lastResult"] = new_result
+        log.info(
+            "sync collecting finalized from us job: snapshot=%s completedAt=%s",
+            snapshot_id,
+            us_status.get("lastCompletedAt"),
+        )
+        return True
+
+
 def _sync_hour_minute() -> tuple[int, int]:
     """调度时刻（env SYNC_HOUR / SYNC_MINUTE 可覆盖，非法值回落默认）。"""
     try:
@@ -683,6 +791,10 @@ def _refresh_leg(trigger: str, force: bool = False, types: list[str] | None = No
 
     out["callbackTimeoutS"] = int(timeout_s)
     out["tookMsTotal"] = int((time.time() - started) * 1000)
+    # CR10-51：给刷新腿留下“哪一轮、何时收尾”，供 watcher 区分本轮与上一轮遗留的
+    # `_state["lastRefresh"]`（进程跨日不重启时，旧值会一直挂在内存里）。
+    out["runId"] = run_id
+    out["finishedAt"] = datetime.now(TZ).isoformat(timespec="seconds")
     return out
 
 
@@ -968,6 +1080,11 @@ def _execute_types(trigger: str, types: list[str] | None = None, force: bool = F
     # 否则落进盘上的那份 `lastResult` 会比内存那份少两个键（同一个名字两种形状）。
     _mark_outcome(trigger, result.get("outcome"), result)
 
+    # CR10-51：美股可能在“读 status → 写 collecting marker”之间完成（竞态）。写盘后
+    # 立即再检查一次；不成立就保持 collecting，由美股完成回调或启动恢复继续收尾。
+    if trigger == DAILY_TRIGGER and result.get("outcome") == "collecting":
+        _finalize_collecting_from_us()
+
     # W3：自然轮失败 ⇒ 登记一次有界补试（每日最多一次、延迟 30 分钟、不带 force）。
     # 放在 `_mark_outcome` 之后＝"自然轮的结局"先落定，再登记"要不要补"；
     # 顺序反过来的话，一次写盘失败会让 marker 缺失而补试计划还在，重启后无法归因。
@@ -1220,6 +1337,12 @@ def _resume_us_job_after_start() -> None:
         _resume_us_job_if_due()
     except Exception as e:  # noqa: BLE001 任务恢复失败不能拖垮 DS
         log.warning("us list job resume failed: %s", e)
+    # CR10-51：若进程在“美股已完成、marker 还没收尾”之间重启，这里按持久化结果补齐。
+    # 不重跑任务、不发网络请求；跨日或已收尾时是空操作。
+    try:
+        _finalize_collecting_from_us()
+    except Exception as e:  # noqa: BLE001 收尾失败只留痕，不拖垮启动
+        log.warning("sync collecting finalize after start failed: %s", e)
 
 
 def _resume_retry_after_start() -> None:

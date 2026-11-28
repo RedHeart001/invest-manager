@@ -32,6 +32,8 @@ for _s in (sys.stdout, sys.stderr):
 _TMP = tempfile.mkdtemp(prefix="cr1049-job-")
 os.environ["LIMITER_STATE_FILE"] = os.path.join(_TMP, "limiter-state.json")
 os.environ["US_LIST_JOB_DIR"] = os.path.join(_TMP, "job")
+# CR10-51：美股 completed 会回调同步收尾；测试必须把 marker 也指到临时目录。
+os.environ["SYNC_STATE_FILE"] = os.path.join(_TMP, "sync-state.json")
 os.environ.pop("US_LIST_PAGES", None)
 os.environ.pop("US_LIST_BURST_TIMEOUT_S", None)
 

@@ -105,6 +105,24 @@ def preflight(args):
     disk_state("/backup/state.json", args)
 
 
+def refresh_for_target(sync, target):
+    """取本轮刷新腿结果；旧进程遗留的上一轮 `lastRefresh` 不能冒充本轮。
+
+    CR10-51 起 `_refresh_leg` 带 `runId=daily-YYYY-MM-DD` 与 `finishedAt`。没有这两个
+    字段的旧形状按“未知”处理（返回 None），由后续观察在拿到本轮结果时补记。
+    """
+    refresh = sync.get("lastRefresh") or (sync.get("lastResult") or {}).get("lastRefresh")
+    if not isinstance(refresh, dict):
+        return None
+    run_id = refresh.get("runId")
+    if run_id:
+        return refresh if run_id == f"daily-{target}" else None
+    finished = str(refresh.get("finishedAt") or "")
+    if finished:
+        return refresh if finished.startswith(target) else None
+    return None
+
+
 def sync_candidate(sync, target):
     attempt = sync.get("lastAttempt") or {}
     if attempt.get("lastAttemptDate") != target or attempt.get("lastAttemptTrigger") != "daily":
@@ -122,7 +140,7 @@ def sync_candidate(sync, target):
         "failedTypes": result.get("failedTypes"),
         "error": result.get("error"),
         "results": [{k: row.get(k) for k in ["type", "count", "skipped", "outcome", "error"]} for row in result.get("results") or []],
-        "lastRefresh": result.get("lastRefresh"),
+        "lastRefresh": refresh_for_target(sync, target),
         "jobs": sync.get("jobs"),
     }
 
@@ -315,6 +333,13 @@ def observe(state, args):
     candidate = sync_candidate(sync, args.target)
     if state.get("naturalSync") is None and candidate:
         state["naturalSync"] = candidate
+    elif state.get("naturalSync") is not None and state["naturalSync"].get("lastRefresh") is None:
+        # CR10-51：名单终态可能先到、五类刷新腿后收尾。只补缺失的刷新证据，
+        # 不改已封存的 outcome／results；上一轮的 lastRefresh 由 refresh_for_target 挡掉。
+        refresh = refresh_for_target(sync, args.target)
+        if refresh is not None:
+            state["naturalSync"]["lastRefresh"] = refresh
+            state["naturalSync"]["lastRefreshObservedAt"] = datetime.now(timezone.utc).isoformat()
     candidate = hotspot_candidate(hotspot, args.target)
     if state.get("naturalHotspot") is None and candidate:
         state["naturalHotspot"] = candidate
