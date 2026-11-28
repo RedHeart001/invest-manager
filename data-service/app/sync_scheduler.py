@@ -671,7 +671,7 @@ def _refresh_progress(run_id: str | None = None) -> dict | None:
 
     这是**本机 BFF 的一次只读 GET**：不出网、不占任何源族额度；读不到就返回 None
     （观测通道不得把主流程再拖一次，CR9-45 那条"观测与被观测对象抢同一份资源"的教训）。
-    只在失败路径调用——成功路径的逐类结果本来就在 `results` 里，多问一次是浪费。
+    失败路径用于补回逐类进度；CR10-51 起 DS 重启后也按精确 runId 恢复最近一轮刷新结果。
     """
     import requests
 
@@ -686,6 +686,46 @@ def _refresh_progress(run_id: str | None = None) -> dict | None:
     except Exception as e:  # noqa: BLE001 进度读不到不改变刷新腿自己的结论
         log.warning("refresh progress read failed: %s", e)
         return None
+
+
+def _refresh_from_web_progress(prog: dict | None, run_id: str) -> dict | None:
+    """把 Web 已持久化的精确 run 还原成 DS `lastRefresh` 形状，不改写原文件。"""
+    if not isinstance(prog, dict) or prog.get("runId") != run_id:
+        return None
+    if prog.get("outcome") not in ("completed", "failed"):
+        return None
+    results = prog.get("done")
+    if not isinstance(results, list) or not results:
+        return None
+    weak = [
+        str(row.get("type"))
+        for row in results
+        if isinstance(row, dict) and int(row.get("failedBatches") or 0) > 0
+    ]
+    return {
+        "ok": prog.get("outcome") == "completed" and not weak,
+        "results": results,
+        "outcome": "failed" if prog.get("outcome") == "failed" else ("partial_failed" if weak else "completed"),
+        **({"weakTypes": weak} if weak else {}),
+        "runId": run_id,
+        "finishedAt": prog.get("finishedAt"),
+        "startedAt": prog.get("startedAt"),
+        "recoveredFromWebProgress": True,
+        "recoveryNote": "DS 重启后按精确 runId 从 Web 已持久化的逐类进度恢复；原始结果未改写。",
+    }
+
+
+def _recover_last_refresh() -> dict | None:
+    """DS 重启后的只读恢复；marker 的收集终态与行情刷新结果各自保留。"""
+    marker = read_sync_state() or {}
+    result = marker.get("lastResult")
+    if not isinstance(result, dict) or result.get("outcome") not in ("completed", "partial_failed", "failed", "skipped"):
+        return None
+    if marker.get("lastAttemptDate") != beijing_today():
+        return None
+    trigger = marker.get("lastAttemptTrigger")
+    run_id = f"retry-{beijing_today()}" if trigger == RETRY_TRIGGER else f"daily-{beijing_today()}"
+    return _refresh_from_web_progress(_refresh_progress(run_id), run_id)
 
 
 def _refresh_leg(trigger: str, force: bool = False, types: list[str] | None = None) -> dict:
@@ -1420,6 +1460,11 @@ def status() -> dict:
     sync_hour, sync_minute = _sync_hour_minute()
     from . import us_list_job
 
+    # CR10-51：刷新结果原先只住内存，重启会让 fund/hk 的部分失败从 /sync/status 消失。
+    # 按 marker 对应的精确 runId 从 Web 已持久化进度恢复；读不到就是 None，不猜、不改原文件。
+    in_proc_refresh = _state.get("lastRefresh")
+    disk_refresh = None if in_proc_refresh is not None else _recover_last_refresh()
+
     return {
         "running": _state["running"],
         "runs": _state["runs"],
@@ -1431,7 +1476,8 @@ def status() -> dict:
         # 让位热点超时），这些原因此前只存在于 `log.info` 里，而 uvicorn 默认配置根本不打 info。
         "skippedReason": _state.get("skippedReason"),
         # 刀 3/甲-1：刷新腿那份结果（含它自己的 outcome／预算／skippedReason）
-        "lastRefresh": _state.get("lastRefresh"),
+        "lastRefresh": in_proc_refresh if in_proc_refresh is not None else disk_refresh,
+        "lastRefreshFromWebProgress": in_proc_refresh is None and disk_refresh is not None,
         # CR10-49：美股完整名单的持久化任务状态。`collecting/waiting` 不是失败，
         # `completed` 只表示完整候选已发布且 us 行情刷新收尾。
         "usListJob": us_list_job.status(),

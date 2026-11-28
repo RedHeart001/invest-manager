@@ -8,6 +8,7 @@
 - 五类结果与原始尝试时刻原样保留，只替换 us 占位并增加审计字段；
 - 重复调用、美股未完成、原轮失败、跨日、写盘竞态 ⇒ 不推进；
 - 不生成补试、不产生网络请求、`lastRefresh` 保持独立可见；
+- DS 重启后按精确 `runId` 从 Web 持久化进度恢复行情缺口，不把总状态 completed 当全成功；
 - 美股完成回调、主轮写 marker 后竞态、启动恢复三个入口都能触发收尾。
 
 运行（零出网、零 SQLite）：
@@ -310,6 +311,49 @@ def test_main_round_race() -> None:
           and ((disk.get("lastResult") or {}).get("finalizedFrom") == "collecting"))
 
 
+def test_refresh_recovery_after_restart() -> None:
+    marker = _marker(lastAttemptOutcome="completed")
+    marker["lastResult"]["outcome"] = "completed"
+    _reset_marker(marker)
+    with ss._lock:
+        ss._state["lastResult"] = None
+        ss._state["lastRefresh"] = None
+    progress = {
+        "runId": f"daily-{TODAY}",
+        "outcome": "completed",
+        "startedAt": "2026-11-27T18:09:12.938Z",
+        "finishedAt": "2026-11-27T18:24:30.819Z",
+        "done": [
+            {"type": "fund", "updated": 24460, "failedBatches": 2, "failedEmpty": 2},
+            {"type": "hk", "updated": 3162, "failedBatches": 10, "failedEmpty": 10},
+        ],
+    }
+    calls: list[str | None] = []
+    orig_progress = ss._refresh_progress
+    ss._refresh_progress = lambda run_id=None: calls.append(run_id) or copy.deepcopy(progress)  # type: ignore[assignment]
+    try:
+        st = ss.status()
+    finally:
+        ss._refresh_progress = orig_progress
+    refresh = st.get("lastRefresh") or {}
+    check("⑫ DS 重启后按精确 runId 恢复 Web 持久化刷新结果",
+          calls == [f"daily-{TODAY}"] and refresh.get("outcome") == "partial_failed"
+          and refresh.get("weakTypes") == ["fund", "hk"]
+          and refresh.get("recoveredFromWebProgress") is True
+          and st.get("lastRefreshFromWebProgress") is True)
+    check("⑫ 原始逐类 failedBatches/failedEmpty 不被总状态 completed 吞掉",
+          [r.get("failedBatches") for r in refresh.get("results") or []] == [2, 10]
+          and [r.get("failedEmpty") for r in refresh.get("results") or []] == [2, 10])
+
+    orig_progress = ss._refresh_progress
+    ss._refresh_progress = lambda run_id=None: {**copy.deepcopy(progress), "runId": "daily-2000-01-01"}  # type: ignore[assignment]
+    try:
+        recovered = ss._recover_last_refresh()
+    finally:
+        ss._refresh_progress = orig_progress
+    check("⑫b runId 不匹配时不拿别轮结果冒充本轮", recovered is None)
+
+
 def test_startup_hook() -> None:
     _reset_marker()
     called: list[bool] = []
@@ -343,6 +387,7 @@ def main() -> int:
     test_no_network()
     test_us_refresh_callback()
     test_main_round_race()
+    test_refresh_recovery_after_restart()
     test_startup_hook()
     passed = sum(1 for _, ok, _ in results if ok)
     print(f"\n===== {passed}/{len(results)} 通过 =====")
