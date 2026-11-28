@@ -1,6 +1,6 @@
 # 2026-11-28 同步 collecting 终态收尾修复与自然轮复核
 
-> **生命周期：前向执行方案＋当日事件报告。** 截至 2026-11-28 09:36，11-28 自然窗口的关键读数已写入本文件；阶段 0 的原始文件复制与哈希留证、阶段 1～5 的代码修复与验收**尚未执行，待授权**。当前状态只认 [FIX-LEDGER](../FIX-LEDGER.md)。
+> **生命周期：前向执行方案＋当日事件报告。** 截至 2026-11-28 10:20，阶段 0 证据冻结、阶段 1～3 的代码、定向测试、全量离线门禁与隔离 Compose 验收已完成；**正式部署待 11-28 原 watcher 自然结束**。当前状态只认 [FIX-LEDGER](../FIX-LEDGER.md)。
 >
 > **一句话结论：11-28 自然轮未全过。** 六类名单均已到货，03:30 备份与独立恢复通过；但同步总状态停在 `collecting`，权威 watcher 未收尾，五类行情刷新为 `partial_failed`（fund 2、hk 10 个空批次）。W1～W4 的失败分支仍未取得自然证据。
 
@@ -321,9 +321,56 @@ Web 核对：
 
 ## 10. 当前待办
 
-1. 等 11-28 原 watcher 自然结束，保存其最终状态。
-2. 授权后执行阶段 0 的原始文件复制与哈希留证。
-3. 按阶段 1～3 完成代码、测试、门禁与隔离验收。
-4. 通过后只重建 DS，保留 `w1w4-1127-accept` 回退。
-5. 在 11-29 02:00 或之后的下一次自然轮验证 `collecting → completed`。
-6. 不在 11-28 当天人工补跑，不把部署后的派生收尾写成自然轮证据。
+1. 等 11-28 原 watcher 自然结束（预计 11:01 左右），保存其最终状态；不重启、不编辑状态文件。
+2. watcher 结束后只重建 DS 到 `cr1051-1128-accept`，Web 保持现有健康实例，`w1w4-1127-accept`（DS `740c16a5981a`）作第一回退点。
+3. 部署后若启动恢复自动收尾了 11-28，必须标注为“部署后依据既有持久化结果完成的派生收尾，不是新代码完整自然轮证据”。
+4. 在 11-29 02:00 或之后的下一次自然轮验证 `collecting → completed`、只收尾一次、五类结果与 `lastRefresh` 保留。
+5. 不在 11-28 当天人工补跑，不把部署后的派生收尾写成自然轮证据。
+
+## 11. 实施进展（2026-11-28 10:20）
+
+### 11.1 阶段 0：证据冻结
+
+原始读数已复制到 `data-service/runtime/freeze-1128/`，关键哈希：
+
+| 对象 | 大小 | SHA-256 |
+|---|---:|---|
+| `container-sync-state.json`（权威 marker，取自容器 `/data/runtime/sync-state.json`） | 1,159 B | `ebb1253786e07f0ef818a331d46a503d16becfc094ac5bfc8cb9a22164e32971` |
+| `container-us-list-job-state.json` | 596 B | 见冻结目录 |
+| `sync-status.json`（09:5x `/sync/status`） | 5,636 B | 见冻结目录 |
+| `formal-e-natural-watch-20261128.json` | 1,620 B | `a67bb7fceee69a4cab1fa6fc2665dd280d4321bcb86671e0876c734ad2ef56d7` |
+| `night-redundant-20261128.jsonl` | 140,854 B | `d4c8386898dfc17e9f11739def99cc72d78ba808d9ea15c7c005240f5f9c8dce` |
+| `night-keepalive-20261128.jsonl` | 9,805 B | `173d98dfb61200bda59c0d1cbe81ef70c0d94adb8d992bbeab117c72f3cc0210` |
+| `backups/dev-20261128-033000.db` | 62,406,656 B | `86beeda5e81673a4c094199dc9a00f70dff156c3eadee9311854093410657a7b` |
+
+**现场修正**：宿主 `data-service/runtime/sync-state.json` 是 2026-11-13 的旧副本，不是 11-28 的 marker。正式实例的权威 marker 在 `invest-manager_prisma-data` 卷的 `/data/runtime/sync-state.json`（容器内 `SYNC_STATE_FILE`），冻结时已单独取回。后续复核与部署都以卷内文件为准。
+
+### 11.2 阶段 1：代码
+
+提交 `c9a516d`（已推 `origin/dev`）：
+
+- `sync_scheduler.py`：新增幂等 `_finalize_collecting_from_us()`；三个入口为主轮写 marker 后复核、美股完成回调、DS 启动恢复。只替换 us 占位、移除 `collectingTypes`、写 `finalizedFrom/finalizedAt/usSnapshotId/usCompletedAt`，保留五类结果、原始 `at`、`lastAttemptTrigger=daily`、`retry` 与 `lastRefresh`。
+- `us_list_job.py`：美股 `completed` 落盘后调用收尾通知；通知失败不回滚美股完成状态，导入放在函数内避免循环依赖。
+- `watch-formal-e-natural.py`：记录 `/sync/status` 顶层 `lastRefresh`；用 `runId=daily-YYYY-MM-DD` 过滤上一轮遗留值；名单终态先到时，后续观察只补缺失的刷新证据。
+- `sync_scheduler._refresh_leg()`：刷新结果增加 `runId` 与 `finishedAt`，供取证器区分本轮。
+
+### 11.3 阶段 2：测试与门禁
+
+| 项 | 读数 |
+|---|---|
+| 新增 `test_cr10_51_collecting_finalize.py` | **23/23**：正常收尾、幂等、waiting/refresh_pending/publish_unknown、原轮失败、跨日、retry 保留、零网络、美股回调、主轮竞态、启动入口 |
+| `test_cr9_sync_status.py` | 77/77 |
+| `test_cr10_49_us_list_job.py` | 76/76 |
+| `node scripts/gate.mjs --offline` | **全绿**：tsc 0、Vitest 747/747、DS **42 套 1575/1575**、docs 全过；回执 `data-service/runtime/gate1-99-1128-1018.out` |
+
+### 11.4 阶段 3：候选镜像与隔离验收
+
+| 项 | 读数 |
+|---|---|
+| 候选 DS 镜像 | `invest-manager-data-service:cr1051-1128-accept`＝`abb3a3a37441`（`sha256:abb3a3a37441…57809`） |
+| 容器内符号 | `_finalize_collecting_from_us` 3 处、`_notify_sync_collecting_finalized` 2 处 |
+| 隔离 Compose | **30/30 通过**，项目 `invest-verify-31644`，Web 端口 `33644` |
+| 候选容器内行为 | 临时 marker 从 `collecting` 收尾为 `completed`、`usSnapshotId=verify-snap`、`collectingTypes` 移除 |
+| 现场 | 隔离容器、卷与临时恢复卷按既有纪律保留，未自动清理 |
+
+**边界**：以上只证明代码可运行、收尾分支在隔离环境成立；**未装载、未取得 11-28 之后的新自然轮证据**。不得写成“已修复并经自然轮验证”。
