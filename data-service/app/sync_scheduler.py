@@ -164,6 +164,19 @@ _state: dict = {
 # 那句"`catchUpResolved` 更不许从盘上捞"防的就是"昨天的定案值放到今天"，带日期的形状不受它影响。
 SYNC_STATE_NAME = "sync-state.json"
 
+# CR10-52（2026-11-28 P2）：刷新腿结果**自己落盘**，不再依赖重启后回头问 Web。
+# 为什么必须独立一份、不塞进 marker：`_mark_outcome` / `_mark_attempt` 每次都按固定键
+# 重写 marker（`lastAttempt*` + `lastResult` + `retry`），塞进去的键会在下一次收尾时被
+# 静默丢掉；而这些键的语义不同（marker 管“今天自然轮结局”，本文件管“最近一轮刷新腿
+# 逐类结果”），混在一起会让“收尾覆写”变成一种隐式截断。
+# 落点与 marker 同目录（默认 `data-service/runtime/`，已被 .gitignore 覆盖），
+# 于是离线单测只要覆盖 `SYNC_STATE_FILE` 就自动落到临时目录，不会写仓库里那份真的。
+SYNC_REFRESH_STATE_NAME = "sync-refresh-state.json"
+
+#: 摘要文件保留最近几轮（自然轮 + 补试轮 + 一次手动轮）。太小会把自然轮那份挤掉，
+#: 太大则文件无限长——它是观测状态，不是历史账本。
+REFRESH_STATE_KEEP = 4
+
 
 def _sync_state_path() -> str:
     """落点默认 `data-service/runtime/sync-state.json`（该目录已在 `.gitignore`）。
@@ -194,6 +207,80 @@ def _read_marker() -> tuple[dict | None, str | None]:
     if not isinstance(data, dict):
         return None, "not-an-object"
     return data, None
+
+
+def _refresh_state_path() -> str:
+    """刷新腿摘要落盘路径：与 marker 同目录，`SYNC_STATE_FILE` 覆盖时跟着走。
+
+    跟随 marker 而不是另立一个 env：离线单测只设 `SYNC_STATE_FILE` 一处即可把两份
+    状态都隔到临时目录，避免"marker 隔离了、摘要却写进仓库"这种一半隔离。
+    """
+    env = os.environ.get("SYNC_STATE_FILE", "")
+    if env:
+        return os.path.join(os.path.dirname(env) or ".", SYNC_REFRESH_STATE_NAME)
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(root, "runtime", SYNC_REFRESH_STATE_NAME)
+
+
+def _read_refresh_doc() -> dict:
+    """读整份摘要文件；缺失／损坏／形状不对一律当空文档（不抛，观测位纪律）。"""
+    try:
+        with open(_refresh_state_path(), encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def read_refresh_state(run_id: str | None = None) -> dict | None:
+    """按 `runId` 取一条刷新摘要；不传就取最新那条。
+
+    **为什么按轮次存多份**：自然轮与补试轮是两次独立的刷新腿，写的是同一个文件。
+    只留一份的话，02:30 那次补试会盖掉 02:00 自然轮的逐类缺口——而重启恢复正是要
+    读自然轮那一份（`_recover_last_refresh` 按 marker 的 trigger 算 runId）。
+    于是就会出现"补试成功 ⇒ 自然轮的行情缺口从回执里消失"这一形，即 CR10-51 刚修好
+    的病换了个入口复发。
+    """
+    runs = _read_refresh_doc().get("runs")
+    if not isinstance(runs, list):
+        return None
+    for row in runs:
+        if not isinstance(row, dict):
+            continue
+        if run_id is None or row.get("runId") == run_id:
+            return row
+    return None
+
+
+def _write_refresh_state(refresh: dict) -> bool:
+    """原子写刷新摘要；失败只告警，不拖垮刷新腿自己的结论（CR9-45 同族）。
+
+    保留最近 `REFRESH_STATE_KEEP` 轮：够自然轮 + 补试轮 + 一次手动轮，又不让它无限长。
+    同 `runId` 重复写＝替换（重跑同一轮时以最后一次为准）。
+    """
+    if not isinstance(refresh, dict):
+        return False
+    run_id = refresh.get("runId")
+    if not isinstance(run_id, str) or not run_id:
+        return False
+    doc = _read_refresh_doc()
+    runs = [row for row in (doc.get("runs") or []) if isinstance(row, dict) and row.get("runId") != run_id]
+    runs.insert(0, refresh)
+    path = _refresh_state_path()
+    tmp = path + ".tmp"
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"version": 1, "runs": runs[:REFRESH_STATE_KEEP]}, f, ensure_ascii=False, sort_keys=True)
+        os.replace(tmp, path)
+        return True
+    except (OSError, TypeError, ValueError) as e:
+        log.warning("sync refresh state could not be written: %s", e)
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        return False
 
 
 def read_sync_state() -> dict | None:
@@ -716,7 +803,18 @@ def _refresh_from_web_progress(prog: dict | None, run_id: str) -> dict | None:
 
 
 def _recover_last_refresh() -> dict | None:
-    """DS 重启后的只读恢复；marker 的收集终态与行情刷新结果各自保留。"""
+    """DS 重启后的只读恢复；marker 的收集终态与行情刷新结果各自保留。
+
+    CR10-52（2026-11-28 P2）起**顺序换了**：先读自己落盘的摘要，读不到才回头问 Web。
+
+    为什么先自己：`/sync/status` 是观测接口，而 `status()` 在内存结果缺失时会被每次
+    调用都走一遍恢复路径 ⇒ 把 Web 的 `/api/health` 变成了观测接口的隐性依赖
+    （Web 未就绪、重启中、或根本不该被 DS 观测依赖时，观测接口跟着一起瘸）。
+    落盘摘要没有这个耦合，且 DS 本来就持有这份数据的完整形状。
+
+    Web 那条路**保留为次选**：旧版本没写过摘要文件（升级前的那一轮）仍能被读回来，
+    所以这里不是"删掉一个来源"，而是"换一个首选来源"。
+    """
     marker = read_sync_state() or {}
     result = marker.get("lastResult")
     if not isinstance(result, dict) or result.get("outcome") not in ("completed", "partial_failed", "failed", "skipped"):
@@ -725,6 +823,10 @@ def _recover_last_refresh() -> dict | None:
         return None
     trigger = marker.get("lastAttemptTrigger")
     run_id = f"retry-{beijing_today()}" if trigger == RETRY_TRIGGER else f"daily-{beijing_today()}"
+    # 只认精确 runId：跨日／补试轮／上一轮遗留的摘要都不能冒充本轮。
+    stored = read_refresh_state(run_id)
+    if isinstance(stored, dict):
+        return {**stored, "recoveredFromDisk": True}
     return _refresh_from_web_progress(_refresh_progress(run_id), run_id)
 
 
@@ -835,6 +937,9 @@ def _refresh_leg(trigger: str, force: bool = False, types: list[str] | None = No
     # `_state["lastRefresh"]`（进程跨日不重启时，旧值会一直挂在内存里）。
     out["runId"] = run_id
     out["finishedAt"] = datetime.now(TZ).isoformat(timespec="seconds")
+    # CR10-52：落盘顺序在 return 之前 = “内存里有的、盘上也有”。写失败只留痕，
+    # 不改变本腿已得出的 outcome（它与观测通道无关，CR9-45 同族）。
+    _write_refresh_state(out)
     return out
 
 
@@ -1461,9 +1566,13 @@ def status() -> dict:
     from . import us_list_job
 
     # CR10-51：刷新结果原先只住内存，重启会让 fund/hk 的部分失败从 /sync/status 消失。
-    # 按 marker 对应的精确 runId 从 Web 已持久化进度恢复；读不到就是 None，不猜、不改原文件。
+    # 按 marker 对应的精确 runId 恢复；读不到就是 None，不猜、不改原文件。
+    # CR10-52：首选 DS 自己落盘的摘要（无观测耦合），Web 进度只作旧版本的次选来源。
     in_proc_refresh = _state.get("lastRefresh")
     disk_refresh = None if in_proc_refresh is not None else _recover_last_refresh()
+    refresh_source = None
+    if in_proc_refresh is None and disk_refresh is not None:
+        refresh_source = "disk" if disk_refresh.get("recoveredFromDisk") else "web-progress"
 
     return {
         "running": _state["running"],
@@ -1477,7 +1586,11 @@ def status() -> dict:
         "skippedReason": _state.get("skippedReason"),
         # 刀 3/甲-1：刷新腿那份结果（含它自己的 outcome／预算／skippedReason）
         "lastRefresh": in_proc_refresh if in_proc_refresh is not None else disk_refresh,
-        "lastRefreshFromWebProgress": in_proc_refresh is None and disk_refresh is not None,
+        # 兼容位：CR10-51 起就有，义一字不动（“这一份是不是从 Web 进度读回来的”）。
+        "lastRefreshFromWebProgress": refresh_source == "web-progress",
+        # CR10-52：恢复来源要能分辨——`disk`＝本进程自己写过摘要（正常重启），
+        # `web-progress`＝旧版本没写摘要时的次选路径，`null`＝内存里就有、没走恢复。
+        "lastRefreshSource": refresh_source,
         # CR10-49：美股完整名单的持久化任务状态。`collecting/waiting` 不是失败，
         # `completed` 只表示完整候选已发布且 us 行情刷新收尾。
         "usListJob": us_list_job.status(),

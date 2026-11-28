@@ -162,109 +162,38 @@
 
 ### 阶段 1：实现幂等终态收尾
 
-在 `sync_scheduler.py` 增加内部收尾函数，建议名 `_finalize_collecting_from_us()`，具体名称按现有约定确定。
+在 `sync_scheduler.py` 增加内部收尾函数（最终名 `_finalize_collecting_from_us()`）。
 
-收尾判据必须同时满足：
-
-- `lastAttemptTrigger == "daily"`；
-- `lastAttemptOutcome == "collecting"`；
-- `lastAttemptDate` 与美股 `completedDate` 一致；
-- 该日期仍是当前北京日期；
-- 美股 `state=completed` 且 `refreshOutcome=completed`；
-- 原五类结果没有其他类型错误；
-- 写盘前重新读取并复核，避免覆盖新一轮状态。
-
-以下情况保持原状：
-
-- `waiting`、`refresh_pending`、`publish_unknown`；
-- 美股未完成；
-- 原轮次是 `partial_failed`、`inconclusive` 等其他结局；
-- 日期不一致；
-- W3 补试轮。
-
-收尾数据规则：
-
-- 保留 `lastAttemptTrigger=daily` 与原始尝试时刻；
-- 五类 `results` 逐项保持不变；
-- 只把 `us` 的 `collecting` 占位替换为真实发布结果；
-- 移除已完成使命的 `collectingTypes`；
-- 写入 `outcome=completed` 和相应的 `ok`；
-- 增加审计字段：`finalizedFrom=collecting`、`finalizedAt`、`usSnapshotId`、`usCompletedAt`；
-- 不伪造新的整轮网络耗时；
-- 不创建 W3 补试；
-- 不重新发布、不重新刷新、不产生网络请求；
-- `lastRefresh.outcome=partial_failed` 原样保留。
-
-三个幂等入口：
-
-1. **美股完成回调**：`us_list_job` 持久化 `completed` 后通知 DS 收尾；调用时不得持有美股任务锁，采用局部导入避免循环依赖。
-2. **主轮写入 `collecting` 后再检查一次**：防止美股恰好在读取状态与写 marker 之间完成。
-3. **DS 启动恢复时检查一次**：如果进程重启前已完成美股但收尾写盘失败，启动后根据持久化状态补齐，不重跑任务。
+| 组 | 条件／规则 |
+|---|---|
+| 必须同时满足 | `lastAttemptTrigger=daily`；`lastAttemptOutcome=collecting`；`lastAttemptDate`＝美股 `completedDate`＝当前北京日；美股 `state=completed` 且 `refreshOutcome=completed`；原五类无其他类型错误；写盘前重读复核，避免覆盖新一轮 |
+| 保持原状 | `waiting`／`refresh_pending`／`publish_unknown`；美股未完成；原轮为 `partial_failed`／`inconclusive` 等其它结局；日期不一致；W3 补试轮 |
+| 数据规则 | 保留 `lastAttemptTrigger=daily` 与原始尝试时刻、五类 `results` 逐项不变、`lastRefresh.outcome=partial_failed` 原样；只把 `us` 占位替换为真实发布结果；移除 `collectingTypes`；写 `outcome=completed` 与相应 `ok`；加审计字段 `finalizedFrom`／`finalizedAt`／`usSnapshotId`／`usCompletedAt`；不伪造整轮耗时、不建 `retry`、不重发布重刷新、不发网络请求 |
+| 幂等入口 | ① 美股持久化 `completed` 后通知 DS（不持任务锁、局部导入防循环依赖）；② 主轮写入 `collecting` 后再复核一次（防读状态与写 marker 之间完成）；③ DS 启动恢复时检查一次（补齐写盘失败，不重跑任务） |
 
 收尾写盘失败只记录错误，不回滚美股完成状态，也不通过重复网络请求“补救”。
 
 ### 阶段 2：测试与取证器补强
 
-DS 必测：
-
-- `collecting → completed` 正常收尾；
-- 重复收尾不重复写盘；
-- 完成发生在主轮写状态前后的两种竞态；
-- DS 重启后可以收尾；
-- `waiting/refresh_pending/publish_unknown` 不提前完成；
-- 原轮 `partial_failed` 不被美股完成覆盖；
-- 跨日记录不被修改；
-- `daily-retry` 不被修改；
-- 收尾不调用采集、发布或刷新接口；
-- 收尾不生成 `retry`；
-- 五类 `lastRefresh.partial_failed` 保留。
-
-watcher 补强：
-
-- 保持 `collecting` 为非终态；
-- 模拟“先 collecting、后 completed”，确认只有后者被封为自然终态；
-- 从 `/sync/status` 顶层正确记录 `lastRefresh`，避免只记名单成功而丢失 fund/hk 行情缺口；
-- 不放宽 `requirements_met()`。
-
-Web 核对：
-
-- 运行现有 W4、新鲜度和同步相关测试；
-- 确认新增字段不破坏现有读取；
-- 本轮没有自然失败，不得宣称 W4 失败展示获得自然证据。
+| 面 | 必测／必做 |
+|---|---|
+| DS | `collecting → completed` 正常收尾；重复收尾不重复写盘；完成发生在主轮写状态前后的两种竞态；DS 重启后可收尾；`waiting/refresh_pending/publish_unknown` 不提前完成；原轮 `partial_failed` 不被美股完成覆盖；跨日与 `daily-retry` 不被修改；收尾零采集／发布／刷新请求；不生成 `retry`；五类 `lastRefresh.partial_failed` 保留 |
+| watcher | 保持 `collecting` 为非终态；模拟“先 collecting、后 completed”，只把后者封为自然终态；从 `/sync/status` 顶层正确记录 `lastRefresh`；不放宽 `requirements_met()` |
+| Web | 运行现有 W4／新鲜度／同步测试；确认新增字段不破坏读取；本轮没有自然失败，不得宣称 W4 失败展示获得自然证据 |
 
 ### 阶段 3：离线门禁与隔离验收
 
-1. DS 定向测试。
-2. Web 定向测试与 `tsc --noEmit`。
-3. `node scripts/gate.mjs --offline`。
-4. docs 基线、断链与 selftest。
-5. 构建新的 DS 候选镜像，使用独立标签。
-6. 使用现有正式 Web 镜像进行隔离 Compose 验收。
-7. 核对候选容器内确实包含新收尾函数与对应行为。
+DS 定向 → Web 定向与 `tsc --noEmit` → `node scripts/gate.mjs --offline` → docs 基线／断链／selftest → 构建独立标签的 DS 候选镜像 → 用现有正式 Web 镜像跑隔离 Compose → 核对候选容器内确实含新收尾函数与对应行为。
 
-任何一项失败均不进入正式部署。不通过降低判据或修改原始样本换绿。
+任何一项失败均不进入正式部署；不通过降低判据或修改原始样本换绿。
 
 ### 阶段 4：正式部署与回退
 
-部署原则：
-
-- 只重建 DS，Web 保持现有健康实例，避免无意义切换。
-- 不动 `prisma-data`、`backups/`、调度配置和代理。
-- 不执行同步、热点、备份或补试接口。
-- 保留当前 DS 镜像 `w1w4-1127-accept`（`740c16a5981a`）作为第一回退点。
-
-部署后硬判据：
-
-- DS 容器 healthy，镜像 ID 与候选一致；
-- 同步下一轮仍为当前注册时刻；
-- 备份下一轮仍为 03:30；
-- 热点下一轮仍为 11-30；
-- 没有启动补跑、人工同步或新增网络采集；
-- 数据库行数和六类摘要不因部署变化；
-- `retry` 不因收尾被创建；
-- 若启动恢复自动收尾了 11-28 状态，必须记录为“部署后依据既有持久化结果完成的派生收尾，不是新代码完整自然轮证据”。
-
-回退：出现容器不健康、状态被错误改写、意外任务触发或数据库异常时，DS 切回 `740c16a5981a`；保留新状态文件和日志用于归因；不删除新旧卷、备份及恢复卷；不通过人工同步验证回退。
+| 组 | 内容 |
+|---|---|
+| 部署原则 | 只重建 DS，Web 保持现有健康实例；不动 `prisma-data`／`backups/`／调度／代理；不执行同步、热点、备份、补试接口；保留 `w1w4-1127-accept`（`740c16a5981a`）为第一回退点 |
+| 部署后硬判据 | DS healthy 且镜像 ID 与候选一致；同步下一轮、备份 03:30、热点 11-30 注册时刻未变；无启动补跑／人工同步／新增采集；数据库行数与六类摘要不变；`retry` 不被创建；若启动恢复收尾了 11-28，必须记为“派生收尾，不是新代码完整自然轮证据” |
+| 回退 | 容器不健康、状态被错误改写、意外任务触发或数据库异常时切回 `740c16a5981a`；保留新状态文件与日志用于归因；不删新旧卷／备份／恢复卷；不通过人工同步验证回退 |
 
 ### 阶段 5：下一次自然轮验收
 
@@ -368,7 +297,7 @@ Web 核对：
 1. 优先运行 watcher，取得逐时观测与 `finishedAt` 终态。
 2. 未运行不使自然轮无效，改按持久化结果事后取证：`/sync/status` 的 `lastAttemptTrigger`／`at`／`outcome`、`lastResult.finalizedFrom`／`finalizedAt`、`usSnapshotId`、五类结果、`lastRefresh`、`backup/state.json` 与备份文件、独立恢复回执。
 3. 事后取证必须注明“缺逐时观测”，不得据此声称取得 watcher 终态。
-4. 判读纪律：`lastRun=null` 不等于没跑；重启后以 `lastResultFromDisk`／`lastRefreshFromWebProgress` 与美股任务 `state` 为准。
+4. 判读纪律：`lastRun=null` 不等于没跑；重启后以 `lastResultFromDisk`／`lastRefreshSource`／`lastRefreshFromWebProgress` 与美股任务 `state` 为准（CR10-52 装载后首选 `disk`，`web-progress` 只表示走的是旧版本兼容路径）。
 5. 白天开机若触发启动补跑，只能记 `startup-catchup`，不得替代 `trigger=daily`。
 
 ### 10.5 P1：交付收尾
@@ -474,3 +403,47 @@ Web 核对：
 | 回退 | DS `w1w4-1127-accept`＝`740c16a5981a` 保留；Web 未重建 |
 
 **这是部署后依据既有持久化结果完成的派生收尾，不是新代码完整自然轮证据。** 11-28 的自然轮结论仍是“未全过”；只有下一次真实自然窗口通过阶段 5，才可写“已修复并经自然轮验证”。
+
+## 12. P2 实施进展（2026-11-28 14:50，代码/离线/隔离完成，**未装载**）
+
+按 §10.6 在机器不可用期间推进的两项，只产出离线与隔离证据，**不改正式实例、不计入自然轮**。
+
+### 12.1 CR10-52：刷新摘要持久化（消除 `/sync/status` 对 Web 的依赖）
+
+| 项 | 内容 |
+|---|---|
+| 动因 | `_recover_last_refresh()` 在内存结果缺失时每次 `/sync/status` 都只读访问一次 Web `/api/health`；观测接口因此隐性依赖另一个服务。 |
+| 落盘件 | 新增 `data-service/runtime/sync-refresh-state.json`（`SYNC_REFRESH_STATE_NAME`），与 marker 同目录、随 `SYNC_STATE_FILE` 一起隔离，已被 `.gitignore` 覆盖。 |
+| 形状 | `{"version":1,"runs":[...]}`，每条即一份完整 `lastRefresh` 形状（含 `runId`/`outcome`/`weakTypes`/`results`/`finishedAt`）。 |
+| 按轮次分槽 | `REFRESH_STATE_KEEP=4`；同 `runId` 重写＝替换。**理由**：自然轮与 W3 补试轮是两次独立刷新腿，共用一个键时 02:30 补试会盖掉 02:00 自然轮的 fund/hk 缺口，等于让 CR10-51 刚修好的病换个入口复发。 |
+| 读点顺序 | `_recover_last_refresh()` 改为**先读自己的摘要**，读不到才回落 Web 进度；后者保留为旧版本兼容路径，不是被删除的来源。 |
+| 新增状态位 | `lastRefreshSource`＝`disk`／`web-progress`／`null`；`lastRefreshFromWebProgress` 义一字不动。`recoveredFromDisk=true` 标在恢复出来的那份上。 |
+| 写失败 | 只 `log.warning`，不改变刷新腿已得出的 `outcome`（CR9-45 同域纪律）。 |
+
+### 12.2 watcher 离线测试补强（`test_cr10_38_natural_watch.py` 17 → 38 项）
+
+补的是此前只有手工验证、没有入库牙齿的那几条：
+
+1. `collecting` 不进 `TERMINAL`，也不封存 `naturalSync`（11-28 的病根）。
+2. `collecting → completed` 之后才封存，封的是最终结局。
+3. 名单终态先到、刷新腿后收尾 ⇒ 只补 `lastRefresh` + `lastRefreshObservedAt`，不改已封存的 outcome；缺口在则 `requirements_met()` 仍为假。
+4. 上一轮 `lastRefresh` 不冒充本轮：`runId` 优先，无 `runId` 退回 `finishedAt`，两者都没有当未知。
+5. watcher 从未运行过时，仅凭 `/sync/status` + `/backup/state.json` 两份持久化读数即可封存三条腿并判定满足——这是 §10.4「事后取证」在代码层真的成立。
+
+### 12.3 验证读数
+
+| 层级 | 结果 | 回执 |
+|---|---|---|
+| 定向 | CR10-52 新增 **22/22**；CR10-38 **38/38**；CR10-51 **26/26**；CR9 同步状态 **77/77**；W3 补试 **83/83** | 各套件直跑 |
+| 全量离线门禁 | **全绿**：`tsc` 0 error、Vitest **747/747**、DS **43 套 1616/1616**、docs `NEW=0／KNOWN=0/0`、selftest PASS、断链 0 | `gate1-105-1128-1339.out`（同绿的前一轮 `gate1-103-1128-1332.out`） |
+| 隔离 Compose | **30/30**，项目 `invest-verify-11332` | 候选镜像 `cr1052-1128-cand`＝`115e11e08cc1` |
+| 候选容器内行为 | 预置 marker + 摘要后 `status()` ⇒ `lastRefreshSource=disk`、`outcome=partial_failed`、`weakTypes=[fund,hk]`、**`webCalls=[]`**（零网络） | 一次性容器内实跑 |
+| 正式实例 | **未改动**：DS 仍 `cr1051-1128-accept`＝`41651e9cd259`、Web `w1w4-1127-accept`，均 healthy，`StartedAt` 未变 | `docker inspect` |
+
+**边界**：以上全部为离线／隔离证据，标「离线验收」。候选镜像已构建但**未装载**，正式 `/sync/status` 仍走 Web 恢复路径（`lastRefreshFromWebProgress=true`、`lastRefreshSource=null`），符合 §10.6“P0 前不正式装载”。
+
+### 12.4 仍未取得
+
+- 下一次完整自然轮：`collecting → completed` 一次收尾、五类结果保留、03:30 备份与恢复（§10.3）。
+- CR10-52 在**真实重启**下的读数（本次只有隔离容器内一次性验证）。
+- W1～W4 各自的自然分支。

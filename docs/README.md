@@ -21,6 +21,8 @@ P0–P7 主功能已完成；round4 完整七套、真实 LLM 对话/工具链�
 
 **11-28 最新：** 02:00 自然同步六类名单均到货（fund 28,452／stock 5,931／bond 1,068／crypto 249／hk 4,754／us 3,343），美股任务 923/923、02:26:39 完成；03:30 备份与独立恢复通过。**原同步总状态停在 `collecting`，watcher 于 11:38:57 按原逻辑到 deadline；五类行情 `partial_failed`（fund 2、hk 10 空批次）⇒ 本轮未全过。** CR10-51 已提交 `c9a516d`、`f88ebb3`，定向 26/26、门禁 42 套 1578/1578、隔离 30/30、冒烟 8/8；正式 DS 已装载 `cr1051-1128-accept`（`41651e9cd259`），Web 未重建。11:47 启动恢复对既有结果完成**派生收尾**，不是新自然轮证据；总状态现显示 `completed`，但 `lastRefresh` 仍从 Web 持久化结果恢复为 `partial_failed`，fund/hk 缺口不被掩盖。**下一次真实自然窗口仍待验证**；**11-29 因夜间机器不运行记为“未发生自然窗口”，不判失败、不人工补跑**；W2/W3/W4 与 W1 显式代理未获自然证据。详见 [11-28 复核](history/2026-11-28-同步collecting终态收尾修复与自然轮复核.md)。
 
+**11-28 P2（离线验收，未装载）：** 机器不可用期间按计划推进两项，均只产出离线／隔离证据，不计入自然轮。① watcher 离线测试 `test_cr10_38_natural_watch.py` 17→38 项，补上 `collecting` 不终态、`completed` 才封存、名单终态先到只补 `lastRefresh`、上一轮刷新不冒充本轮、watcher 从未运行仍可凭持久化读数判读——§10.4「事后取证」不再是只写在文档里的话。② **CR10-52**：刷新腿结果自己落盘（`runtime/sync-refresh-state.json`，按 `runId` 分槽保留 4 轮，自然轮与 W3 补试轮互不覆盖），`_recover_last_refresh()` 先读摘要、读不到才回落 Web 进度，新增 `lastRefreshSource=disk/web-progress/null` —— 消除了 `/sync/status` 对 Web `/api/health` 的隐性依赖。新增套件 22/22；总闸 `gate1-105-1128-1339.out` 全绿（tsc 0、Vitest 747/747、DS 43 套 1616/1616、docs 全过）、隔离 30/30、候选容器内 `status()` 零网络。**候选镜像 `cr1052-1128-cand` 未装载，正式实例仍 `cr1051-1128-accept`；真实重启读数仍未取得。** 读数见同文件 §12。
+
 ## 文档地图
 
 | 你要做什么 | 读哪个文件 | 说明 |
