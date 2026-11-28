@@ -105,7 +105,22 @@
 - `ChatSession` / `ChatMessage`：统一 Agent 对话历史（含工具调用记录）
 - `Watchlist`：自选产品（搜索排序加权）
 - `SearchClickLog`：搜索点击日志（query, code, ts）——点击率进入搜索排序分
-- `KlineDaily`：日 K 增量缓存（code, date, ohlcv, source）——由 Next.js BFF 维护（miss 时回源 data-service 再 upsert），历史日 K 不变只拉增量，详情页秒开；分钟级实时数据仍走内存缓存，不落库。data-service 保持无状态
+- `KlineDaily`：日 K 增量缓存（code, date, ohlcv, source）——由 Next.js BFF 维护（miss 时回源 data-service 再 upsert），历史日 K 不变只拉增量，详情页秒开；分钟级实时数据仍走内存缓存，不落库。data-service 不写业务库（**不是完全不落盘**：限速计数、热点状态、同步 marker、美股采集检查点与刷新摘要都在它自己的 `runtime/`／`/data/runtime/` 下，随 `.gitignore` 或卷隔离；见「总体架构」与 CONSTRAINTS §D）
+
+## 运行态持久化清单（data-service 侧，2026-11-28 现值）
+
+以下都不是业务数据，写入方只有 DS 自己；命名卷 `prisma-data` 挂 `/data`，容器内路径以 `docker-compose.yml` 为准：
+
+| 文件／目录 | 作用 | 宿主开发态路径 |
+|---|---|---|
+| `sync-state.json` | 同步 marker：`lastAttempt*`、`lastResult`、`retry` 计划、`collecting` 语义 | `data-service/runtime/` |
+| `sync-refresh-state.json` | 刷新腿摘要，按 `runId` 分槽保留 4 轮（CR10-52） | 与 marker 同目录 |
+| `us-list-job/` | 美股持久化采集的 `generations/<snapshotId>/` 页文件、manifest、candidate（CR10-49） | `data-service/runtime/us-list-job/` |
+| `hotspot-state.json` | 热点调度状态位与尝试 marker | `data-service/runtime/` |
+| `limiter-state.json` | 源族限速计数（CR9-69） | `data-service/runtime/` |
+| `refresh-progress.json` | **Web 侧**刷新进度账本（含 `runId`／`runs` 按轮隔离） | `web/runtime/` |
+
+DS 对业务库只有一处读：备份作业以只读 URI 打开 `web/prisma/dev.db` 取在线备份快照（`backup_scheduler.py` 的 `_source_db()`）。
 
 ## 分模块设计
 
@@ -120,6 +135,17 @@
   - **⚠️ 10-18 23:2x 现值更正（只增这一行，上面那句原样留着）＝`inconclusive` 不是码上也不是屏上的字面**：现查 `grep inconclusive web/**`（非测试文件）＝**0 命中**；web 侧降级的真载体＝`degraded`＋`note` 两枚（与「场内基金行业配置」那一支的 `unavailable`、事件区新闻降级支同形）。`inconclusive` 在码上只住 `sync_scheduler.py`＝**同步腿读超时的第三态**（`ok=None`＋`outcome="inconclusive"`），与"搜索无 key 降级"无关 ⇒ **P3 那句按字面永远跑不过**＝判据载体选错那一形（同「④ 的读数面」那条 甲 的处置）。验收改按真载体读；编号＝`FIX-LEDGER` `#93`（本轮按现值更正闭掉，零码、不占 CR 号）。
 - **G2 落地（2026-09-19）**：产品主数据每日自动同步——data-service `app/sync_scheduler.py`（APScheduler，默认 02:00 Asia/Shanghai，`SYNC_HOUR`/`SYNC_MINUTE` 可覆盖）+ 启动补跑，回调 web `POST /api/sync`；状态端点 `/sync/status`、手动触发 `/sync/run`。此前仅手动触发。
 
+- **现行同步与恢复设计（2026-11-26～11-28 定，CR10-49／W3／CR10-51／CR10-52；细节证据在 history，稳定契约如下）**：
+  1. **普通轮只同步五类**（`fund/stock/bond/crypto/hk`），**美股走独立持久化任务**（`app/us_list_job.py`）；普通轮的行情刷新也排除 `us`，us 由发布成功后单独刷新。五类收尾而 us 未完成时，整轮状态记 `collecting`——**它不是终态成功也不是失败**。
+  2. **美股按页持久化续跑**：按 `snapshotId` 建 generation，每页先落带 SHA-256 的页文件再更新 manifest；重启按页内容重建可信集合，已完成页不重复购买；1500s 降为**单轮突发采集上限**（到期进 `waiting`，下一轮继续），不再是整条腿的失败线。
+  3. **完整候选经 Web 幂等发布**：DS POST `/api/sync/us-snapshot`，发布账本 `Product_snapshot_publication` 与正式 `Product` 替换在**同一 SQLite 事务**内；同一 `snapshotId` 重试只回执不重写；结果未知进 `publish_unknown`，明确拒绝进 `blocked`。采集阶段只写 runtime 检查点，不写业务库。
+  4. **有界补试（W3）**：仅自然 `daily` 轮的 `partial_failed` 安排**一次**延迟 30 分钟的补试，只补失败类型、排除 `us`、不带 `force`（仍受 Web 当日幂等闸门约束）；`inconclusive`、手动轮、启动补跑都不繁衍补试；补试**不改写**自然轮的 `lastAttempt*`／`lastResult`，刷新范围也只覆盖补试类型。
+  5. **`collecting` 幂等收尾（CR10-51）**：只有当日 `daily/collecting`、`collectingTypes` 含 `us`、五类无 `failedTypes` 与逐类 `error`，且美股当日已发布并刷新完成，才派生为 `completed`；收尾只回写状态，不重复采集/发布/刷新，写盘前重读 marker 比对以防覆盖竞态。入口三处：主轮写盘后复查、美股完成通知、DS 启动恢复。
+  6. **刷新结果自己落盘（CR10-52）**：刷新腿收尾写 `runtime/sync-refresh-state.json`，按 `runId` 分槽（自然轮 `daily-<date>`、补试轮 `retry-<date>`）保留最近 4 轮；重启恢复**先读本摘要**、读不到才按精确 `runId` 回落 Web 持久化进度；`lastRefreshSource` 取 `disk|web-progress|null`，`/sync/status` 不再隐性依赖 Web 健康。
+  7. **出网按源族（W1）**：国内源与容器间调用强制直连（`direct_proxies()`／`direct_session()`），**不依赖 `NO_PROXY` 是否写得全**；海外源读 `HTTPS_PROXY`／`HTTP_PROXY`，未配则按直连尝试，共享 Session 用 `trust_env=False` 让显式代理真正生效。**不设全局代理**。
+  8. **A 股名单 fail-closed（W2）**：东财 `clist/get` 是**唯一可发布源**；东财失败时新浪只取诊断计数，返回空候选＋`acquisitionComplete=false`，Web 在暂存表之前零写入并保留旧数据；两源皆失败保留双方错误、如实失败。
+  9. **失败透明展示（W4）**：Web 读共享卷上的同步 marker（不新增外部请求），当日失败立即标历史快照／无数据并给出原因，当日成功但来源降级单独显示，`skipped` 不算失败；**当前这套判据只消费名单同步结果，不消费 `lastRefresh`**——五类行情的 `partial_failed` 不进这条提示链，属已声明范围而非漏实现。
+
 - **P3 补强（2026-09-12 评估定稿）**：
   - **新闻双源 + 自动降级（R12）**：Tavily（经本地代理）优先；不可达时自动切换东财/新浪新闻源（AkShare，国内可达），digest 与界面显式标注降级状态——原"仅站内数据"降级无热点可发，替换为国内源降级；启动第一步做连通性 spike
   - **复用 P2 新闻/公告 provider**：热点发酵验证与相关个股事件交叉直接调用，不另写新闻抓取
@@ -132,7 +158,7 @@
 - 每日全量同步产品列表到 `Product`（走 data-service provider 层，A股/基金走 AkShare，加密走 OpenBB/CoinGecko）——**自动调度见 M1「G2 落地」**
 - **完整候选快照与提交隔离（2026-11-21，CR10-40）**：
   1. **us 页义务与有界恢复**：`US_LIST_DEFAULT_PAGES=950` 是页预算上限，不是完整性的证明，也不再按「末不满页即早停」。由稳定 `declared` 计算 `expectedPages` 与每页应取行数；网络、HTTP、JSON/JSONP 解析及短页异常均按同页义务恢复，每轮最多 3 次总尝试，首轮后最多 2 轮集中修复并更换 Session。配置页预算不足、仍有未解决页或看门狗耗尽，整份候选失败。
-  2. **候选完整性证明**：所有声明页均解决，原始行数与代码去重数均等于稳定声明，映射无重复/缺码，尾页符合页位预期，声明范围之后的穷尽页必须为空。任何后续响应的声明与首页不同，立即丢弃候选并失败；不自动重采或拼接两个时点。新浪没有快照令牌，这是可观测完整性证明，不宣称数学上的原子快照。
+  2. **候选完整性证明**：所有声明页均解决，原始行数与代码去重数均等于稳定声明，映射无重复/缺码，尾页符合页位预期，声明范围之后的穷尽页必须为空。任何后续响应的声明与首页不同，即**废弃当前 generation 并清空 `snapshotId`**（进入 `waiting`，随后由新一轮采集自动建 generation 重采）；**禁止的是跨声明拼页**——旧 generation 的已完成页一律不得与新声明混用，不是"不自动重采"（2026-11-28 口径修正；实现见 `data-service/app/us_list_job.py` 的 generation 废弃分支）。新浪没有快照令牌，这是可观测完整性证明，不宣称数学上的原子快照。
   3. **采集与产品口径分账**：完整原始候选通过后才执行「没有行业标签即剔除」。响应以 `acquisitionComplete` 表示上游采集完整性，以 `productPolicySubset` 表示既定产品口径子集，并保留 `declaredCount`/`acquiredCount`；`intentionalSubset` 只作兼容键，不再承担缺采与产品筛选两种语义。
   4. **Web 零写入与提交**：`acquisitionComplete=false` 时在读取旧库计数、生成行和建立暂存表之前返回失败；即使同时带 `products` 或 `intentionalSubset` 也不得写正式 Product。完整采集但 `intentionalSubset=true` 且 `productPolicySubset=false` 同样拒绝；完整采集＋产品口径子集才可进入原有 70% 缩水闸，阈值不放宽。只有可提交候选才沿用暂存表和小事务替换。
   5. **hk 与等价备源**：东财主源校验稳定声明、跨页唯一代码及映射行数，全部通过才交付。**CR10-42 已接入港交所官方中英文证券表作为等价备源**：双表代码唯一、名称/分类非空、日期一致且同代码集合；保留 Equity、REIT、ETP、Debt 四类，重置错误 worksheet dimension，旧表超过 7 天或预发布超过 3 天仍拒绝。新浪没有声明总数且覆盖不等价，只保留诊断读数、永不返回产品行。任何后续新备源仍须验证完整覆盖/穷尽条件、字段语义、重复缺失、证券类别和与现有源的集合差；验证未通过或全源持续不可用时，保留最后一份完整数据并显式失败，不以重试或声明绕过。
@@ -426,10 +452,10 @@ INGEST_TOKEN=
 CHAT_CONTEXT_BUDGET=24000       # 聊天历史上下文字符预算（lib/context-budget.ts）
 LLM_DEBUG=                      # 设 1 时输出 LLM 请求日志（默认静默）
 
-# ---- P7 预留 ----
-HTTP_PROXY=                      # 容器经 host.docker.internal 走宿主机代理（R12 海外源）
-HTTPS_PROXY=                     # **海外源可达性的开关**（R12）：`main.py` 的 `NO_PROXY=*` 会连带屏蔽 Windows 注册表系统代理 ⇒ 两处都不设则 CoinGecko 不可达、加密主数据 0 行（CR9-41）。**生效路径有两条（09-27 A7 探针更正）**：① 与 uvicorn 同行内联 export（端到端已实测）② 填进 `data-service/.env` 或 `web/.env`——`app/config.py:17-20` 的 `_ENV_FILES` 会读这两份并 `setdefault` 进 `os.environ`（机制已证，端到端待验）。**原写的"data-service 不加载任何 .env"不成立，已废**
-NO_PROXY=
+# ---- 出网（W1 起按源族；**不设全局代理**，当前值为空） ----
+HTTP_PROXY=                      # 只由海外源消费（CoinGecko／yfinance／Tavily／HKEX）；容器内写 host.docker.internal
+HTTPS_PROXY=                     # 同上，优先于 HTTP_PROXY（`utils/http.py` 的 `_env_proxy()`）。**留空＝海外源按直连尝试**，不虚构地址
+NO_PROXY=                        # 仅作补充；国内源与容器间调用由 `direct_proxies()`／`direct_session()` 显式直连，**不依赖本变量写得全**
 
 # ---- data-service 侧 ----
 WEB_API_BASE=http://localhost:3000   # MCP search_products 回调 web BFF 的地址
@@ -480,6 +506,7 @@ US_LIST_PAGES=950                # 美股页预算上限；按稳定声明建立
 - **Skills 上下文膨胀**：仅注入元信息、命中时才加载正文的机制必须先行，防止技能增多后 system prompt 失控
 - **行情实时性**：免费源延迟约 15 分钟级，页面标注数据时间
 - **海外 API 可达性（Tavily/OpenBB/CoinGecko）**：~~已实测 CoinGecko 在当前网络不可达~~ → **09-27 更正（CR9-41）：可达，但必须给 data-service 显式 `HTTPS_PROXY`**——`main.py:12` 的 `NO_PROXY=*`（为保护国内源直连）会连带屏蔽 Windows 注册表系统代理，而 CoinGecko 只能走该代理；配好即 `/products?type=crypto` 250 只、BTC 真价。根因**不是"外网不通"**，同类海外源按同一法子和同一判据逐家实测（09-27 另两家：币安 `451` 地区封锁、CoinGecko 10s 间隔即 `429` ⇒ "可达"≠"可高频"）。对策见 R12（本地代理优先 + 自动降级国内源并显式提示）
+  - **2026-11-27 现值更正（W1，只增这一条；上一格原句不回改）**＝"必须配 `HTTPS_PROXY` 才可达"不再是普遍事实：现行实现按**源族**分别出网（`data-service/app/utils/http.py`）——海外源读 `HTTPS_PROXY`／`HTTP_PROXY`，**未配时按直连尝试**（当前仓库代理值即为空，CoinGecko／yfinance／Tavily／HKEX 直连可间歇成功、也可能 `SSLEOFError`），国内源与容器间调用一律显式直连。上一格那两句仍成立的部分只有"根因不是外网不通"与"可达≠可高频"。
 - **LLM function calling 兼容性**：目标暂定 DeepSeek + GLM（均支持原生 FC）；P4 启动时做双家 FC spike 验证，工具抽象预留"原生 FC / prompt 工具模式"双模式兜底
 - **TradingAgents 集成不确定性**：依赖重、data-access contract 可能随版本变、分钟级高成本——spike 先行 + 版本冻结 + B 计划（见 M5 补强），为全项目技术风险最高点
 - **东财反爬限流被放大**：P3 板块成分批量调用与 P5 vendor_adapter 回读会放大请求量，P2 的 `KlineDaily` 缓存是前置依赖，必须先行做扎实；**已落地对策（R15/M8）**：按源族限速（东财 IP 级封禁 → 多域名共享令牌桶）+ 连续失败熔断冷却 + 主备源自动降级
@@ -531,6 +558,6 @@ US_LIST_PAGES=950                # 美股页预算上限；按稳定声明建立
 - **O 系列优化 12 项**（2026-09-13 批准并全部执行完成）——明细见 [history/2026-09-13-cr1-全项目审查与O系列明细.md](history/2026-09-13-cr1-全项目审查与O系列明细.md)
 - **P5 引擎选型**：B 计划 `custom-multichar` 为主力（见 M5 落地定稿）
 - **MCP client 自研**（不引入官方 SDK）：理由见 M7 ②
-- **美股甲+→乙全量**（2026-11-12 主人拍板，四项全做之一）：接受夜间预算踩线先盯；执行＝代码默认 950 页上限＋早停按实盘（首跑实测盘子 18,377⇒919 页）、整条预算链八枚同改（ds 看门狗 1500s＜web us 预算 1800s＜传输层 2700s；web sync maxDuration 2400＜ds SCHEDULED 2500）；行业闸（#32 的 (2)）不变 ⇒ 库行数≈3300+ 而非 18000+。**2026-11-21 CR10-40 起「末不满页早停」作废，950 仅为页预算上限，完整性按 M2 的声明页、去重、映射和穷尽空页证明。**读数与出网账见 [history/2026-11-12-cr10-20-r20-美股乙轮明细.md](history/2026-11-12-cr10-20-r20-美股乙轮明细.md)
+- **美股甲+→乙全量**（2026-11-12 主人拍板，四项全做之一）：接受夜间预算踩线先盯；执行＝代码默认 950 页上限＋早停按实盘（首跑实测盘子 18,377⇒919 页）、整条预算链八枚同改（ds 看门狗 1500s＜web us 预算 1800s＜传输层 2700s；web sync maxDuration 2400＜ds SCHEDULED 2500）；行业闸（#32 的 (2)）不变 ⇒ 库行数≈3300+ 而非 18000+。**2026-11-21 CR10-40 起「末不满页早停」作废，950 仅为页预算上限，完整性按 M2 的声明页、去重、映射和穷尽空页证明。** **2026-11-28 补：这条「ds 看门狗 1500s」已不是整条美股腿的成败判据——1500s 现为单轮突发采集上限（`us_list_job.py::_burst_timeout_s()`），到期进 `waiting` 并跨轮续采；现行不变量只剩「传输层上限 > 最大单次 ds 预算」与「web 2400 < ds 2500」，见 [CONSTRAINTS.md](CONSTRAINTS.md) C35 之二。** 读数与出网账见 [history/2026-11-12-cr10-20-r20-美股乙轮明细.md](history/2026-11-12-cr10-20-r20-美股乙轮明细.md)
 - **PE 分位接受近似口径并如实标注**（2026-11-12 主人拍板）：真 PE 历史分位需历史 peTtm 序列（库里没有、采集成本高得多）；近似＝盈利不变假设下按价格分位折算，屏上标签带「近似」＋整行口径说明 ⇒ R20
 - **三枚写入口来源守卫补齐**（2026-11-12 主人拍板，CR10-20）：watchlist DELETE／chat/sessions PUT／chat/sessions/[id] DELETE 补 `checkRequestOrigin`，推翻 CR10-12 账上「外站驱动不到、刻意没挂」那半句（旧拍板原文不回改）；仍不挂 write token（浏览器持不住密钥）；覆盖面尺升级到全部写方法（13 枚 handler＝11 守卫＋2 在册 ingest）

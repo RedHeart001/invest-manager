@@ -11,7 +11,9 @@
 
 > ⚠️ **11-08 现值更正（只增这一行；上面那句 `C1–C34` 与下面速览里那句「34 条」一律不回改）**＝本文件现已有 **36** 条：C35 立于 11-07（传输层上限必须高于业务预算，CR10-14）、**C36 立于 11-08**（外部名单的业务键唯一性是假设，CR10-15）。两条都是**跨层**约束（一个在传输层、一个在落库键层），因此各自独立成块挂在第五批之后，没有回头改编号。**别把两个数读成矛盾**：`C1–C34` 说的是"按来源审查轮次分五批"的那 34 条，C35／C36 属 CR10 的两枚新发现、不在这五批里。
 
-> **速览**：改代码前必查本文件。§A 是 34 条不得回退的工程约束（C1–C34，按来源审查轮次分五批）；§B 是跨服务/跨语言契约坑（两侧各自解析的参数最易静默出错）；§C 是数据源与外部依赖的实测事实（转债 C-1 / 依赖定版 C-2 / 港股 C-3 / 主备源矩阵 C-4）；§D 是部署与容器化约束。
+> ⚠️ **11-28 计数追加（只增这一行；上面两句「36 条」与「现已有 36 条」一律不回改）**＝本文件现已有 **41** 条：新增 **C37–C41** 作为第六批，全部来自 CR10 的同步与出网系列（C37 出网按源族、CR10 W1；C38 名单唯一可发布源 fail-closed、W2；C39 自动补试有界、W3；C40 `collecting` 非终态＋幂等收尾＋失败上屏、CR10-49／51／W4；C41 运行态持久化与恢复优先级、CR10-52）。与 C35／C36 同样独立成批、不回头改编号 ⇒ **速览里那句「34 条」与 11-08 那句「36 条」都是当时读数，现值读 C1–C41**。
+
+> **速览**：改代码前必查本文件。§A 是不得回退的工程约束（C1–C34 按来源审查轮次分五批，另加跨层的 C35–C41）；§B 是跨服务/跨语言契约坑（两侧各自解析的参数最易静默出错）；§C 是数据源与外部依赖的实测事实（转债 C-1 / 依赖定版 C-2 / 港股 C-3 / 主备源矩阵 C-4 / 请求扇出 C-5）；§D 是部署与容器化约束。
 
 ## A. 工程约束（C1–C34，不得回退）
 
@@ -90,7 +92,9 @@
 >
 > **验收要求**：断言不许只验"装了没报错"，必须用**本地慢 server + 真 dispatcher** 双向验证（上限调小 ⇒ 在上限处断且成因码正确；上限调大 ⇒ 撑过延迟成功）。参照 `web/lib/data-service.test.ts` 的「传输层上限真的生效」那组。
 
-> **C35 现值更正（2026-11-12，美股乙；上面判据本体只增不改）**＝`TRANSPORT_CEILING_MS` 900_000 → **2_700_000**（1.5×新最大业务预算）；`/products` 预算改按类型取（`productsBudgetMs(type)`，常量住 `web/lib/data-service.ts`）＝**us 1_800_000／其余 600_000**。三层不变量＝**ds 看门狗（us 1500s）＜ web 业务预算（us 1800s）＜ 传输层上限（2700s）**；另一条＝web sync `maxDuration` 2400 ＜ ds SCHEDULED 回调 2500（「web 先结束」口径不变）。`data-service.test.ts` 那枚断言已从抄死 600_000 改为**从生产常量算** `max(PRODUCTS_BUDGET_MS, US_PRODUCTS_BUDGET_MS, QUOTE_TIMEOUT_MS)`＝钉真不变量。读数见 [history/2026-11-12-cr10-20-r20-美股乙轮明细.md](history/2026-11-12-cr10-20-r20-美股乙轮明细.md)。
+> **C35 现值更正（2026-11-12，美股乙；上面判据本体只增不改）**＝`TRANSPORT_CEILING_MS` 900_000 → **2_700_000**（1.5×新最大业务预算）；`/products` 预算改按类型取（`productsBudgetMs(type)`，常量住 `web/lib/data-service.ts`）＝**us 1_800_000／其余 600_000**。当时的三层不变量＝ds 看门狗（us 1500s）＜ web 业务预算（us 1800s）＜ 传输层上限（2700s）；另一条＝web sync `maxDuration` 2400 ＜ ds SCHEDULED 回调 2500（「web 先结束」口径不变）。`data-service.test.ts` 那枚断言已从抄死 600_000 改为**从生产常量算** `max(PRODUCTS_BUDGET_MS, US_PRODUCTS_BUDGET_MS, QUOTE_TIMEOUT_MS)`＝钉真不变量。读数见 [history/2026-11-12-cr10-20-r20-美股乙轮明细.md](history/2026-11-12-cr10-20-r20-美股乙轮明细.md)。
+
+> **C35 现值更正之二（2026-11-28，CR10-49；上面两段原句不回改）**＝**「ds 看门狗 us 1500s」不再是美股主路径的失败线**。`US_LIST_WHOLE_TIMEOUT_S=1500` 现读作**单轮突发采集上限**（`us_list_job.py:421-425` 的 `_burst_timeout_s()`，可用 `US_LIST_BURST_TIMEOUT_S` 覆盖）：到期不是整腿失败，而是进 `waiting`、下一轮按页检查点继续。因此现行不变量只有两条：**（a）`TRANSPORT_CEILING_MS` 必须大于全仓最大单次 ds 预算**（现值 2_700_000 > us 1_800_000 > 600_000）；**（b）web sync `maxDuration` 2400 < ds SCHEDULED 回调 2500**。旧的三层链（1500 < 1800 < 2700）作为**兼容预算**仍自洽，但它描述的是单次请求的最坏耗时，不是整条美股腿的成败判据——把 1500s 当"整腿必然失败线"会读错现行设计。
 
 > **C36 外部名单的「业务键唯一性」是假设，不是事实；去重口径必须在所有消费路径同解（2026-11-08 立，CR10-15；来源＝crypto 类长期 0 行）**
 >
@@ -101,6 +105,62 @@
 > **落地**：`crypto_provider._unique_by_symbol()` 留**首次出现**（＝市值靠前，与 `_market_item` 里 `for` 首匹配的既有语义一致），去重住在 `_fetch_markets()` **缓存层**——一处去重 ⇒ 单发／批量／名单三处自动同解。三个坑：① 去重**不能**只加在 `list_products`（那会让名单留 A、`get_quotes` 留 B——实测过的既有缺陷：`out[symbol]=…` 裸覆盖使同一 `USDF` 两处两个价）；② 丢行**要留痕**但**不许挂 `degraded`**（那是"上游劣化"的键，挂它等于把我们的唯一键说成上游的锅，会每晚往屏上拼一句假降级）；③ 不许顺手改 `@@unique`——唯一键是全站口径。
 >
 > **验收要求**：必须有 🔁 牙齿证明"换成相反口径（留末次）套件会红"，并单独断言三条消费路径交出同一个 `name`／`price`。参照 `data-service/tests/test_cr10_15_crypto_symbol_dedup.py` 的 ③④ 两组。
+
+### 第六批（C37–C41，来自 CR10 的同步与出网系列，2026-11-27／11-28）
+
+> 这五条都是"改同步、出网或失败展示前必须自查"的跨层约束：一条在出网层、两条在数据可信层、两条在状态机层。与 C35／C36 同理，独立成批、不回头改编号。
+
+> **C37 出网必须按源族声明，禁止全局代理（2026-11-27 立，W1；来源＝11-27 自然轮 crypto/hk/stock 同时降级）**
+>
+> **约束**：凡是出网，**必须由代码显式声明**这一发属于哪个源族，不许依赖 `NO_PROXY` 是否写得全，也不许设全局代理。国内源（东财 CDN／新浪／腾讯）与容器间调用**强制直连**；海外源（CoinGecko／yfinance／Tavily／HKEX）**读显式代理、未配则按直连尝试**。
+>
+> **为什么**：本机是"海外源要代理、国内源必须直连"的混合环境。国内源一旦被代理，实测直接从可用变成 `ProxyError`（11-27 探针：`push2.eastmoney.com` 直连 200／3518ms，套同一枚代理即 `ProxyError`），而东财是 IP 级滚动限流、路径错了整条腿就废。反向也不成立——海外源直连会间歇 `SSLEOFError(8)`。中间的"靠 `NO_PROXY` 兜底"更危险：容器里 `NO_PROXY` 默认不含 `web`/`data-service`，一旦填了 `HTTPS_PROXY`，连 `POST http://web:3000/api/sync` 这种内部调用都会被拦。
+>
+> **落地**：唯一收敛点 `data-service/app/utils/http.py`，两个语义互斥的出口——`direct_proxies()` 返回 `{"http": None, "https": None}`（**不是空字典**：`requests.merge_environment_settings` 对 env 代理用 `setdefault`，只有键已存在且值为 `None` 才压得住，`{}` 会被 env 原样填回来）；`overseas_proxies()` 配了就有、没配返回 `None`。海外请求另用 `trust_env=False` 的共享 Session，因为 `main.py` 默认把 `NO_PROXY` 设为 `*`，`select_proxy` 会因此绕过一切 env 代理 ⇒ 只有显式传 `proxies=` 才真正生效。
+>
+> **验收要求**：`test_w1_http_egress.py` 用**真 env + 真 merge** 反锁住"`direct_proxies()` 不是空字典"这一条（换成 `{}` 必须红）；断言未配代理时海外源走直连而不是虚构地址；容器间调用在两枚代理变量都填了的情况下仍然直连。
+
+> **C38 名单类数据的「唯一可发布源」失败时必须 fail-closed（2026-11-27 立，W2；来源＝11-27 A 股整类被新浪替换）**
+>
+> **约束**：名单类数据（`stock`／`us`／`hk`…）在"主源不可用、备源覆盖面不等价"时，**必须返回空候选并显式失败**，不许拿备源整类替换正式数据。备源可保留**诊断计数**，但不得返回产品行。
+>
+> **为什么**：11-27 自然轮 A 股名单在东财失败后整类换成新浪，行数与代码口径都不同；这类替换在屏上与"上游真是这批"长得一模一样，事后只能翻日志定性。等价的证伪条件写不出来，就不该让它进正式表。
+>
+> **落地**：`akshare_provider.py::_list_stocks`（`:1182`）里东财 `clist/get` 是**唯一可发布源**；失败时新浪只取计数，返回空候选＋`acquisitionComplete=false`。Web 侧（`web/lib/sync.ts::_syncTypeInner`）见到 `acquisitionComplete=false` 在**读旧库计数、生成行、建暂存表之前**返回失败，正式 `Product` 零写入、旧数据保留。等价备源（如 hk 的 HKEX）必须先证明"完整覆盖＋字段语义＋集合差"才允许接管，见 §C-4。
+>
+> **验收要求**：`web/lib/sync-shrink.test.ts` 覆盖"不完整候选零写入"与"非产品口径子集拒绝"两枚反例；DS 侧断言备源路径返回空候选而非部分行。
+
+> **C39 自动补试必须有界：只补自然轮的失败类型、只一次、不带 `force`（2026-11-27 立，W3）**
+>
+> **约束**：自动重试**只能**由自然 `daily` 轮的 `partial_failed` 触发，且必须同时满足：**只一次**、只补失败类型、**排除 `us`**、不带 `force`。`inconclusive`、手动轮、启动补跑一律不繁衍补试。补试**不得改写**自然轮的 `lastAttempt*`／`lastResult`。
+>
+> **为什么**：没有上界时一次上游抖动会繁衍出一串重试，既烧上游额度，也让"这一夜到底发生了什么"变成不可读的混合账；带 `force` 则绕过 Web 当日幂等闸门。补试若改写自然轮结局，`legStaleness` 等派生判断会跟着算错。
+>
+> **落地**：`sync_scheduler.py` 的 `retry` 键是**正交于** `lastAttempt*` 的一位（"今天补不补" vs "今天自然轮结局"），`RETRY_TRIGGER="daily-retry"`、`RETRY_DELAY_S=30min`；`_retry_types_from()` 排除 `us`；`_retry_worker` 起动前校验 `lastAttemptTrigger` 仍是 `daily`；幂等靠 `_transition_retry` 的条件迁移，并发到点只有一个能迁。
+>
+> **验收要求**：断言 `inconclusive`／手动轮／启动补跑都不生成 `retry` 计划；断言补试前后 `lastAttempt*` 一字不变；断言两次到点只产生一次补试。
+
+> **C40 「更新中」不是终态，且失败必须能落到屏上（2026-11-28 立，CR10-49／CR10-51／W4）**
+>
+> **约束**：① 五类名单收尾而美股持久化任务未完成时，整轮状态记 `collecting`——**它既不是成功也不是失败**，任何判据不得把它读成终态。② `collecting → completed` 的派生收尾必须**幂等**：只回写状态，不重复采集／发布／刷新，写盘前重读 marker 比对。③ 当日失败必须在界面上表现为"历史快照／无数据＋原因"，不得显示成中性或成功；`skipped` 不算失败。
+>
+> **为什么**：CR10-49 之前 us 是在普通轮里跑的一条腿，整腿超时＝整轮失败；改成持久化任务后，如果还拿"五类收尾"当整轮终态，观测端会在 us 仍在采集时判出一个假的 `completed`。反过来，收尾若不幂等，三个入口（主轮写盘后复查、美股完成通知、DS 启动恢复）会各自触发一次发布／刷新。
+>
+> **落地**：`sync_scheduler.py::_finalize_collecting_from_us()`（`:385-487`）——进入条件是当日 `daily/collecting`＋`collectingTypes` 含 `us`＋五类无 `failedTypes` 与逐类 `error`＋美股当日已发布并刷新完成；`CHAINED_OUTCOMES` 含 `collecting`。Web 侧 `web/lib/freshness.ts` 四态、`web/lib/sync-state.ts` 读共享卷 marker（不新增外部请求）。
+>
+> **边界（别扩大解读）**：W4 这套判据**只消费名单同步结果，不消费 `lastRefresh`**——五类行情的 `partial_failed` 不进这条提示链。这是已声明范围，不是漏实现；要补需新的需求字。
+>
+> **验收要求**：`test_cr10_38_natural_watch.py` 断言 `collecting` 不终态、`completed` 才封存、上一轮刷新不冒充本轮；`test_cr10_52_refresh_state_persist.py` 断言收尾不重复发布／刷新；Web 侧断言 `skipped` 不渲染为失败。
+
+> **C41 运行态持久化：写自己落盘、恢复有优先级、按轮分槽（2026-11-28 立，CR10-52）**
+>
+> **约束**：观测接口（如 `/sync/status`）**不得隐性依赖另一个服务的健康**。刷新腿收尾必须自己落摘要；重启恢复的优先级是**先读本地摘要、读不到才回落跨服务来源**；同一轮次的结果按 `runId` 分槽保存，不同轮次不得互相覆盖。
+>
+> **为什么**：CR10-51 的恢复逻辑在内存结果缺失时按 `runId` 只读访问 Web `/api/health`，等于让 DS 的观测面挂在 Web 上——Web 未就绪时观测一起瘸。而"自然轮"与"W3 补试轮"若共用一枚键，02:30 的补试会盖掉 02:00 自然轮的 fund/hk 缺口，正好抹掉要看的东西。
+>
+> **落地**：`sync_scheduler.py` 写 `runtime/sync-refresh-state.json`（随 `SYNC_STATE_FILE` 隔离），按 `runId` 分槽（自然轮 `daily-<date>`、补试轮 `retry-<date>`），保留 `REFRESH_STATE_KEEP=4` 轮、同 `runId` 重写＝替换。`_recover_last_refresh()` 先读摘要、读不到才回落 Web 持久化进度（兼容路径，来源未删）；新增 `lastRefreshSource=disk|web-progress|null`，`lastRefreshFromWebProgress` 含义一字不动。写盘失败**只告警、不改本腿 `outcome`**——落盘是观测设施，不是业务判据。
+>
+> **验收要求**：`test_cr10_52_refresh_state_persist.py` 22/22：多轮分槽、跨日与补试轮不冒充自然轮、摘要损坏静默回落、写失败不改结论；候选容器内 `status()` 零网络（`webCalls=[]`）。
 
 > **C28 现值更正（2026-10-30，只增这一段；上面 C26–C33 表里 C28 那行原句不回改）**＝C28 正文那句
 > 「头部缺口补齐分支与尾部增量分支**都必须同时判断** `lastFailed` 与 `lastChecked`」按现行代码应读成
@@ -221,6 +281,12 @@
 >
 > ⚠️ **现值更正（2026-11-21 CR10-40；上面「新浪全量交付/第二腿」自此不再是现行设计）**：跑完新浪自己的页序不等于与东财产品集合等价。新浪无声明总数，11-21 诊断读数约 2,806 行，相对正式东财数据约 4,751 行且名称口径不同；当前 `_list_products_sina` 最终抛 `ProviderError`，**不返回产品行或 `intentionalSubset`，不得用于全表替换**。东财主源须校验稳定声明、跨页唯一代码及映射行数；持续失败时保留旧数据并诚实失败。**2026-11-22 CR10-42 已接入港交所官方中英文证券表备源：双表代码唯一、名称/分类非空、日期一致且同代码集合；保留 Equity、REIT、ETP、Debt 四类，重置错误 worksheet dimension，旧表超过 7 天或预发布超过 3 天仍拒绝。新浪继续只作诊断。**后续新独立源仍须先验证覆盖/穷尽条件、字段语义、证券类别和集合差，未通过不得接入。
 
+> ⚠️ **§C-4 现值追加（2026-11-28；上面各段原句不回改）**＝两件事同时变了，别按上表的旧读法执行：
+>
+> **(1) 出海不再"必须显式配 `HTTPS_PROXY` 才可达"**。现行按源族出网（`app/utils/http.py`，见 §A C37）：海外源读 `HTTPS_PROXY`／`HTTP_PROXY`，**未配时按直连尝试**；当前仓库两枚代理值即为空，CoinGecko／yfinance／Tavily／HKEX 直连可间歇成功、也可能 `SSLEOFError`。上表"加密"那格仍成立的部分只有 `NO_PROXY=*` 会让 env 代理失效这条机制，以及"可达≠可高频"（`429`／`451` 是外部事实，不因出网改造而变）。
+>
+> **(2) 新浪不再是港股列表的交付腿**。11-21 CR10-40 起它只留诊断计数（无声明总数、覆盖不等价）；11-22 CR10-42 起**港交所官方中英文证券表**才是等价备源。上表"港股 列表"行与本节 10-22／14:3x 两段里"第二腿＝新浪全量"的读法，自 11-21 起作废。
+
 ---
 
 ### C-5 东财请求扇出：一个"逻辑请求"≠ 一个 HTTP 请求（2026-09-26 实测）
@@ -269,3 +335,5 @@
 | **可选进一步瘦身（未做，评估记录）** | ① 把 `prisma migrate deploy` 拆成独立 one-shot 服务，web 镜像可再省 67MB；② 项目未使用 `next/image`，`@img/sharp` 46MB 理论上可去（需验证 `next start` 不强制加载）；③ musl/wasm 平台变体已在本轮裁剪（省 165MB） |
 | **C31 进程降权历史待验项** | 见 §A 第四批 C31：2026-10-31 四条判据已全绿；2026-11-14 起 Docker 解除暂缓并成为最终日常部署主线。这里只保留历史条目，正式空卷和后续验收状态见 FIX-LEDGER |
 | **容器 DNS 与 `host.docker.internal`（2026-11-24 CR10-46）** | 正式 Compose 用 gitignored `docker-compose.override.yml` 给 `data-service`/`web` 固定 `dns: [223.5.5.5, 223.6.6.6]`；**自定义 dns 会顶掉 Docker Desktop 的 `host.docker.internal`，必须同时写 `extra_hosts: host.docker.internal:host-gateway`**，否则 crypto/yfinance/Tavily 代理腿整体失效且报错像上游不可用。`.env` 的 `DS_IMAGE/WEB_IMAGE` 仍是旧标签，正式装载须用进程级 `$env:` 覆盖，不得裸跑 `docker compose up -d`。11-24 实测容器 DNS 生效、别名 `192.168.65.254`、国内外域名可解析；DS/Web 健康、Product 43,240、完整性 `ok`，stock 与 crypto 冒烟各 200。 |
+| **代理只作用于海外源，且不许设成全局（2026-11-27 W1；见 §A C37）** | compose 把 `HTTP_PROXY`／`HTTPS_PROXY`／`NO_PROXY` 透传给 DS，但**是否用它们由代码按源族决定**：国内源与容器间调用走 `direct_proxies()`／`direct_session()` 强制直连，海外源走 `overseas_session()`（`trust_env=False`）。**当前两枚代理值保持为空**，海外源按直连尝试。若为某海外源配代理，只写 `data-service/.env` 或 compose 的 `environment`，**不要在 shell 里 export 成全局代理**——那会连 `POST http://web:3000/api/sync` 一起拦掉，且 `NO_PROXY` 默认不含 `web`/`data-service`，兜不住。 |
+| **`/sync/status` 不得依赖 Web 健康（2026-11-28 CR10-52；见 §A C41）** | 刷新腿收尾自己写 `runtime/sync-refresh-state.json`（随 `SYNC_STATE_FILE` 走隔离卷），重启恢复先读它、读不到才回落 Web 持久化进度。⇒ 观测 DS 不需要 Web 在场；反过来，**Web 未就绪时读到的是"更旧的本地摘要"而不是"观测失败"**，判读时要看 `lastRefreshSource`（`disk`／`web-progress`／`null`）。 |

@@ -8,12 +8,12 @@
 |---|---|
 | [docs/PLAN.md](docs/PLAN.md) | 需求与设计（单一来源）：R 需求、M1–M8 模块、实施阶段、配置项、验证方式、决策记录 |
 | [docs/PROGRESS.md](docs/PROGRESS.md) | 执行进度账本：状态总览 + 倒序日志 + 阻塞与问题 |
-| [docs/CONSTRAINTS.md](docs/CONSTRAINTS.md) | 改代码前必自查：C1–C34 约束、跨服务契约坑、数据源事实、部署约束 |
+| [docs/CONSTRAINTS.md](docs/CONSTRAINTS.md) | 改代码前必自查：C1–C41 约束、跨服务契约坑、数据源事实、部署约束 |
 | [docs/CODE-REVIEW.md](docs/CODE-REVIEW.md) | 各轮代码审查发现了什么（只增不改）+ 轮次↔编号↔commit 对照表 |
 | [docs/FIX-LEDGER.md](docs/FIX-LEDGER.md) | 每项修了没、怎么验的；未闭环看板置顶 |
 | [docs/history/](docs/history/) | 归档：逐项做法、改动文件清单、一次性操作记录 |
 
-> **现值更正（2026-11-07 立；2026-11-12 复核补到 C36；上面表格里「C1–C34」那句原样不回改）**＝约束已增至 **C36**（C35＝传输层上限必须高于业务预算，CR10-14 立；C36＝外部名单业务键唯一性是假设，CR10-15 立；见 [docs/CONSTRAINTS.md](docs/CONSTRAINTS.md)）⇒ 现读「C1–C36」。同轮新增一个服务端入口文件 `web/instrumentation.ts`（Next 启动钩子，只做一件事：装 undici 的传输层上限），它不是页面也不是路由，`pnpm dev`／`next build` 会自动加载，**不需要**改启动命令。
+> **约束计数口径**：C1–C34 按来源审查轮次分五批；C35～C36 是 CR10 的两条跨层发现（传输层上限必须高于业务预算、外部名单业务键唯一性是假设）；C37～C41 是 11-27／11-28 的同步与出网系列（按源族出网、名单唯一可发布源 fail-closed、补试有界、`collecting` 非终态与失败上屏、运行态持久化与恢复优先级）⇒ 现读 **C1–C41**（见 [docs/CONSTRAINTS.md](docs/CONSTRAINTS.md)）。另：`web/instrumentation.ts` 是 Next 启动钩子（只装 undici 传输层上限），`pnpm dev`／`next build` 自动加载，**不需要**改启动命令。
 
 ## 结构
 
@@ -21,35 +21,34 @@
 web/           Next.js（App Router + TS + Tailwind + Prisma/SQLite）
 web/skills/    技能目录（Anthropic Agent Skills 格式：skills/<name>/SKILL.md）
 web/mcp.json   第三方 MCP server 白名单（不自动安装）
-data-service/  Python FastAPI（AkShare/OpenBB 数据适配层，无状态）
+data-service/  Python FastAPI（AkShare/OpenBB 数据适配层，不写业务库；运行态落 runtime/）
                app/mcp_server.py 把统一行情能力暴露为 MCP server
 scripts/       容器冒烟脚本
 ```
 
 ## 本地启动
 
-> **现值更正（2026-10-30，只增这一行；下面 `1) data-service 2) web` 的编号原句不回改）**＝
-> **起服务顺序必须是「先 web、后 ds」**，本块下面的编号顺序会让人反着起：
-> ds 启动约 5s 后热点补跑要 `GET` web 的 `/api/hotspots/ingest`，**web 不在**时当天热点补跑直接跳过
-> 且该进程不再重试（当天热点就丢了）。权威配方见 [docs/README.md](docs/README.md) 的「常用命令」：
-> ds 要 `SYNC_CATCHUP=off`、`PYTHONPATH=.`、用 `.venv/Scripts/python.exe`、**不带** `--reload`、
-> **不手设** `NO_PROXY`；`HTTPS_PROXY` 由 `data-service/.env` 供。
+> **顺序是「先 web、后 ds」**：ds 启动约 5s 后热点补跑要 `GET` web 的 `/api/hotspots/ingest`，**web 不在**时当天热点补跑直接跳过，且该进程不再重试（当天热点就丢了）。
+> 权威配方见 [docs/README.md](docs/README.md) 的「常用命令」。ds 侧四条必要条件：`SYNC_CATCHUP=off`（只关启动补跑，不影响每日 cron）、`PYTHONPATH=.`、解释器用 `.venv/Scripts/python.exe`、**不带** `--reload`；**不要手设** `NO_PROXY`。
 
 ```bash
-# 1) data-service（终端 1）
-cd data-service
-python -m venv .venv
-.venv/Scripts/pip install -r requirements.txt     # Windows
-# 如需海外数据源（CoinGecko 加密行情，R12），先设置本地代理（按实际端口）：
-set HTTPS_PROXY=http://127.0.0.1:7897             # cmd；PowerShell 用 $env:HTTPS_PROXY="http://127.0.0.1:7897"
-.venv/Scripts/uvicorn app.main:app --port 8000
-
-# 2) web（终端 2）
+# 1) web（终端 1）—— 必须先起
 cd web
 npm install
 npx prisma migrate dev       # 首次运行建库
 npm run dev                  # http://localhost:3000
+
+# 2) data-service（终端 2）
+cd data-service
+python -m venv .venv
+.venv/Scripts/pip install -r requirements.txt          # Windows
+SYNC_CATCHUP=off PYTHONPATH=. .venv/Scripts/python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+# PowerShell 写法：
+#   $env:SYNC_CATCHUP="off"; $env:PYTHONPATH="."
+#   .venv/Scripts/python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
+
+> **代理只在需要海外源时才配，且不做全局代理**：海外源（CoinGecko／yfinance／Tavily／HKEX）读 `HTTPS_PROXY`／`HTTP_PROXY`，未配时按直连尝试；国内源与容器间调用一律显式直连，不依赖 `NO_PROXY` 是否写得全（`data-service/app/utils/http.py`）。当前仓库的代理值保持为空，海外源直连实测可用；要配就写进 `data-service/.env`（`config.py` 会加载），**不要**在 shell 里 export 成全局代理。
 
 ### MCP（P6，可选）
 
@@ -90,7 +89,7 @@ docker compose down          # 停止（保留数据卷）
 | 时区 | TZ=Asia/Shanghai（APScheduler 盘前 08:30 / 盘后 16:30 不错时） |
 | 密钥 | 一律经 `.env` 注入，不进镜像；`INGEST_TOKEN` / `WRITE_TOKEN` 未设置或为空时 compose 拒绝启动 |
 | 镜像源 | docker.io 直连受限，默认走 `docker.m.daocloud.io` 前缀（可用 `NODE_IMAGE` / `PY_IMAGE` 覆盖） |
-| 代理 | R12 海外源：`.env` 里设 `HTTPS_PROXY=http://host.docker.internal:<port>`；`NO_PROXY` 已含服务名 |
+| 代理 | R12 海外源：需要代理时在 `.env` 里设 `HTTPS_PROXY=http://host.docker.internal:<port>`；**容器内代理只作用于海外源，国内源与容器间调用走显式直连**，不靠 `NO_PROXY` 兜底（当前代理值为空，海外源按直连尝试） |
 
 **MCP HTTP（可选 profile）**
 
@@ -114,7 +113,18 @@ docker compose start web
 
 复制 `web/.env.example` 为 `web/.env`；LLM/搜索 API key 按阶段启用（见 [docs/PLAN.md](docs/PLAN.md) 配置项）。
 
-## 测试（双服务启动后运行）
+## 测试
+
+**离线门禁（不需要起服务、零出网）**：
+
+```bash
+node scripts/gate.mjs            # 一条命令跑完：tsc --noEmit／vitest／ds 离线逐套／docs 闸
+node scripts/gate.mjs --offline  # 同上，显式标注离线
+```
+
+抬头会写它对着哪一棵树与已跟踪 diff；回执落在 `data-service/runtime/gate1-*.out`。**③④ 要买上游额度，不在这一条里**（定档＝人工到场）。
+
+**双服务启动后运行的验收脚本**：
 
 ```bash
 cd web
@@ -129,10 +139,6 @@ node scripts/test-p6.mjs        # P6 Skills + MCP 验收（需 web + data-servic
 cd ../data-service
 .venv/Scripts/python tests/test_p6_mcp.py        # MCP 工具暴露/降级；含真实报价请求，须授权后单独运行（非离线）
 .venv/Scripts/python tests/test_p2_m8.py         # 多源降级与限速（离线）
-
-# 闸1（OPT-4）：一条命令跑完四道零出网门禁（tsc／vitest／ds 离线逐套／docs 闸）
-# 抬头会写它对着哪一棵树；③④ 要买上游额度，不在这一条里（定档＝人工到场）
-cd .. && node scripts/gate.mjs
 ```
 
 注意：东财对短时高频请求限流（连接被重置），验收失败若为 502/空 K 线，先冷却几分钟再重试；测试脚本已内置节流与退避。

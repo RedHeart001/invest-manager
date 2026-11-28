@@ -133,6 +133,20 @@ def history_docs(root):
     return sorted(glob.glob(os.path.join(root, "docs", "history", "*.md")))
 
 
+def index_docs(root):
+    """活跃导航索引：`docs/history/README.md` 自身。
+
+    它**不是**历史快照（同目录下按日期命名的那些才是），而是现在仍在维护的入口，
+    所以它的链接要像 `docs/*.md` 一样扫。历史快照正文不扫：55 个文件里 324 条相对
+    链接是当年语境的产物，重写它们等于篡改历史；只修索引、不动快照。
+
+    11-28 之前这里漏了它自己 —— `link_scan` 只遍历 `active_docs`，于是这个文件里
+    9 条指向不存在文件的链接一路无人发现（它们已在同轮改为「缺失档案登记」）。
+    """
+    path = os.path.join(root, "docs", "history", "README.md")
+    return [path] if os.path.exists(path) else []
+
+
 def relpath(root, path):
     return os.path.relpath(path, root).replace(os.sep, "/")
 
@@ -646,6 +660,23 @@ def link_scan(root):
                 counts["secname"] += 1
                 if not os.path.exists(os.path.join(root, "docs", m.group(1))):
                     broken.append("%s: 引用的文件不存在 docs/%s（新形）" % (rel, m.group(1)))
+    # 索引件（`docs/history/README.md`）只扫链接：它的表格里写着「追加二十九～五十三」
+    # 这类**描述性**文字，不是对活标签的引用；对它套追加/第N项/引号节名三把尺全是误报。
+    # 而链接是它唯一的可执行承诺——写到不存在的文件就是导航坏了。
+    for path in index_docs(root):
+        rel = relpath(root, path)
+        for line in line_iter(read(path)):
+            meta = any(k in line for k in META_MARKERS)
+            for m in MD_LINK.finditer(line):
+                target = m.group(1).split("#")[0].strip()
+                if not target or target.startswith(("http:", "https:", "mailto:")):
+                    continue
+                if meta:
+                    counts["meta_exempt"] += 1
+                    continue
+                counts["link"] += 1
+                if not os.path.exists(os.path.normpath(os.path.join(os.path.dirname(path), target))):
+                    broken.append("%s: 链接目标不存在 %s" % (rel, target))
     return broken, counts, len(all_labels)
 
 
@@ -1410,6 +1441,13 @@ def selftest():
                "[本地](CODE-REVIEW.md)好\n")
         _write(os.path.join(root, "docs", "history", "2026-01-01-x.md"),
                "# archived\n\n#### 追加十二 · 归档里的正文\n\n#### 追加十三 · 归档里的另一节\n")
+        _write(os.path.join(root, "docs", "history", "README.md"),
+               "# 归档索引\n\n"
+               "| 文件 | 内容 | 摘要 |\n|---|---|---|\n"
+               "| [在册](2026-01-01-x.md) | 追加十二 | 描述性文字，不是引用活标签 |\n"
+               "| [死链](2026-01-01-gone.md) | 追加一百 | 索引里指向一个没上盘的文件 |\n"
+               "| [跨断链](gone-elsewhere.md#L1) | 第 998 项 | 带锚点也要抓 |\n"
+               "| [豁免](gone-sample.md) | 原文缺失，仅登记 | 这一行写「不存在」⇒ 元文本豁免 |\n")
         broken, counts, labels = link_scan(root)
         joined = "\n".join(broken)
         lc_append, lc_partial, lc_moved = _test_list_closed_evidence()
@@ -1427,6 +1465,12 @@ def selftest():
             # 新形（1a-iii）
             "新形·引号节名落地不误报": "活着的一节」在任何标题" not in joined,
             "新形·引号节名悬空被抓": "查无此节" in joined and counts["secname"] >= 2,
+            # 索引件（11-28 立：此前 `history/README.md` 自身链接不进任何尺，9 条死链一路无声）
+            "索引·悬空链接被抓": "docs/history/README.md: 链接目标不存在 2026-01-01-gone.md" in joined,
+            "索引·带锚点的悬空也抓": "gone-elsewhere.md" in joined,
+            "索引·在册链接不误报": "链接目标不存在 2026-01-01-x.md" not in joined,
+            "索引·元文本豁免仍生效": "gone-sample.md" not in joined,
+            "索引·描述性追加文字不误报": "追加一百" not in joined and "第 998 项" not in joined,
             # 搬动守卫（#61 形状永久回归）
             "越界·按节口径搬行区间必须红": _test_guard_oob(),
             "表格守卫·块内表格行缺表头必须红": _test_guard_table(),
